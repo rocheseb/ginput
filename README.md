@@ -13,6 +13,8 @@ It will generate MOD files both along the vertical above the site location and a
 
 Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT daily files
 
+The first time the code is run the skyfield library will download a file named 'de421.bsp'
+
 ### How to run it ###
 
 python mod_maker.py arg1 geos_path=arg2
