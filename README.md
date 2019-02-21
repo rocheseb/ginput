@@ -11,6 +11,8 @@ used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once usin
 
 It will generate MOD files both along the vertical above the site location and along the sun ray
 
+Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT daily files
+
 ### How to run it ###
 
 python mod_maker.py arg1 geos_path=arg2
@@ -27,7 +29,7 @@ in geos_path/Np you must have all the 42 levels GEOS5-FP-IT files (inst3_3d_asm_
 
 in geos_path/Nx you must have all the surface data files (inst3_2d_asm_Nx)
 
-Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT daily files
+use the code get_GEOS5.py in the 'download' folder to get the necessary files.
 
 ### Where do files go? ###
 
