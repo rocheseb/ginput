@@ -84,13 +84,12 @@ def r_geoid(lat,lon,re,rp):
 
 	return np.sqrt( (cos(lat)**2*re**4+sin(lat)**2*rp**4) / ((cos(lat)*re)**2+(sin(lat)*rp)**2) )
 
-def rv(lat,lon,re,n):
+def rv(lat,re,n):
 	"""
-	Hervé
+	Meridional radius of curvature at lat
 
 	Inputs:
 		- lat : geodetic latitude (radians)
-		- lon : longitude (radians)
 		- re : equatorial radius of Earth (meters)
 		- n : oblateness of Earth (meters)
 
@@ -114,7 +113,7 @@ def geoid_position(lat,lon,re,n):
 		- Cartesian position vector from geoid center to surface at lat,lon
 	"""
 
-	return rv(lat,lon,re,n)*np.array([cos(lat)*cos(lon),cos(lat)*sin(lon),sin(lat)*n**2])
+	return rv(lat,re,n)*np.array([cos(lat)*cos(lon),cos(lat)*sin(lon),sin(lat)*n**2])
 
 def vertical_unit_vector(lat,lon):
 	"""
