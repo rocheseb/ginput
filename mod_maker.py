@@ -88,15 +88,28 @@ import warnings
 from slantify import * # code to make slant paths
 
 def tccon_site_info():
-	# dictionary mapping TCCON site abbreviations to their lat-lon-alt data, and full names
+	"""
+	dictionary mapping TCCON site abbreviations to their lat-lon-alt data, and full names
+
+	To add a new site make up a new two letter site abbreviation and add it to the dictionary following the same model of other sites.
+	
+	For sites the changed location, a 'time_spans' dictionary is used instead of the 'lat'/'lon'/'alt' keys.
+	The keys of this dictionary are pairs of dates in tuples : tuple([start_date,end_date])
+	The values are dictionaries of 'lat'/'lon'/'alt' for each time period.
+	The first date is inclusive and the end date is exclusive. See Darwin for an example.
+
+	If the instrument has moved enough so that the rounded lat and lon is different, then the mod file names will be different for the different time periods.
+
+	the longitudes must be given in the range [0-360]
+	"""
 	site_dict = {
 				'pa':{'name': 'Park Falls','loc':'Wisconsin, USA','lat':45.945,'lon':269.727,'alt':442},
 				'oc':{'name': 'Lamont','loc':'Oklahoma, USA','lat':36.604,'lon':262.514,'alt':320},
 				'wg':{'name': 'Wollongong','loc':'Australia','lat':-34.406,'lon':150.879,'alt':30},
-				'db':{'name': 'Darwin','loc':'Australia','lat':-12.45606,'lon':130.92658,'alt':37},
-				#,tuple([datetime(2005,8,1),datetime(2015,7,1)]):{'lat':-12.422445,'lon':130.89154,'alt':30},
-				#										tuple([datetime(2015,7,1)]):{'lat':-12.45606,'lon':130.92658,'alt':37}
-				#		},
+				'db':{'name': 'Darwin','loc':'Australia','time_spans':{tuple([datetime(2005,8,1),datetime(2015,7,1)]):{'lat':-12.422445,'lon':130.89154,'alt':30},
+														tuple([datetime(2015,7,1),datetime.now()]):{'lat':-12.45606,'lon':130.92658,'alt':37}
+														}
+				},#,'lat':-12.45606,'lon':130.92658,'alt':37},
 				'or':{'name': 'Orleans','loc':'France','lat':47.97,'lon':2.113,'alt':130},
 				'bi':{'name': 'Bialystok','loc':'Poland','lat':53.23,'lon':23.025,'alt':180},
 				'br':{'name': 'Bremen','loc':'Germany','lat':53.1037,'lon':8.849517,'alt':30},
@@ -111,7 +124,7 @@ def tccon_site_info():
 				'ae':{'name': 'Ascenssion Island','loc':'United Kingdom','lat':-7.933333,'lon':345.583333,'alt':0},
 				'eu':{'name': 'Eureka','loc':'Canada','lat':80.05,'lon':273.58,'alt':610},
 				'so':{'name': 'Sodankyla','loc':'Finland','lat':67.3668,'lon':26.6310,'alt':188},
-				'iz':{'name': 'Izana','loc':'Spain','lat':28.0,'lon':344.0,'alt':0},
+				'iz':{'name': 'Izana','loc':'Spain','lat':28.0,'lon':344.0,'alt':2370},
 				'if':{'name': 'Idianapolis','loc':'Indiana, USA','lat':39.861389,'lon':273.996389,'alt':270},
 				'df':{'name': 'Dryden','loc':'California, USA','lat':34.959917,'lon':242.118931,'alt':700},
 				'js':{'name': 'Saga','loc':'Japan','lat':33.240962,'lon':130.288239,'alt':7},
@@ -121,17 +134,30 @@ def tccon_site_info():
 				'rj':{'name': 'Rikubetsu','loc':'Japan','lat':43.4567,'lon':143.7661,'alt':380},
 				'pr':{'name': 'Paris','loc':'France','lat':48.846,'lon':2.356,'alt':60},
 				'ma':{'name': 'Manaus','loc':'Brazil','lat':-3.2133,'lon':299.4017,'alt':50},
-				'sp':{'name': 'Ny-Alesund','loc':'Norway','lat':78.92324,'lon':11.92298,'alt':0},
+				'sp':{'name': 'Ny-Alesund','loc':'Norway','lat':78.92324,'lon':11.92298,'alt':20},
 				'et':{'name': 'East Trout Lake','loc':'Canada','lat':54.353738,'lon':255.013333,'alt':501.8},
 				'an':{'name': 'Anmyeondo','loc':'Korea','lat':36.5382,'lon':126.331,'alt':30},
 				'bu':{'name': 'Burgos','loc':'Philippines','lat':18.5325,'lon':120.6496,'alt':35},
 				'we':{'name': 'Jena','loc':'Austria','lat':50.91,'lon':11.57,'alt':211.6},
+				'ha':{'name':'Harwell','loc':'UK','lat':51.57133,'lon':341.10683,'alt':123},
+				'he':{'name':'Hefei','loc':'China','lat':31.9,'lon':117.17,'alt':34.5},
+				'yk':{'name':'Yekaterinburg','loc':'Russia','lat':57.03833,'lon':59.54500,'alt':0}, # needs alt update
+				'he':{'name':'Hefei','loc':'China','lat':31.9,'lon':117.17,'alt':34.5},
+				'zs':{'name':'Zugspitze','loc':'Germany','lat':47.42,'lon':10.98,'alt':34.5},
 				}
+
 	for site in site_dict:
-		if site_dict[site]['lon']>180:
-			site_dict[site]['lon_180'] = site_dict[site]['lon']-360
+		if 'time_spans' in site_dict[site].keys():
+			for time_span in site_dict[site]['time_spans']:
+				if site_dict[site]['time_spans'][time_span]['lon']>180:
+					site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']-360
+				else:
+					site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']			
 		else:
-			site_dict[site]['lon_180'] = site_dict[site]['lon']
+			if site_dict[site]['lon']>180:
+				site_dict[site]['lon_180'] = site_dict[site]['lon']-360
+			else:
+				site_dict[site]['lon_180'] = site_dict[site]['lon']
 
 	return site_dict
 
@@ -1302,7 +1328,20 @@ def mod_maker_new(start=None,end=None,func_dict=None,GEOS_path=None):
 				box_lon_half_width = 0.5*float(dataset.LongitudeResolution)
 
 		for site in site_dict:
-			site_dict[site]['IDs'] = querry_indices([lat,lon],site_dict[site]['lat'],site_dict[site]['lon_180'],box_lat_half_width,box_lon_half_width)
+			if 'time_spans' in site_dict[site].keys(): # instruments with different locations for different time periods
+				for time_span in site_dict[site]['time_spans']:
+					if time_span[0]<=UTC_date<time_span[1]:
+						site_dict[site]['IDs'] = querry_indices([lat,lon],site_dict[site]['time_spans'][time_span]['lat'],site_dict[site]['time_spans'][time_span]['lon_180'],box_lat_half_width,box_lon_half_width)
+						site_dict[site]['lat'] = site_dict[site]['time_spans'][time_span]['lat']
+						site_dict[site]['lon'] = site_dict[site]['time_spans'][time_span]['lon']
+						site_dict[site]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon_180']
+						site_dict[site]['alt'] = site_dict[site]['time_spans'][time_span]['alt']
+						break
+			else:
+				site_dict[site]['IDs'] = querry_indices([lat,lon],site_dict[site]['lat'],site_dict[site]['lon_180'],box_lat_half_width,box_lon_half_width)
+
+		new_lats = np.array([site_dict[site]['lat'] for site in site_dict])
+		new_lons = np.array([site_dict[site]['lon_180'] for site in site_dict])
 
 		SURF_DATA = {}
 		with netCDF4.Dataset(os.path.join(GEOS_path,'Nx',select_surf_files[date_ID]),'r') as dataset:
@@ -1574,7 +1613,7 @@ def mod_maker_new(start=None,end=None,func_dict=None,GEOS_path=None):
 				mod_file_path = os.path.join(slant_mod_path,mod_name)
 				write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date])
 		print '\ndate {:4d} / {} DONE in {:.0f} seconds'.format(date_ID+1,len(select_dates),time.time()-start_it)
-	print 'DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
+	print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
 
 def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode=None,HH=None,MM=None,UTC=None,time_step=None):
 	"""
@@ -1619,29 +1658,21 @@ def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode
 
 	# will need to handle sites that changed location at some point
 	site_moved = False
-	try:
-		site_lat = site_dict[site_abbrv]['lat']
-	except KeyError:
+	if 'time_spans' in site_dict[site_abbrv].keys(): # instruments with different locations for different time periods
 		site_moved = True
+		for time_span in site_dict[site]['time_spans']:
+			if time_span[0]<=UTC_date<time_span[1]:
+				site_lat = site_dict[site]['time_spans'][time_span]['lat']
+				site_lon_360 = site_dict[site]['time_spans'][time_span]['lon']
+				site_lon_180 = site_dict[site]['time_spans'][time_span]['lon_180']
+				site_alt = site_dict[site]['time_spans'][time_span]['alt']
+				break
 	else:
+		site_lat = site_dict[site_abbrv]['lat']
 		site_lon_360 = site_dict[site_abbrv]['lon']
-		if site_lon_360 > 180:
-			site_lon_180 = site_lon_360-360
-		else:
-			site_lon_180 = site_lon_360
+		site_lon_180 = site_dict[site_abbrv]['lon_180']
 		site_alt = site_dict[site_abbrv]['alt']
-
-	# directions for .mod file name
-	if site_lat > 0:
-		ns = 'N'
-	else:
-		ns = 'S'
-
-	if site_lon_180>0:
-		ew = 'E'
-	else:
-		ew = 'W'
-
+	
 	rmm = 28.964/18.02	# Ratio of Molecular Masses (Dry_Air/H2O)
 	gravity_at_lat, earth_radius_at_lat = gravity(site_lat,site_alt/1000.0) # used in merra/fp mode
 
@@ -1692,15 +1723,19 @@ def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode
 	date_ID = 0
 	while date<end_date:
 
-		# use the local date for the name of the .mod file
-		YYYYMMDD = date.strftime('%Y%m%d')
-		HHMM = date.strftime('%H%M')
-		if time_step < timedelta(days=1):
-			mod_name = '{}_{}_{:0>2.0f}{:>1}_{:0>3.0f}{:>1}.mod'.format(YYYYMMDD,HHMM,round(abs(site_lat)),ns,round(abs(site_lon_180)),ew)
-		else:
-			mod_name = '{}_{:0>2.0f}{:>1}_{:0>3.0f}{:>1}.mod'.format(YYYYMMDD,round(abs(site_lat)),ns,round(abs(site_lon_180)),ew)
-		mod_file_path = os.path.join(mod_path,mod_name)
-		print '\n',mod_name
+		if site_moved:
+			for time_span in site_dict[site]['time_spans']:
+				if time_span[0]<=local_date<time_span[1]:
+					site_lat = site_dict[site]['time_spans'][time_span]['lat']
+					site_lon_360 = site_dict[site]['time_spans'][time_span]['lon']
+					site_lon_180 = site_dict[site]['time_spans'][time_span]['lon_180']
+					site_alt = site_dict[site]['time_spans'][time_span]['alt']
+					break
+		
+		astropy_date = Time(local_date)
+
+		utc_offset = timedelta(hours=site_lon_180/15.0)
+		UTC_date = local_date - utc_offset
 		
 		"""
 		Interpolation time:
@@ -1755,7 +1790,23 @@ def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode
 			INTERP_SURF_DATA['MMW'] = compute_mmw(INTERP_SURF_DATA['H2O_WMF'])
 			INTERP_SURF_DATA['H'] = INTERP_DATA['PHIS']
 
-		# write the .mod file
+		## write the .mod file
+		# directions for .mod file name
+		if site_lat > 0:
+			ns = 'N'
+		else:
+			ns = 'S'
+
+		if site_lon_180>0:
+			ew = 'E'
+		else:
+			ew = 'W'
+
+		# use the local date for the name of the .mod file
+		mod_name = mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path)
+		mod_file_path = os.path.join(mod_path,mod_name)
+		print '\n',mod_name
+
 		version = 'mod_maker_10.6   2017-04-11   GCT'
 		if 'ncep' in mode:
 			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA)
