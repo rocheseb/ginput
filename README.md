@@ -13,7 +13,7 @@ It will generate MOD files both along the vertical above the site location and a
 
 Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT daily files
 
-The first time the code is run the skyfield library will download a file named 'de421.bsp'
+The first time the code is run the skyfield library will download 4 files named 'de421.bsp', 'deltat.data', 'deltat.preds', and 'Leap_Second.dat'
 
 ### How to run it ###
 
@@ -62,7 +62,7 @@ arg3: mode ('ncep', 'merradap42', 'merradap72', 'merraglob', 'fpglob', 'fpitglob
 
 the 'merradap' modes require a .netrc file in your home directory with credentials to connect to urs.earthdata.nasa.gov
 
-arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time, default is local time, add 'UT' to use UTC time (15:30 will be local, 15:30UTC will be UTC)
+arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time in local time
 
 arg5: (optional, default=24) time step in hours (can be decimal)
 

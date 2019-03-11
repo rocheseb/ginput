@@ -18,7 +18,7 @@ arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have
 arg2: two letter site abbreviation (e.g. 'oc' for Lamont, Oklahoma; see the "site_dict" dictionary)
 arg3: mode ('ncep', 'merradap42', 'merradap72', 'merraglob', 'fpglob', 'fpitglob'), ncep and 'glob' modes require local files
 the 'merradap' modes require a .netrc file in your home directory with credentials to connect to urs.earthdata.nasa.gov
-arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time, default is local time, add 'UT' to use UTC time (15:30 will be local, 15:30UTC will be UTC)
+arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time in local time
 arg5: (optional, default=24) time step in hours (can be decimal)
 
 MOD files will be saved under GGGPATH/models/gnd/xx.
@@ -990,7 +990,6 @@ def parse_args(argu=sys.argv):
 		sys.exit()
 	print 'Date range: from',start_date.strftime('%Y-%m-%d'),'to',end_date.strftime('%Y-%m-%d')
 
-	arg_dict['date_range'] = date_range
 	arg_dict['start_date'] = start_date
 	arg_dict['end_date'] = end_date
 
@@ -1013,12 +1012,9 @@ def parse_args(argu=sys.argv):
 			print 'Mode:',mode.upper()
 		if 'time=' in arg:
 			HHMM = arg.split('=')[1]
-			time_input = re.search('([0-9][0-9]):([0-9][0-9])(UTC)?',HHMM).groups()
 			# hour and minute for time interpolation, default is local noon
-			UTC = False
-			time_input = re.search('([0-9][0-9]):([0-9][0-9])(UTC)?',HHMM).groups()
-			if 'UTC' in time_input:
-				UTC = True
+			time_input = re.search('([0-9][0-9]):([0-9][0-9])',HHMM).groups()
+
 			HH = int(time_input[0])
 			MM = int(time_input[1])
 
@@ -1030,11 +1026,9 @@ def parse_args(argu=sys.argv):
 				print 'Need 0<=MM<60'
 				sys.exit()
 		else: # use local noon by default
-			UTC = False
 			HH = 12
 			MM = 0
 
-		arg_dict['UTC'] = UTC
 		arg_dict['HH'] = HH
 		arg_dict['MM'] = MM
 
@@ -1056,23 +1050,23 @@ def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path):
 
 	return mod_name
 
-def GEOS_files(GEOS_path,start,end):
+def GEOS_files(GEOS_path,start_date,end_date):
 
 	# all GEOS5-FPIT Np files and their dates
 	ncdf_list = np.array(os.listdir(GEOS_path))
 	ncdf_dates = np.array([datetime.strptime(elem.split('.')[-3],'%Y%m%d_%H%M') for elem in ncdf_list])
 
-	# just the one between the 'start' and 'end' dates
-	select_files = ncdf_list[(ncdf_dates>=start) & (ncdf_dates<=end)]
-	select_dates = ncdf_dates[(ncdf_dates>=start) & (ncdf_dates<=end)]
+	# just the one between the 'start_date' and 'end_date' dates
+	select_files = ncdf_list[(ncdf_dates>=start_date) & (ncdf_dates<=end_date)]
+	select_dates = ncdf_dates[(ncdf_dates>=start_date) & (ncdf_dates<=end_date)]
 
 	if len(select_dates) == 0:
-		print 'No GEOS files between',start,end
+		print 'No GEOS files between',start_date,end_date
 		sys.exit()
 
 	return select_files,select_dates
 
-def equivalent_latitude_functions_new(ncdf_path,start=None,end=None):
+def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None):
 	"""
 	Inputs:
 		- dataset: global dataset for fp, fp-it, or merra
@@ -1085,7 +1079,7 @@ def equivalent_latitude_functions_new(ncdf_path,start=None,end=None):
 	takes ~ 3-4 minutes per date
 	"""
 
-	select_files, select_dates = GEOS_files(ncdf_path,start,end)
+	select_files, select_dates = GEOS_files(ncdf_path,start_date,end_date)
 
 	print '\nGenerating equivalent latitude functions for {} times'.format(len(select_dates))
 
@@ -1273,13 +1267,13 @@ def show_interp(data,x,y,interp_data,ilev):
 	pl.colorbar()
 	pl.show()
 
-def mod_maker_new(start=None,end=None,func_dict=None,GEOS_path=None):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 	"""
 	This code only works with GEOS-5 FP-IT data.
-	It generates MOD files for all sites between start and end dates on GEOS-5 times (every 3 hours)
+	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
 
-	start: datetime object for first date
-	end:  datetime object for last date
+	start_date: datetime object for first date
+	end_date:  datetime object for last date
 	func_dict: output of equivalent_latitude_functions
 	GEOS_path: full path to the directory containing all the GEOS5-FP-IT files
 	"""
@@ -1295,11 +1289,8 @@ def mod_maker_new(start=None,end=None,func_dict=None,GEOS_path=None):
 	varlist = ['T','QV','RH','H','EPV','O3','PHIS']
 	surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']
 
-	select_files, select_dates = GEOS_files(os.path.join(GEOS_path,'Np'),start,end)
-	select_surf_files, select_surf_dates = GEOS_files(os.path.join(GEOS_path,'Nx'),start,end)
-
-	new_lats = np.array([site_dict[site]['lat'] for site in site_dict])
-	new_lons = np.array([site_dict[site]['lon_180'] for site in site_dict])
+	select_files, select_dates = GEOS_files(os.path.join(GEOS_path,'Np'),start_date,end_date)
+	select_surf_files, select_surf_dates = GEOS_files(os.path.join(GEOS_path,'Nx'),start_date,end_date)
 
 	nsite = len(site_dict.keys())
 
@@ -1615,15 +1606,14 @@ def mod_maker_new(start=None,end=None,func_dict=None,GEOS_path=None):
 		print '\ndate {:4d} / {} DONE in {:.0f} seconds'.format(date_ID+1,len(select_dates),time.time()-start_it)
 	print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
 
-def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode=None,HH=None,MM=None,UTC=None,time_step=None):
+def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM=None,time_step=None):
 	"""
 	Inputs:
 		- site_abbvr: two letter site abbreviation
-		- date_range: range of dates over which mod files will be created YYYYMMDD-YYYYMMDD
 		- start_date: YYYYMMDD (set from date_range in parse_args)
 		- end_date: YYYYMMDD  (set from date_range in parse_args)
 		- mode: one of ncep, merradap42, merradap72, merraglob, fpglob, fpitglob
-		- HH:MM (default: '12:00' ): string of starting time 'HH:MM' for local and 'HH:MMUTC' for UTC
+		- HH:MM (default: '12:00' ): string of starting time 'HH:MM' in local time
 		- time_step (default: 24): time step in hours
 		- func_dict: for the 'glob' modes, a list of functions to get equivalent latitude for a given potential vorticity and potential temperature
 	Outputs:
@@ -1656,7 +1646,17 @@ def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode
 		os.makedirs(mod_path)
 	print 'MOD files will be saved in:',mod_path
 
-	# will need to handle sites that changed location at some point
+	local_date = start_date + timedelta(hours=HH,minutes=MM) # date with local time
+	astropy_date = Time(local_date)
+	print 'Starting local time for interpolation:',local_date.strftime('%Y-%m-%d %H:%M')
+
+	time_step = timedelta(hours=time_step) # time step between mod files; will need to change the mod file naming and gsetup to do sub-daily files
+	print 'Time step:',time_step.total_seconds()/3600.0,'hours'
+	
+	total_time = end_date-start_date
+	n_step = int(total_time.total_seconds()/time_step.total_seconds())
+	local_date_list = np.array([start_date+i*time_step for i in range(n_step)])
+
 	site_moved = False
 	if 'time_spans' in site_dict[site_abbrv].keys(): # instruments with different locations for different time periods
 		site_moved = True
@@ -1683,45 +1683,13 @@ def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode
 		varlist = ['T','QV','RH','H','EPV','O3','PHIS']
 		surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']	
 		DATA,SURF_DATA = read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf_varlist)
-	
-	utc_offset = timedelta(hours=site_lon_180/15.0)
-
-	if UTC:
-		# utc times
-		UTC_date = start_date + timedelta(hours=HH,minutes=MM)
-		UTC_start_date = UTC_date
-		UTC_end_date = end_date
-		# local times
-		date = start_date + timedelta(hours=HH,minutes=MM) + utc_offset
-		start_date = date
-		end_date = end_date + timedelta(hours=HH,minutes=MM) + utc_offset
-	else:
-		# utc times
-		UTC_date = start_date + timedelta(hours=HH,minutes=MM) - utc_offset
-		UTC_start_date = UTC_date
-		UTC_end_date = end_date + timedelta(hours=HH,minutes=MM) - utc_offset
-		# local times
-		date = start_date + timedelta(hours=HH,minutes=MM) # date with local time
-	astropy_date = Time(date)
-	print 'Starting local time for interpolation:',date.strftime('%Y-%m-%d %H:%M')
-
-	time_step = timedelta(hours=time_step) # time step between mod files; will need to change the mod file naming and gsetup to do sub-daily files
-	print 'Time step:',time_step.total_seconds()/3600.0,'hours'
-	
-	total_time = UTC_end_date-UTC_start_date
-	n_step = int(total_time.total_seconds()/time_step.total_seconds())+1
-	UTC_date_list = np.array([UTC_start_date+i*time_step for i in range(n_step)])
-	UTC_date_list = UTC_date_list[UTC_date_list<=UTC_end_date]
-
-	if 'merradap' in mode: # read all the data first, this could take a while ...	
+	elif 'merradap' in mode: # read all the data first, this could take a while ...	
 		print 'Reading MERRA2 data via opendap'
 		varlist = ['T','QV','RH','H','EPV','O3','PHIS']
 		surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']	
-		DATA,SURF_DATA = read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,date,end_date,time_step,varlist,surf_varlist)
+		DATA,SURF_DATA = read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,local_date,end_date,time_step,varlist,surf_varlist)
 
-	new_year = False
-	date_ID = 0
-	while date<end_date:
+	for local_date in local_date_list:
 
 		if site_moved:
 			for time_span in site_dict[site]['time_spans']:
@@ -1813,19 +1781,10 @@ def mod_maker(site_abbrv=None,date_range=None,start_date=None,end_date=None,mode
 		else:
 			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA,surf_data=INTERP_SURF_DATA)
 
-		if ((date+time_step).year!=date.year):
-			new_year = True
+		if ((UTC_date+time_step).year!=UTC_date.year) and ('ncep' in mode):
+			DATA = read_ncep(ncdf_path,(UTC_date+time_step).year)
 
-		date = date + time_step
-		UTC_date = UTC_date + time_step
-		astropy_date = Time(date)
-		
-		if ('ncep' in mode) and new_year:
-			DATA = read_ncep(ncdf_path,date.year)
-			new_year = False
-
-		date_ID += 1
-	print date_ID,'mod files written'
+	print len(local_date_list),'mod files written'
 
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
 
@@ -1840,5 +1799,6 @@ if __name__ == "__main__": # this is only executed when the code is used directl
 
 	else: # using fp-it daily files
 		### New code that can generate slant paths and uses GEOS5-FP-IT daily files
-		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['geos_path'],'Np'),start=arguments['start_date'],end=arguments['end_date'])
-		mod_maker_new(start=arguments['start_date'],end=arguments['end_date'],func_dict=arguments['func_dict'],GEOS_path=arguments['geos_path'])
+		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['geos_path'],'Np'),start_date=arguments['start_date'],end_date=arguments['end_date'])
+		mod_maker_new(start_date=arguments['start_date'],end_date=arguments['end_date'],func_dict=arguments['func_dict'],GEOS_path=arguments['geos_path'])
+		
