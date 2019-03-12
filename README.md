@@ -23,6 +23,8 @@ arg1: date range YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have 
 
 arg2: full path to directory containing the daily GEOS5-FP-IT files
 
+if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+
 ### Input files ###
 
 two folders are expected in the geos_path directory:
@@ -65,6 +67,8 @@ the 'merradap' modes require a .netrc file in your home directory with credentia
 arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time in local time
 
 arg5: (optional, default=24) time step in hours (can be decimal)
+
+if the command line include 'mute' the program will not print outputs to the terminal, except error messages
 
 ### Input files ###
 

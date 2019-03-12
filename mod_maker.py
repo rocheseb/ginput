@@ -21,6 +21,8 @@ the 'merradap' modes require a .netrc file in your home directory with credentia
 arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time in local time
 arg5: (optional, default=24) time step in hours (can be decimal)
 
+if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+
 MOD files will be saved under GGGPATH/models/gnd/xx.
 With xx either 'ncep', 'merra', 'fp', or 'fpit'
 The merradap modes require an internet connection and EarthData credentials
@@ -47,6 +49,8 @@ python mod_maker.py arg1 geos_path=arg2
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or single date (YYYYMMDD)
 arg2: full path to directory containing the daily GEOS5-FP-IT files
 
+if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+
 two folders are expected in the geos_path directory:
 in geos_path/Np you must have all the 42 levels GEOS5-FP-IT files
 in geos_path/Nx you must have all the surface data files
@@ -57,12 +61,10 @@ MOD files will be generate both along the vertical and along the sun ray
 They will be saved under GGGPATH/models/gnd/fpit/xx/yy
 with xx the two letter site abbreviation and yy either 'vertical' or 'slant'
 
+The slant .mod files are only generated when the SZA is above 90 degrees.
 #########################################################################################################################################################################
 
 There is dictionary of sites with their respective lat/lon, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
-
-Note: still need to make it work for Darwin, or any site that changed location at some point and must use different lat/lon for different periods, or use runlogs again like the .pro code
-Until then if a site has changed lat/lon/alt the code must be run for each period separately with the site_dict edited with the correct site location for each given period.
 """
 
 import os, sys
@@ -200,7 +202,7 @@ def svp_wv_over_ice(temp):
 
 	return svp
 
-def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None):
+def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False):
 	"""
 	Creates a GGG-format .mod file
 	INPUTS:
@@ -237,14 +239,16 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None):
 
 			# Relace H2O mole fractions that are too small
 			if (frh < 30./data['T'][k]):
-				print 'Replacing too small H2O ',mod_path, data['lev'][k],h2o_wmf,svp*30./data['lev'][k]/data['lev'][k],frh,30./data['lev'][k]				
+				if not muted:
+					print 'Replacing too small H2O ',mod_path, data['lev'][k],h2o_wmf,svp*30./data['lev'][k]/data['lev'][k],frh,30./data['lev'][k]				
 				frh = 30./data['lev'][k]
 				h2o_wmf = svp*frh/data['lev'][k]
 				data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
 
 			# Relace H2O mole fractions that are too large (super-saturated)  GCT 2015-08-05
 			if (frh > 1.0):
-				print 'Replacing too large H2O ',mod_path,data['lev'][k],h2o_wmf,svp/data['lev'][k],frh,1.0
+				if not muted:	
+					print 'Replacing too large H2O ',mod_path,data['lev'][k],h2o_wmf,svp/data['lev'][k],frh,1.0
 				frh=1.0
 				h2o_wmf = svp*frh/data['lev'][k]
 				data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
@@ -267,7 +271,8 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None):
 			avg_wmf = trop_wmf*wt + strat_wmf*(1-wt)
 			avg_frh = avg_wmf*data['lev'][k]/svp
 			if (avg_frh > 1.0):
-				print 'Replacing super-saturated H2O ',mod_path, data['lev'][k],avg_wmf,svp*avg_frh/data['lev'][k],avg_frh,1.0
+				if not muted:	
+					print 'Replacing super-saturated H2O ',mod_path, data['lev'][k],avg_wmf,svp*avg_frh/data['lev'][k],avg_frh,1.0
 				avg_frh = 1.0
 				avg_wmf = svp*avg_frh/data['lev'][k]
 
@@ -326,15 +331,18 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None):
 			if 300<=data['lev'][k]<=1000:
 				# Relace H2O mole fractions that are too small
 				if (data['RH'][k] < 30./data['T'][k]):
-					print 'Replacing too small H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0)	
+					if not muted:
+						print 'Replacing too small H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0)	
 					data['RH'][k] = 30./data['lev'][k]
 					h2o_wmf = svp*data['RH'][k]/data['lev'][k]
 					data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
-					print 'svp,h2o_wmf,h2o_dmf',svp,h2o_wmf,data['H2O_DMF'][k],data['RH'][k]
+					if not muted:
+						print 'svp,h2o_wmf,h2o_dmf',svp,h2o_wmf,data['H2O_DMF'][k],data['RH'][k]
 
 			# Relace H2O mole fractions that are too large (super-saturated)  GCT 2015-08-05
 			if (data['RH'][k] > 1.0):
-				print 'Replacing too large H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0)
+				if not muted:
+					print 'Replacing too large H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0)
 				data['RH'][k] = 1.0
 				h2o_wmf = svp*data['RH'][k]/data['T'][k]
 				data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
@@ -353,7 +361,8 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None):
 	with open(mod_path,'w') as outfile:
 		outfile.writelines(mod_content)
 
-	print mod_path
+	if not muted:
+		print mod_path
 
 def trilinear_interp(DATA,varlist,site_lon_360,site_lat,site_tim):
 	"""
@@ -650,7 +659,7 @@ def gravity(gdlat,altit):
 
 	return gravity, radius
 
-def read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,date,end_date,time_step,varlist,surf_varlist):
+def read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,date,end_date,time_step,varlist,surf_varlist,muted):
 	"""
 	Read MERRA2 data via opendap.
 
@@ -670,11 +679,13 @@ def read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,da
 	old_UTC_date = ''
 	urllist = []
 	surface_urllist = []
-	print '\n\t-Making lists of URLs'
+	if not muted:
+		print '\n\t-Making lists of URLs'
 	while date < end_date:
 		UTC_date = date + timedelta(hours = -site_lon_180/15.0) # merra times are in UTC, so the date may be different than the local date, make sure to use the UTC date to querry the file
 		if (UTC_date.strftime('%Y%m%d') != old_UTC_date):
-			print '\t\t',UTC_date.strftime('%Y-%m-%d')
+			if not muted:
+				print '\t\t',UTC_date.strftime('%Y-%m-%d')
 			urllist += ['https://goldsmr5.gesdisc.eosdis.nasa.gov/opendap/hyrax/MERRA2/M2I3N{}ASM.5.12.4/{:0>4}/{:0>2}/MERRA2_400.inst3_3d_asm_N{}.{:0>4}{:0>2}{:0>2}.nc4'.format(letter,UTC_date.year,UTC_date.month,letter.lower(),UTC_date.year,UTC_date.month,UTC_date.day)]
 			surface_urllist += ['https://goldsmr4.gesdisc.eosdis.nasa.gov/opendap/hyrax/MERRA2/M2I1NXASM.5.12.4/{:0>4}/{:0>2}/MERRA2_400.inst1_2d_asm_Nx.{:0>4}{:0>2}{:0>2}.nc4'.format(UTC_date.year,UTC_date.month,UTC_date.year,UTC_date.month,UTC_date.day)]
 			if old_UTC_date == '':
@@ -683,27 +694,33 @@ def read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,da
 		date = date + time_step
 
 	# multi-level data
-	print '\nNow doing multi-level data'
-	print '\t-Connecting to datasets ...'
+	if not muted:
+		print '\nNow doing multi-level data'
+		print '\t-Connecting to datasets ...'
 	store_list = [xarray.backends.PydapDataStore.open(url,session) for url in urllist]
 	dataset_list = [xarray.open_dataset(store) for store in store_list]
-	print '\t-Datasets opened'
+	if not muted:
+		print '\t-Datasets opened'
 	min_lat_ID,max_lat_ID,min_lon_ID,max_lon_ID = querry_indices(dataset_list[0],site_lat,site_lon_180,2.5,2.5) # just need to get the lat/lon box once
 	subsest_dataset_list = [dataset[{'lat':range(min_lat_ID,max_lat_ID+1),'lon':range(min_lon_ID,max_lon_ID+1)}] for dataset in dataset_list]
-	print '\t-Datasets subsetted'
-	print '\t-Merging datasets (time consuming)'
+	if not muted:
+		print '\t-Datasets subsetted'
+		print '\t-Merging datasets (time consuming)'
 	merged_dataset = xarray.concat(subsest_dataset_list,'time')
 	merged_dataset = merged_dataset.fillna(1e15)
 
 	# single-level data
-	print '\nNow doing single-level data'
-	print '\t-Connecting to datasets ...'
+	if not muted:
+		print '\nNow doing single-level data'
+		print '\t-Connecting to datasets ...'
 	surface_store_list = [xarray.backends.PydapDataStore.open(url,session) for url in surface_urllist]
 	surface_dataset_list = [xarray.open_dataset(store) for store in surface_store_list]
-	print '\t-Datasets opened'
+	if not muted:
+		print '\t-Datasets opened'
 	subsest_surface_dataset_list = [dataset[{'lat':range(min_lat_ID,max_lat_ID+1),'lon':range(min_lon_ID,max_lon_ID+1)}] for dataset in surface_dataset_list]
-	print '\t-Datasets subsetted'
-	print '\t-Merging datasets (time consuming)'
+	if not muted:
+		print '\t-Datasets subsetted'
+		print '\t-Merging datasets (time consuming)'
 	merged_surface_dataset = xarray.concat(subsest_surface_dataset_list,'time')
 	merged_surface_dataset = merged_surface_dataset.fillna(1e15)
 
@@ -791,7 +808,7 @@ def read_ncep(ncdf_path,year):
 
 	return DATA
 
-def read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf_varlist):
+def read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf_varlist,muted):
 	"""
 	Read data from GEOS5 and MERRA2 datasets
 
@@ -810,8 +827,9 @@ def read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf
 	surf_file = [i for i in ncdf_list if '2d' in i][0]
 	surface_dataset = netCDF4.Dataset(os.path.join(ncdf_path,surf_file),'r')
 
-	print ncdf_file
-	print surf_file
+	if not muted:
+		print ncdf_file
+		print surf_file
 
 	# get the min/max lat-lon indices of merra lat-lon that lies within a given box.
 	# geos5-fp has a smaller grid than merra2 amd geos5-fp-it
@@ -820,12 +838,14 @@ def read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf
 	lat_lon_box = querry_indices(dataset,site_lat,site_lon_180,box_lat_half_width,box_lon_half_width)
 
 	# multi-level data
-	print 'Read global',mode,'multi-level data ...'
+	if not muted:
+		print 'Read global',mode,'multi-level data ...'
 	DATA = read_data(dataset,varlist,lat_lon_box)
 	DATA['PHIS'] = DATA['PHIS'] / gravity_at_lat # convert from m2 s-2 to m
 
 	# single level data
-	print 'Read global',mode,'single-level data ...'
+	if not muted:
+		print 'Read global',mode,'single-level data ...'
 	SURF_DATA = read_data(surface_dataset,surf_varlist,lat_lon_box)
 	
 	# merra/geos time is minutes since base time, need to convert to hours
@@ -834,7 +854,7 @@ def read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf
 
 	return DATA,SURF_DATA
 
-def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None):
+def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None,muted=False):
 	"""
 	Inputs:
 		- dataset: global dataset for fp, fp-it, or merra
@@ -854,7 +874,8 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None):
 	ncdf_file = [i for i in ncdf_list if '3d' in i][0]
 	dataset = netCDF4.Dataset(os.path.join(ncdf_path,ncdf_file),'r')
 
-	print '\nGenerating equivalent latitude functions ...'
+	if not muted:
+		print '\nGenerating equivalent latitude functions ...'
 
 	lat = dataset['lat'][:]
 	lat[180] = 0.0
@@ -865,7 +886,8 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None):
 	EPV = (dataset['EPV'][0]*1e6).data
 
 	ntim,nlev,nlat,nlon = [dataset.dimensions[i].size for i in dataset.dimensions]
-	print 'time,lev,lat,lon',(ntim,nlev,nlat,nlon)
+	if not muted:
+		print 'time,lev,lat,lon',(ntim,nlev,nlat,nlon)
 
 	select_dates = date[date>=start]
 	select_dates = select_dates[select_dates<=end]
@@ -907,8 +929,9 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None):
 	total_start = time.time()
 	for t in date_inds: # loop over dates
 		start = time.time()
-		sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(t+1,ntim,np.mean(nmin)*(ntim-t)))
-		sys.stdout.flush()
+		if not muted:
+			sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(t+1,ntim,np.mean(nmin)*(ntim-t)))
+			sys.stdout.flush()
 
 		# Compute potential temperature
 		PT = (dataset['T'][t]*coeff_mat).data
@@ -965,7 +988,8 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None):
 
 	actual_time = (time.time()-total_start)/60.0
 	predicted_time = 0.125*ntim
-	print '\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,actual_time)
+	if not muted:
+		print '\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,actual_time)
 
 	dataset.close()
 
@@ -978,6 +1002,11 @@ def parse_args(argu=sys.argv):
 
 	arg_dict = {}
 
+	muted = False
+	if 'mute' in argu:
+		muted = True
+	arg_dict['muted'] = muted
+
 	# parse the selected range of dates for which .mod files will be generated
 	date_range = argu[1].split('-')
 	start_date = datetime.strptime(date_range[0],'%Y%m%d')
@@ -988,7 +1017,8 @@ def parse_args(argu=sys.argv):
 	if start_date>=end_date:
 		print 'Error: the second argument must be a date range YYYYMMDD-YYYYMMDD or a single date YYYYMMDD'
 		sys.exit()
-	print 'Date range: from',start_date.strftime('%Y-%m-%d'),'to',end_date.strftime('%Y-%m-%d')
+	if not muted:
+		print 'Date range: from',start_date.strftime('%Y-%m-%d'),'to',end_date.strftime('%Y-%m-%d')
 
 	arg_dict['start_date'] = start_date
 	arg_dict['end_date'] = end_date
@@ -1066,7 +1096,7 @@ def GEOS_files(GEOS_path,start_date,end_date):
 
 	return select_files,select_dates
 
-def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None):
+def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None,muted=False):
 	"""
 	Inputs:
 		- dataset: global dataset for fp, fp-it, or merra
@@ -1081,7 +1111,8 @@ def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None):
 
 	select_files, select_dates = GEOS_files(ncdf_path,start_date,end_date)
 
-	print '\nGenerating equivalent latitude functions for {} times'.format(len(select_dates))
+	if not muted:
+		print '\nGenerating equivalent latitude functions for {} times'.format(len(select_dates))
 
 	# Use any file for stuff that is the same in all files
 	with netCDF4.Dataset(os.path.join(ncdf_path,select_files[0]),'r') as dataset:
@@ -1129,8 +1160,9 @@ def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None):
 	for date_ID,date in enumerate(select_dates):
 
 		start = time.time()
-		sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(date_ID+1,ntim,np.mean(nmin)*(ntim-date_ID)))
-		sys.stdout.flush()
+		if not muted:
+			sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(date_ID+1,ntim,np.mean(nmin)*(ntim-date_ID)))
+			sys.stdout.flush()
 		
 		with netCDF4.Dataset(os.path.join(ncdf_path,select_files[date_ID])) as dataset:
 		        
@@ -1190,7 +1222,8 @@ def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None):
 
 	actual_time = (time.time()-total_start)/60.0
 	predicted_time = 0.125*ntim
-	print '\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,actual_time)
+	if not muted:
+		print '\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,actual_time)
 
 	return func_dict
 
@@ -1267,7 +1300,7 @@ def show_interp(data,x,y,interp_data,ilev):
 	pl.colorbar()
 	pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,muted=False):
 	"""
 	This code only works with GEOS-5 FP-IT data.
 	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1283,7 +1316,8 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 	GGGPATH = os.environ['GGGPATH']
 	mod_path = os.path.join(GGGPATH,'models','gnd','fpit')
 	if not os.path.exists(mod_path):
-		print 'Creating',mod_path
+		if not muted:
+			print 'Creating',mod_path
 		os.makedirs(mod_path)
 
 	varlist = ['T','QV','RH','H','EPV','O3','PHIS']
@@ -1299,10 +1333,12 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 	start = time.time()
 	for date_ID,UTC_date in enumerate(select_dates):
 		start_it = time.time()
-		print '\nNOW DOING date {:4d} / {} :'.format(date_ID+1,len(select_dates)),UTC_date.strftime("%Y-%m-%d %H:%M"),' UTC'
 
 		DATA = {}
-		print '\t-Read global data ...'
+		if not muted:
+			print '\nNOW DOING date {:4d} / {} :'.format(date_ID+1,len(select_dates)),UTC_date.strftime("%Y-%m-%d %H:%M"),' UTC'
+			print '\t-Read global data ...'
+
 		with netCDF4.Dataset(os.path.join(GEOS_path,'Np',select_files[date_ID]),'r') as dataset:
 
 			for var in varlist:
@@ -1341,13 +1377,15 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 
 		IDs_list = [site_dict[site]['IDs'] for site in site_dict]
 
-		print '\t-Interpolate to (lat,lon) of sites ...'
+		if not muted:
+			print '\t-Interpolate to (lat,lon) of sites ...'
 		with warnings.catch_warnings():
 			warnings.simplefilter("ignore")		
 			INTERP_DATA = {}
 			for var in varlist:
-				sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
-				sys.stdout.flush()
+				if not muted:
+					sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
+					sys.stdout.flush()
 				if DATA[var].ndim==2:
 					INTERP_DATA[var] = lat_lon_interp(DATA[var],lat,lon,new_lats,new_lons,IDs_list)
 					continue
@@ -1358,10 +1396,12 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 
 			INTERP_SURF_DATA = {}
 			for var in surf_varlist:
-				sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
-				sys.stdout.flush()
+				if not muted:
+					sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
+					sys.stdout.flush()
 				INTERP_SURF_DATA[var] = lat_lon_interp(SURF_DATA[var],lat,lon,new_lats,new_lons,IDs_list)
-			print '\r\t\t{:<40s}'.format('DONE')
+			if not muted:
+				print '\r\t\t{:<40s}'.format('DONE')
 
 		# setup masks
 		for var in varlist:
@@ -1420,10 +1460,12 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 			INTERP_DATA[site]['prof']['T'] =  ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof']['T'])
 		
 		# get slant path coordinates corresponding to the altitude levels above each site
-		print '\t-Slantify:'
+		if not muted:
+			print '\t-Slantify:'
 		for i,site in enumerate(site_dict.keys()): # loops over sites
-			sys.stdout.write('\r\t\t site {:3d} / {}  {:>20}'.format(i+1,nsite,site_dict[site]['name']))
-			sys.stdout.flush()
+			if not muted:
+				sys.stdout.write('\r\t\t site {:3d} / {}  {:>20}'.format(i+1,nsite,site_dict[site]['name']))
+				sys.stdout.flush()
 
 			site_alt = site_dict[site]['alt']
 			site_lat = site_dict[site]['lat']
@@ -1438,7 +1480,8 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 			site_dict[site]['slant_coords'] = slantify(UTC_date,site_lat,site_lon,site_alt,H,pres=pres,temp=temp)
 			for var in ['lat','lon','alt','vertical','slant']:
 				site_dict[site]['slant_coords'][var] = ma.masked_where(H.mask,site_dict[site]['slant_coords'][var])
-		print '\r\t\t{:<40s}'.format('DONE')
+		if not muted:
+			print '\r\t\t{:<40s}'.format('DONE')
 
 		# Set two lists with all the latitudes and longitudes of all sites at all slant levels
 		slant_lat = []
@@ -1463,13 +1506,15 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 
 		# Interpolate to each slant level (lat,lon)
 		# This will give a vertical profile at every (lat,lon) of all the slant levels
-		print '\t-Interpolate to each slant level (lat,lon) ...'
+		if not muted:
+			print '\t-Interpolate to each slant level (lat,lon) ...'
 		with warnings.catch_warnings():
 			warnings.simplefilter("ignore")
 			NEW_INTERP_DATA = {}
 			for var in varlist:
-				sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
-				sys.stdout.flush()
+				if not muted:
+					sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
+					sys.stdout.flush()
 				if DATA[var].ndim==2:
 					NEW_INTERP_DATA[var] = lat_lon_interp(DATA[var],lat,lon,slant_lat,slant_lon,IDs_list)
 					continue
@@ -1477,13 +1522,15 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 				NEW_INTERP_DATA[var] = np.zeros([nlev,len(IDs_list)])
 				for ilev,level_data in enumerate(DATA[var]):
 					NEW_INTERP_DATA[var][ilev] = lat_lon_interp(level_data,lat,lon,slant_lat,slant_lon,IDs_list)
-			print '\r\t\t{:<40s}'.format('DONE')
+			if not muted:
+				print '\r\t\t{:<40s}'.format('DONE')
 		# setup masks
 		for var in set(varlist)-set(['PHIS']):
 			NEW_INTERP_DATA[var] = ma.masked_where(np.isnan(NEW_INTERP_DATA[var]),NEW_INTERP_DATA[var])
 
 		# Now just get the data along the slant paths
-		print '\t-Get data along slant paths ...'
+		if not muted:
+			print '\t-Get data along slant paths ...'
 		SLANT_DATA = {}
 		for site in site_dict: # for each site
 			if site_dict[site]['slant_coords']['sza']<90:
@@ -1504,11 +1551,11 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 					SLANT_DATA[site][var] = ma.masked_where(np.isnan(SLANT_DATA[site][var]),SLANT_DATA[site][var])
 
 		# Interpolate T,RH,MMW down to 1000 hPa
-		# Or extrapolate so that when interpolating to the surface level, the values match the surface values
-		# if surface pressure is larger than 1000 hPa, interpolate between surface pressure and the first available level
-		# if surface pressure is smaller than 1000 hPa, extrapolate to 1000 hPa using the first available level and the surface data
-		# if surface data is not available, just extrapolate from the first two valid levels
-		print '\t-Patch fill values ...'	
+		# Or extrapolate so that when linearly interpolating to the surface level using two levels that bracket the surface pressure, the values match the surface values
+		# if surface pressure is larger than 1000 hPa, interpolate between surface pressure and the first valid level
+		# if surface pressure is smaller than 1000 hPa, extrapolate to 1000 hPa using the surface data and the first valid level above it
+		if not muted:
+			print '\t-Patch fill values ...'	
 		for site in site_dict:
 			try:
 				all_data = [SLANT_DATA[site],INTERP_DATA[site]['prof']]
@@ -1555,11 +1602,12 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 							f = interp1d(patch_p,patch_var,fill_value='extrapolate')
 							elem[var][H.mask] = f(missing_p)
 				elem['H2O_DMF'] = compute_h2o_dmf(elem['QV'],rmm) # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
-
-		print '\t\t {:3d} / {} sites with SZA<90'.format(len(SLANT_DATA.keys()),nsite)
-
+		
+		if not muted:
+			print '\t\t {:3d} / {} sites with SZA<90'.format(len(SLANT_DATA.keys()),nsite)
+			print '\t-Write mod files ...'
+		
 		# write the .mod files
-		print '\t-Write mod files ...'
 		version = 'mod_maker_10.6   2017-04-11   GCT'
 
 		for site in INTERP_DATA:
@@ -1592,21 +1640,24 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None):
 				ew = 'W'
 
 			mod_name = mod_file_name(local_date,timedelta(hours=3),site_lat,site_lon_180,ew,ns,mod_path)
-			
-			print '\t\t\t{:<20s} : {}'.format(site_dict[site]['name'], mod_name)
+			if not muted:
+				print '\t\t\t{:<20s} : {}'.format(site_dict[site]['name'], mod_name)
 			
 			# write vertical mod file
 			mod_file_path = os.path.join(vertical_mod_path,mod_name)
-			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA[site]['prof'],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date])
+			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA[site]['prof'],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted)
 			# write slant mod_file
 			if site in SLANT_DATA.keys():
-				print '\t\t\t{:>20s} + slant'.format('')
+				if not muted:
+					print '\t\t\t{:>20s} + slant'.format('')
 				mod_file_path = os.path.join(slant_mod_path,mod_name)
-				write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date])
-		print '\ndate {:4d} / {} DONE in {:.0f} seconds'.format(date_ID+1,len(select_dates),time.time()-start_it)
-	print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
+				write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted)
+		if not muted:
+			print '\ndate {:4d} / {} DONE in {:.0f} seconds'.format(date_ID+1,len(select_dates),time.time()-start_it)
+	if not muted:
+		print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
 
-def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM=None,time_step=None):
+def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM=None,time_step=None,muted=False):
 	"""
 	Inputs:
 		- site_abbvr: two letter site abbreviation
@@ -1627,7 +1678,8 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM
 			sys.exit()
 
 	GGGPATH = os.environ['GGGPATH'] # reads the GGGPATH environment variable
-	print 'GGGPATH =',GGGPATH
+	if not muted:
+		print 'GGGPATH =',GGGPATH
 
 	ncdf_path = os.path.join(GGGPATH,'ncdf')
 
@@ -1638,20 +1690,25 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM
 	except KeyError:
 		print 'Wrong 2 letter site abbreviation (check the site_dict dictionary)'
 		sys.exit()
-	print 'lat,lon,masl:',site_dict[site_abbrv]['lat'],site_dict[site_abbrv]['lon'],site_dict[site_abbrv]['alt']
+	
+	if not muted:
+		print 'lat,lon,masl:',site_dict[site_abbrv]['lat'],site_dict[site_abbrv]['lon'],site_dict[site_abbrv]['alt']
 
 	simple = {'merradap42':'merra','merradap72':'merra','merraglob':'merra','ncep':'ncep','fpglob':'fp','fpitglob':'fpit'}
 	mod_path = os.path.join(GGGPATH,'models','gnd',simple[mode],site_abbrv)	# .mod files will be saved here
 	if not os.path.exists(mod_path):
 		os.makedirs(mod_path)
-	print 'MOD files will be saved in:',mod_path
+	if not muted:
+		print 'MOD files will be saved in:',mod_path
 
 	local_date = start_date + timedelta(hours=HH,minutes=MM) # date with local time
 	astropy_date = Time(local_date)
-	print 'Starting local time for interpolation:',local_date.strftime('%Y-%m-%d %H:%M')
+	if not muted:
+		print 'Starting local time for interpolation:',local_date.strftime('%Y-%m-%d %H:%M')
 
 	time_step = timedelta(hours=time_step) # time step between mod files; will need to change the mod file naming and gsetup to do sub-daily files
-	print 'Time step:',time_step.total_seconds()/3600.0,'hours'
+	if not muted:
+		print 'Time step:',time_step.total_seconds()/3600.0,'hours'
 	
 	total_time = end_date-start_date
 	n_step = int(total_time.total_seconds()/time_step.total_seconds())
@@ -1682,12 +1739,13 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM
 	elif 'glob' in mode:
 		varlist = ['T','QV','RH','H','EPV','O3','PHIS']
 		surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']	
-		DATA,SURF_DATA = read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf_varlist)
+		DATA,SURF_DATA = read_global(ncdf_path,mode,site_lat,site_lon_180,gravity_at_lat,varlist,surf_varlist,muted)
 	elif 'merradap' in mode: # read all the data first, this could take a while ...	
-		print 'Reading MERRA2 data via opendap'
+		if not muted:
+			print 'Reading MERRA2 data via opendap'
 		varlist = ['T','QV','RH','H','EPV','O3','PHIS']
 		surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']	
-		DATA,SURF_DATA = read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,local_date,end_date,time_step,varlist,surf_varlist)
+		DATA,SURF_DATA = read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,local_date,end_date,time_step,varlist,surf_varlist,muted)
 
 	for local_date in local_date_list:
 
@@ -1773,18 +1831,20 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM
 		# use the local date for the name of the .mod file
 		mod_name = mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path)
 		mod_file_path = os.path.join(mod_path,mod_name)
-		print '\n',mod_name
+		if not muted:
+			print '\n',mod_name
 
 		version = 'mod_maker_10.6   2017-04-11   GCT'
 		if 'ncep' in mode:
-			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA)
+			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA,muted=muted)
 		else:
-			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA,surf_data=INTERP_SURF_DATA)
+			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA,surf_data=INTERP_SURF_DATA,muted=muted)
 
 		if ((UTC_date+time_step).year!=UTC_date.year) and ('ncep' in mode):
 			DATA = read_ncep(ncdf_path,(UTC_date+time_step).year)
-
-	print len(local_date_list),'mod files written'
+	
+	if not muted:
+		print len(local_date_list),'mod files written'
 
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
 
@@ -1799,6 +1859,5 @@ if __name__ == "__main__": # this is only executed when the code is used directl
 
 	else: # using fp-it daily files
 		### New code that can generate slant paths and uses GEOS5-FP-IT daily files
-		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['geos_path'],'Np'),start_date=arguments['start_date'],end_date=arguments['end_date'])
-		mod_maker_new(start_date=arguments['start_date'],end_date=arguments['end_date'],func_dict=arguments['func_dict'],GEOS_path=arguments['geos_path'])
-		
+		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['geos_path'],'Np'),start_date=arguments['start_date'],end_date=arguments['end_date'],muted=arguments['muted'])
+		mod_maker_new(start_date=arguments['start_date'],end_date=arguments['end_date'],func_dict=arguments['func_dict'],GEOS_path=arguments['geos_path'],muted=arguments['muted'])
