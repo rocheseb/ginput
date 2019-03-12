@@ -1593,25 +1593,27 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,mu
 					patch['first']['QV'] =  elem['QV'][first_ID].data[0]
 					patch['first']['T'] =  elem['T'][first_ID].data[0]
 
-					#for variables with no surface data, just use the value of the first valid level
-					for var in ['EPV','O3']: 
-						elem[var][H.mask] = elem[var][~H.mask][0]
-
 					# interpolate/extrapolate using the first valid level and surface data
-					if surf_p>first_p:
+					if surf_p>first_p: # interpolate between the surface pressure and first valid pressure level
 						patch_p = [surf_p,first_p]
 						for var in ['RH','QV','T','H']: # must do H last since the last line will get rid of its masks
 							patch_var = [patch['surf'][var],patch['first'][var]]
-							f = interp1d(patch_p,patch_var,fill_value='extrapolate')
+							f = interp1d(patch_p,patch_var,fill_value='extrapolate') 
 							elem[var][H.mask] = f(missing_p)
-					else:
-						first_2p = elem['lev'][~H.mask][:2]
-						patch_p = np.insert(first_2p,1,surf_p)
+					else: # use the surface value and the first level above it to extrapolate down to 1000 hPa
+						valid_p = elem['lev'][~H.mask]
+						first_p = valid_p[valid_p<surf_p][0]
+						patch_p = np.array([surf_p,first_p]) # surface pressure and first level above it
 						for var in ['RH','QV','T','H']: # must do H last since the last line will get rid of its masks
-							first_2var = elem[var][~H.mask][:2]
-							patch_var = np.insert(first_2var,1,patch['surf'][var])
+							valid_var = elem[var][~H.mask]
+							patch_var = np.array([patch['surf'][var],valid_var[valid_p<surf_p][0]])
 							f = interp1d(patch_p,patch_var,fill_value='extrapolate')
-							elem[var][H.mask] = f(missing_p)
+							elem[var][:np.where(elem['lev']==first_p)[0][0]] = f(elem['lev'][:np.where(elem['lev']==first_p)[0][0]])
+
+					#for variables with no surface data, just use the value of the first valid level above the surface
+					for var in ['EPV','O3']: 
+						elem[var][:np.where(elem['lev']==first_p)[0][0]] = elem[var][np.where(elem['lev']==first_p)][0]
+
 				elem['H2O_DMF'] = compute_h2o_dmf(elem['QV'],rmm) # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
 		
 		if not muted:
