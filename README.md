@@ -19,7 +19,9 @@ The first time the code is run the skyfield library will download 4 files named 
 
 python mod_maker.py arg1 geos_path=arg2
 
-arg1: date range YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months; or single date (YYYYMMDD)
+arg1: date range YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months; or a single date (YYYYMMDD) in which case the end date is +24h
+
+You can also give YYYYMMDD_HH instead to specify the hour, but these must be exact GEOS5 times (UTC times 3 hourly from 00)
 
 arg2: full path to directory containing the daily GEOS5-FP-IT files
 

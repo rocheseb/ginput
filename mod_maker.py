@@ -46,7 +46,8 @@ NEW: used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once
 
 python mod_maker.py arg1 geos_path=arg2
 
-arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or single date (YYYYMMDD)
+arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or a single date (YYYYMMDD) in which case the end date is +24h
+You can also give YYYYMMDD_HH instead to specify the hour, but these must be exact GEOS5 times (UTC times 3 hourly from 00)
 arg2: full path to directory containing the daily GEOS5-FP-IT files
 
 if the command line include 'mute' the program will not print outputs to the terminal, except error messages
@@ -1009,11 +1010,19 @@ def parse_args(argu=sys.argv):
 
 	# parse the selected range of dates for which .mod files will be generated
 	date_range = argu[1].split('-')
-	start_date = datetime.strptime(date_range[0],'%Y%m%d')
+	try:
+		start_date = datetime.strptime(date_range[0],'%Y%m%d')
+	except:
+		start_date = datetime.strptime(date_range[0],'%Y%m%d_%H')
+
 	try:
 		end_date = datetime.strptime(date_range[1],'%Y%m%d')
-	except IndexError: # if a single date is given set the end date as the next day
-		end_date = start_date + timedelta(days=1)
+	except:
+		try:
+			end_date = datetime.strptime(date_range[1],'%Y%m%d_%H')
+		except IndexError: # if a single date is given set the end date as the next day 
+			end_date = start_date + timedelta(days=1)
+
 	if start_date>=end_date:
 		print 'Error: the second argument must be a date range YYYYMMDD-YYYYMMDD or a single date YYYYMMDD'
 		sys.exit()
@@ -1087,8 +1096,8 @@ def GEOS_files(GEOS_path,start_date,end_date):
 	ncdf_dates = np.array([datetime.strptime(elem.split('.')[-3],'%Y%m%d_%H%M') for elem in ncdf_list])
 
 	# just the one between the 'start_date' and 'end_date' dates
-	select_files = ncdf_list[(ncdf_dates>=start_date) & (ncdf_dates<=end_date)]
-	select_dates = ncdf_dates[(ncdf_dates>=start_date) & (ncdf_dates<=end_date)]
+	select_files = ncdf_list[(ncdf_dates>=start_date) & (ncdf_dates<end_date)]
+	select_dates = ncdf_dates[(ncdf_dates>=start_date) & (ncdf_dates<end_date)]
 
 	if len(select_dates) == 0:
 		print 'No GEOS files between',start_date,end_date
@@ -1305,10 +1314,12 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,mu
 	This code only works with GEOS-5 FP-IT data.
 	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
 
-	start_date: datetime object for first date
-	end_date:  datetime object for last date
+	start_date: datetime object for first date, YYYYMMDD_HH, _HH is optional and defaults to _00
+	end_date:  datetime object for last date, YYYYMMDD_HH, _HH is optional and defaults to _00
 	func_dict: output of equivalent_latitude_functions
 	GEOS_path: full path to the directory containing all the GEOS5-FP-IT files
+
+	When giving dates with _HHMM, dates must correspond exactly to GEOS5 times, so 3 hourly UTC times starting at HHMM=0000
 	"""
 
 	site_dict = tccon_site_info()
