@@ -12,7 +12,7 @@ What's different?
 
 OLD: used to generate MOD files using ncep (like the IDL code), or using merra or fp or fpit data
 
-python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5 lat=arg6 lon=arg7 alt=arg8
+python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5 lat=arg6 lon=arg7 alt=arg8 save_path=arg9 ncdf_path=arg10
 
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or single date (YYYYMMDD)
 arg2: two letter site abbreviation (e.g. 'oc' for Lamont, Oklahoma; see the "site_dict" dictionary)
@@ -23,17 +23,19 @@ arg5: (optional, default=24) time step in hours (can be decimal)
 arg6: (optional) latitude in [-90,90] range
 arg7: (optional) longitude in [0,360] range
 arg8: (optional) altitude (meters)
+arg9: (optional) full path to directory where data will be saved (save_path/fpit will be created), defaults to GGGPATH/models/gnd
+arg10: (optional) full path to the directory where ncep/geos/merra files are located, defaults to GGGPATH/ncdf
 
 A custom site location can be given, in that case arg6,arg7, and arg8 must be specified and a site name must be made up for arg2
 
 add 'mute' in the command line (somewhere after arg1) and there will be no print statements other than warnings and error messages 
 
-MOD files will be saved under GGGPATH/models/gnd/xx/site.
+MOD files will be saved under save_path/xx/site.
 With xx either 'ncep', 'merra', 'fp', or 'fpit'
 The merradap modes require an internet connection and EarthData credentials
 The ncep mode requires the global NCEP netcdf files of the given year to be present in GGGPATH/ncdf
 
-The fpglob or fpitglob modes expect two files in GGGPATH/ncdf containing concatenated 3-hourly files for surface and multi-level data, the concatenated files need to be generated beforehand
+The fpglob or fpitglob modes expect two files in 'ncdf_path' containing concatenated 3-hourly files for surface and multi-level data, the concatenated files need to be generated beforehand
 e.g.
 GEOS_fpit_asm_inst3_2d_asm_Nx_GEOS5124.20171210_20171217.nc4 # surface data
 GEOS_fpit_asm_inst3_2d_asm_Np_GEOS5124.20171210_20171217.nc4 # multi-level data
@@ -49,15 +51,18 @@ The ncep mode should produce files identical to the IDL mod_maker if 'time' and 
 
 NEW: used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once using GEOS5-FP-IT 3-hourly files
 
-python mod_maker.py arg1 geos_path=arg2 site=arg3 lat=arg4 lon=arg5 alt=arg6
+python mod_maker.py arg1 geos_path=arg2 site=arg3 lat=arg4 lon=arg5 alt=arg6 save_path=arg7
 
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or a single date (YYYYMMDD) in which case the end date is +24h
 You can also give YYYYMMDD_HH instead to specify the hour, but these must be exact GEOS5 times (UTC times 3 hourly from 00)
 arg2: full path to directory containing the daily GEOS5-FP-IT files
-arg3: (optional) site name
+arg3: (optional) two letter site abbreviation
 arg4: (optional) latitude in [-90,90] range
 arg5: (optional) longitude in [0,360] range
 arg6: (optional) altitude (meters)
+arg7: (optional) full path to directory where data will be saved (save_path/fpit will be created), defaults to GGGPATH/models/gnd
+
+If arg3 is specified, MOD files will only be produced for that one site. See the dictionary in tccon_sites.py for site abbreviations of existing sites.
 
 A custom site location can be given, in that case arg3,arg4,arg5, and arg6 must be specified
 
@@ -72,7 +77,7 @@ in geos_path/Nx you must have all the surface data files
 Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT 3-hourly files
 MOD files will be generate both along the vertical and along the sun ray
 
-They will be saved under GGGPATH/models/gnd/fpit/xx/yy
+They will be saved under save_path/fpit/xx/yy
 with xx the two letter site abbreviation and yy either 'vertical' or 'slant'
 
 The slant .mod files are only generated when the SZA is above 90 degrees.
@@ -1018,6 +1023,10 @@ def parse_args(argu=sys.argv):
 			arg_dict['MM'] = MM
 		elif 'step=' in arg:
 			arg_dict['time_step'] = float(arg.split('=')[1])
+		elif 'save_path' in arg:
+			arg_dict['save_path'] = arg.split('=')[1]
+		elif 'ncdf_path' in arg:
+			arg_dict['ncdf_path'] = arg.split('=')[1]
 
 	return arg_dict
 
@@ -1256,7 +1265,7 @@ def show_interp(data,x,y,interp_data,ilev):
 	pl.colorbar()
 	pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,**kwargs):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,save_path=None,**kwargs):
 	"""
 	This code only works with GEOS-5 FP-IT data.
 	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1281,13 +1290,18 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 	When giving dates with _HHMM, dates must correspond exactly to GEOS5 times, so 3 hourly UTC times starting at HHMM=0000
 	"""
 
-	if lat is not None: # a custom location was given
+	if lat: # True when lat!=None, a custom location was given
 		locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
+	elif site_abbrv: # if not custom location is given, but a site abbreviation is given, just do that one site
+		locations = {site_abbrv:locations[site_abbrv]}
 
 	site_dict = tccon_site_info(locations)
 
-	GGGPATH = os.environ['GGGPATH']
-	mod_path = os.path.join(GGGPATH,'models','gnd','fpit')
+	if save_path:
+		mod_path = os.path.join(save_path,'fpit')
+	else: # if a destination path is not given, try saving MOD files in GGGPATH/models/gnd/fpit
+		GGGPATH = os.environ['GGGPATH']
+		mod_path = os.path.join(GGGPATH,'models','gnd','fpit')
 	if not os.path.exists(mod_path):
 		if not muted:
 			print 'Creating',mod_path
@@ -1433,7 +1447,6 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			INTERP_DATA[site]['prof']['T'] =  ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof']['T'])
 
 			INTERP_DATA[site]['surf']['SZA'] = rad2deg(sun_angles(UTC_date,deg2rad(site_dict[site]['lat']),deg2rad(site_dict[site]['lon_180']),site_dict[site]['alt'],INTERP_DATA[site]['surf']['PS'],INTERP_DATA[site]['surf']['T2M'])[0])
-			print 'SZA',INTERP_DATA[site]['surf']['SZA']
 		
 		if slant:
 			# get slant path coordinates corresponding to the altitude levels above each site
@@ -1640,7 +1653,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 	if not muted:
 		print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
 
-def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None,**kwargs):
+def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None,save_path=None,ncdf_path=None,**kwargs):
 	"""
 	Inputs:
 		- site_abbvr: two letter site abbreviation
@@ -1666,14 +1679,9 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 			print 'When using MERRA mode, you need a ~/.netrc file to connect to urs.earthdata.nasa.gov'
 			sys.exit()
 
-	GGGPATH = os.environ['GGGPATH'] # reads the GGGPATH environment variable
-	if not muted:
-		print 'GGGPATH =',GGGPATH
 
-	if lat is not None: # a custom location was given
+	if lat: # True when lat!=None, a custom location was given
 		locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
-
-	ncdf_path = os.path.join(GGGPATH,'ncdf')
 
 	site_dict = tccon_site_info(locations)
 
@@ -1687,7 +1695,16 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 		print 'lat,lon,masl:',site_dict[site_abbrv]['lat'],site_dict[site_abbrv]['lon'],site_dict[site_abbrv]['alt']
 
 	simple = {'merradap42':'merra','merradap72':'merra','merraglob':'merra','ncep':'ncep','fpglob':'fp','fpitglob':'fpit'}
-	mod_path = os.path.join(GGGPATH,'models','gnd',simple[mode],site_abbrv)	# .mod files will be saved here
+	if save_path: # using user specified destination folder
+		mod_path = os.path.join(save_path,simple[mode],site_abbrv) # .mod files will be saved here
+	else:
+		GGGPATH = os.environ['GGGPATH'] # reads the GGGPATH environment variable
+		if not muted:
+			print 'GGGPATH =',GGGPATH
+
+		if not ncdf_path: # if a data path is not given try with GGGPATH/ncdf
+			ncdf_path = os.path.join(GGGPATH,'ncdf')
+		mod_path = os.path.join(GGGPATH,'models','gnd',simple[mode],site_abbrv)	# .mod files will be saved here
 	if not os.path.exists(mod_path):
 		os.makedirs(mod_path)
 	if not muted:
@@ -1839,9 +1856,6 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 		print len(local_date_list),'mod files written'
 
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
-
-	GGGPATH = os.environ['GGGPATH']
-	ncdf_path = os.path.join(GGGPATH,'ncdf')
 
 	arguments = parse_args()
 

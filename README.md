@@ -17,7 +17,7 @@ The first time the code is run the skyfield library will download 4 files named 
 
 ### How to run it ###
 
-python mod_maker.py arg1 geos_path=arg2 site=arg3 lat=arg4 lon=arg5 alt=arg6
+python mod_maker.py arg1 geos_path=arg2 site=arg3 lat=arg4 lon=arg5 alt=arg6 save_path=arg7
 
 arg1: date range YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months; or a single date (YYYYMMDD) in which case the end date is +24h
 
@@ -25,13 +25,17 @@ You can also give YYYYMMDD_HH instead to specify the hour, but these must be exa
 
 arg2: full path to directory containing the 3-hourly GEOS5-FP-IT files
 
-arg3: (optional) site name
+arg3: (optional) two letter site abbreviation
 
 arg4: (optional) latitude in [-90,90] range
 
 arg5: (optional) longitude in [0,360] range
 
 arg6: (optional) altitude (meters)
+
+arg7: (optional) full path to directory where data will be saved (save_path/fpit will be created), defaults to GGGPATH/models/gnd
+
+If arg3 is specified, MOD files will only be produced for that one site. See the dictionary in tccon_sites.py for site abbreviations of existing sites.
 
 A custom site location can be given, in that case arg3,arg4,arg5, and arg6 must be specified
 
@@ -51,9 +55,9 @@ use the code get_GEOS5.py in the 'download' folder to get the necessary files.
 
 ### Where do files go? ###
 
-MOD files will be generate both along the vertical and along the sun ray
+MOD files will be generate both along the vertical, and along the sun ray if required
 
-They will be saved under GGGPATH/models/gnd/fpit/xx/yy
+They will be saved under save_path/fpit/xx/yy
 
 with xx the two letter site abbreviation and yy either 'vertical' or 'slant'
 
@@ -68,7 +72,8 @@ This will not include equivalent latitude
 Comparisons between mod profiles obtained from the different sources can be found here http://www.atmosp.physics.utoronto.ca/~sroche/mod_maker/ncep_merra_fp_fpit/
 
 ### How to run it ###
-python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5 lat=arg6 lon=arg7 alt=arg8
+
+python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5 lat=arg6 lon=arg7 alt=arg8 save_path=arg9 ncdf_path=arg10
 
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or single date (YYYYMMDD).
 
@@ -88,13 +93,17 @@ arg7: (optional) longitude in [0,360] range
 
 arg8: (optional) altitude (meters)
 
+arg9: (optional) full path to directory where data will be saved (save_path/fpit will be created), defaults to GGGPATH/models/gnd
+
+arg10: (optional) full path to the directory where ncep/geos/merra files are located, defaults to GGGPATH/ncdf
+
 A custom site location can be given, in that case arg6,arg7, and arg8 must be specified and a site name must be made up for arg2
 
 add 'mute' in the command line (somwehere after arg1) and there will be no print statements other than warnings and error messages 
 
 ### Input files ###
 
-The fpglob or fpitglob modes expect two files in GGGPATH/ncdf containing concatenated 3-hourly files for surface and multi-level data, the concatenated files need to be generated beforehand
+The fpglob or fpitglob modes expect two files in 'ncdf_path' containing concatenated 3-hourly files for surface and multi-level data, the concatenated files need to be generated beforehand
 
 e.g.
 
@@ -110,13 +119,15 @@ e.g.
 
 ### Where do files go? ###
 
-MOD files will be saved under GGGPATH/models/gnd/xx
+If the 'save_path' argument is not specified MOD files will be saved under GGGPATH/models/gnd/xx
+
+Otherwise MOD files will be saved under save_path/xx
 
 with xx either 'ncep', 'merra', 'fp', or 'fpit'
 
-The merradap modes require an internet connection and EarthData credentials
+### Other notes ###
 
-The ncep mode requires the global NCEP netcdf files of the given year to be present in GGGPATH/ncdf
+The merradap modes require an internet connection and EarthData credentials
 
 The ncep mode should produce files identical to the IDL mod_maker if 'time' and 'step' are kept as default
 
