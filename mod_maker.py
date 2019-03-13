@@ -12,7 +12,7 @@ What's different?
 
 OLD: used to generate MOD files using ncep (like the IDL code), or using merra or fp or fpit data
 
-python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5
+python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5 lat=arg6 lon=arg7 alt=arg8
 
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or single date (YYYYMMDD)
 arg2: two letter site abbreviation (e.g. 'oc' for Lamont, Oklahoma; see the "site_dict" dictionary)
@@ -20,15 +20,20 @@ arg3: mode ('ncep', 'merradap42', 'merradap72', 'merraglob', 'fpglob', 'fpitglob
 the 'merradap' modes require a .netrc file in your home directory with credentials to connect to urs.earthdata.nasa.gov
 arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time in local time
 arg5: (optional, default=24) time step in hours (can be decimal)
+arg6: (optional) latitude in [-90,90] range
+arg7: (optional) longitude in [0,360] range
+arg8: (optional) altitude (meters)
 
-if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+A custom site location can be given, in that case arg6,arg7, and arg8 must be specified and a site name must be made up for arg2
 
-MOD files will be saved under GGGPATH/models/gnd/xx.
+add 'mute' in the command line (somewhere after arg1) and there will be no print statements other than warnings and error messages 
+
+MOD files will be saved under GGGPATH/models/gnd/xx/site.
 With xx either 'ncep', 'merra', 'fp', or 'fpit'
 The merradap modes require an internet connection and EarthData credentials
 The ncep mode requires the global NCEP netcdf files of the given year to be present in GGGPATH/ncdf
 
-The fpglob or fpitglob modes expect two files in GGGPATH/ncdf containing concatenated daily files for surface and multi-level data, the concatenated files need to be generated beforehand
+The fpglob or fpitglob modes expect two files in GGGPATH/ncdf containing concatenated 3-hourly files for surface and multi-level data, the concatenated files need to be generated beforehand
 e.g.
 GEOS_fpit_asm_inst3_2d_asm_Nx_GEOS5124.20171210_20171217.nc4 # surface data
 GEOS_fpit_asm_inst3_2d_asm_Np_GEOS5124.20171210_20171217.nc4 # multi-level data
@@ -42,21 +47,27 @@ The ncep mode should produce files identical to the IDL mod_maker if 'time' and 
 
 #########################################################################################################################################################################
 
-NEW: used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once using GEOS5-FP-IT daily files
+NEW: used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once using GEOS5-FP-IT 3-hourly files
 
-python mod_maker.py arg1 geos_path=arg2
+python mod_maker.py arg1 geos_path=arg2 site=arg3 lat=arg4 lon=arg5 alt=arg6
 
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or a single date (YYYYMMDD) in which case the end date is +24h
 You can also give YYYYMMDD_HH instead to specify the hour, but these must be exact GEOS5 times (UTC times 3 hourly from 00)
 arg2: full path to directory containing the daily GEOS5-FP-IT files
+arg3: (optional) site name
+arg4: (optional) latitude in [-90,90] range
+arg5: (optional) longitude in [0,360] range
+arg6: (optional) altitude (meters)
 
-if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+A custom site location can be given, in that case arg3,arg4,arg5, and arg6 must be specified
+
+add 'mute' in the command line (somewhere after arg1) and there will be no print statements other than warnings and error messages 
 
 two folders are expected in the geos_path directory:
 in geos_path/Np you must have all the 42 levels GEOS5-FP-IT files
 in geos_path/Nx you must have all the surface data files
 
-Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT daily files
+Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT 3-hourly files
 MOD files will be generate both along the vertical and along the sun ray
 
 They will be saved under GGGPATH/models/gnd/fpit/xx/yy
@@ -89,80 +100,7 @@ import pytz
 import warnings
 
 from slantify import * # code to make slant paths
-
-def tccon_site_info():
-	"""
-	dictionary mapping TCCON site abbreviations to their lat-lon-alt data, and full names
-
-	To add a new site make up a new two letter site abbreviation and add it to the dictionary following the same model of other sites.
-	
-	For sites the changed location, a 'time_spans' dictionary is used instead of the 'lat'/'lon'/'alt' keys.
-	The keys of this dictionary are pairs of dates in tuples : tuple([start_date,end_date])
-	The values are dictionaries of 'lat'/'lon'/'alt' for each time period.
-	The first date is inclusive and the end date is exclusive. See Darwin for an example.
-
-	If the instrument has moved enough so that the rounded lat and lon is different, then the mod file names will be different for the different time periods.
-
-	the longitudes must be given in the range [0-360]
-	"""
-	site_dict = {
-				'pa':{'name': 'Park Falls','loc':'Wisconsin, USA','lat':45.945,'lon':269.727,'alt':442},
-				'oc':{'name': 'Lamont','loc':'Oklahoma, USA','lat':36.604,'lon':262.514,'alt':320},
-				'wg':{'name': 'Wollongong','loc':'Australia','lat':-34.406,'lon':150.879,'alt':30},
-				'db':{'name': 'Darwin','loc':'Australia','time_spans':{tuple([datetime(2005,8,1),datetime(2015,7,1)]):{'lat':-12.422445,'lon':130.89154,'alt':30},
-														tuple([datetime(2015,7,1),datetime.now()]):{'lat':-12.45606,'lon':130.92658,'alt':37}
-														}
-				},#,'lat':-12.45606,'lon':130.92658,'alt':37},
-				'or':{'name': 'Orleans','loc':'France','lat':47.97,'lon':2.113,'alt':130},
-				'bi':{'name': 'Bialystok','loc':'Poland','lat':53.23,'lon':23.025,'alt':180},
-				'br':{'name': 'Bremen','loc':'Germany','lat':53.1037,'lon':8.849517,'alt':30},
-				'jc':{'name': 'JPL 01','loc':'California, USA','lat':34.202,'lon':241.825,'alt':390},
-				'jf':{'name': 'JPL 02','loc':'California, USA','lat':34.202,'lon':241.825,'alt':390},
-				'ra':{'name': 'Reunion Island','loc':'France','lat':-20.901,'lon':55.485,'alt':87},
-				'gm':{'name': 'Garmisch','loc':'Germany','lat':47.476,'lon':11.063,'alt':743},
-				'lh':{'name': 'Lauder 01','loc':'New Zealand','lat':-45.038,'lon':169.684,'alt':370},
-				'll':{'name': 'Lauder 02','loc':'New Zealand','lat':-45.038,'lon':169.684,'alt':370},
-				'tk':{'name': 'Tsukuba 02','loc':'Japan','lat':63.0513,'lon':140.1215,'alt':31},
-				'ka':{'name': 'Karlsruhe','loc':'Germany','lat':49.1002,'lon':8.4385,'alt':119},
-				'ae':{'name': 'Ascenssion Island','loc':'United Kingdom','lat':-7.933333,'lon':345.583333,'alt':0},
-				'eu':{'name': 'Eureka','loc':'Canada','lat':80.05,'lon':273.58,'alt':610},
-				'so':{'name': 'Sodankyla','loc':'Finland','lat':67.3668,'lon':26.6310,'alt':188},
-				'iz':{'name': 'Izana','loc':'Spain','lat':28.0,'lon':344.0,'alt':2370},
-				'if':{'name': 'Idianapolis','loc':'Indiana, USA','lat':39.861389,'lon':273.996389,'alt':270},
-				'df':{'name': 'Dryden','loc':'California, USA','lat':34.959917,'lon':242.118931,'alt':700},
-				'js':{'name': 'Saga','loc':'Japan','lat':33.240962,'lon':130.288239,'alt':7},
-				'fc':{'name': 'Four Corners','loc':'USA','lat':36.79749,'lon':251.51991,'alt':1643},
-				#'ci':{'name': 'Pasadena','loc':'California, USA','lat':34.13623,'lon':241.873103,'alt':230},
-				'ci':{'name': 'Pasadena','loc':'California, USA','lat':34.136,'lon':241.873,'alt':230},
-				'rj':{'name': 'Rikubetsu','loc':'Japan','lat':43.4567,'lon':143.7661,'alt':380},
-				'pr':{'name': 'Paris','loc':'France','lat':48.846,'lon':2.356,'alt':60},
-				'ma':{'name': 'Manaus','loc':'Brazil','lat':-3.2133,'lon':299.4017,'alt':50},
-				'sp':{'name': 'Ny-Alesund','loc':'Norway','lat':78.92324,'lon':11.92298,'alt':20},
-				'et':{'name': 'East Trout Lake','loc':'Canada','lat':54.353738,'lon':255.013333,'alt':501.8},
-				'an':{'name': 'Anmyeondo','loc':'Korea','lat':36.5382,'lon':126.331,'alt':30},
-				'bu':{'name': 'Burgos','loc':'Philippines','lat':18.5325,'lon':120.6496,'alt':35},
-				'we':{'name': 'Jena','loc':'Austria','lat':50.91,'lon':11.57,'alt':211.6},
-				'ha':{'name':'Harwell','loc':'UK','lat':51.57133,'lon':341.10683,'alt':123},
-				'he':{'name':'Hefei','loc':'China','lat':31.9,'lon':117.17,'alt':34.5},
-				'yk':{'name':'Yekaterinburg','loc':'Russia','lat':57.03833,'lon':59.54500,'alt':0}, # needs alt update
-				'he':{'name':'Hefei','loc':'China','lat':31.9,'lon':117.17,'alt':34.5},
-				'zs':{'name':'Zugspitze','loc':'Germany','lat':47.42,'lon':10.98,'alt':34.5},
-				}
-
-	for site in site_dict:
-		if 'time_spans' in site_dict[site].keys():
-			for time_span in site_dict[site]['time_spans']:
-				if site_dict[site]['time_spans'][time_span]['lon']>180:
-					site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']-360
-				else:
-					site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']			
-		else:
-			if site_dict[site]['lon']>180:
-				site_dict[site]['lon_180'] = site_dict[site]['lon']-360
-			else:
-				site_dict[site]['lon_180'] = site_dict[site]['lon']
-
-	return site_dict
+from tccon_sites import site_dict,tccon_site_info
 
 def compute_h2o_dmf(qv,rmm):
 	"""
@@ -298,7 +236,7 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 		# The head of the .mod file	
 		fmt1 = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
 		mod_content = []
-		if func is None:
+		if func is None: # without equivalent latitude
 			fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}\n'
 			mod_content+=[	'7  10\n',
 							fmt1.format(6378.137,6.000E-05,site_lat,9.81,data['H'][0],1013.25,surf_data['TROPPB']),
@@ -310,7 +248,7 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 
 			fmt = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:10.3e} {:>6.1f}    {:10.3e}    {:8.3f}    {:9.3e}\n' # format for writting the lines
 
-		else:
+		else: # with equivalent latitude
 			fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}    {:7.3f}\n'
 			mod_content+=[	'7  10\n',
 							fmt1.format(6378.137,6.000E-05,site_lat,9.81,data['H'][0],1013.25,surf_data['TROPPB']),
@@ -550,7 +488,7 @@ def querry_indices(dataset,site_lat,site_lon_180,box_lat_half_width,box_lon_half
 	"""	
 	Set up a lat-lon box for the data querry
 
-	Unlike with ncep, this will only use daily files for interpolation, so no time box is defined
+	Unlike with ncep, this will only use 3-hourly files for interpolation, so no time box is defined
 	
 	NOTE: merra lat -90 -> +90 ;  merra lon -180 -> +179.375
 
@@ -998,7 +936,7 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None,muted=False
 
 def parse_args(argu=sys.argv):
 	"""
-	parse commandline arguments (see code header)
+	parse commandline arguments (see code header or README.md)
 	"""
 
 	arg_dict = {}
@@ -1024,32 +962,38 @@ def parse_args(argu=sys.argv):
 			end_date = start_date + timedelta(days=1)
 
 	if start_date>=end_date:
-		print 'Error: the second argument must be a date range YYYYMMDD-YYYYMMDD or a single date YYYYMMDD'
+		print 'Error: the first argument must be a date range YYYYMMDD-YYYYMMDD or a single date YYYYMMDD'
 		sys.exit()
 	if not muted:
-		print 'Date range: from',start_date.strftime('%Y-%m-%d'),'to',end_date.strftime('%Y-%m-%d')
+		print 'Date range: from',start_date.strftime('%Y-%m-%d %H:%M'),'to',end_date.strftime('%Y-%m-%d %H:%M')
 
 	arg_dict['start_date'] = start_date
 	arg_dict['end_date'] = end_date
 
 	for arg in argu:
-		if 'geos_path=' in arg:
+		if 'alt=' in arg:
+			arg_dict['alt'] = float(arg.split('=')[1])
+		elif 'lat=' in arg:
+			arg_dict['lat'] = float(arg.split('=')[1])
+		elif 'lon=' in arg:
+			arg_dict['lon'] = float(arg.split('=')[1])
+		elif 'geos_path=' in arg:
 			geos_path = arg.split('=')[1]
 			if not os.path.exists(geos_path):
 				print 'Wrong path given for geos_path:',geos_path
 				sys.exit()
-			arg_dict['geos_path'] = geos_path
-		if 'site=' in arg:
+			arg_dict['GEOS_path'] = geos_path
+		elif 'site=' in arg:
 			site_abbrv = arg.split('=')[1].lower()
 			arg_dict['site_abbrv'] = site_abbrv
-		if 'mode=' in arg:
+		elif 'mode=' in arg:
 			mode = arg.split('=')[1].lower()
 			arg_dict['mode'] = mode
 			if False not in [elem not in mode for elem in ['merradap','merraglob','fpglob','fpitglob','ncep']]:
 				print 'Wrong mode, must be one of [ncep, merradap42, merradap72, merraglob, fpglob, fpitglob]'
 				sys.exit()
 			print 'Mode:',mode.upper()
-		if 'time=' in arg:
+		elif 'time=' in arg:
 			HHMM = arg.split('=')[1]
 			# hour and minute for time interpolation, default is local noon
 			time_input = re.search('([0-9][0-9]):([0-9][0-9])',HHMM).groups()
@@ -1064,17 +1008,11 @@ def parse_args(argu=sys.argv):
 			if MM>=60 or MM<0:
 				print 'Need 0<=MM<60'
 				sys.exit()
-		else: # use local noon by default
-			HH = 12
-			MM = 0
 
-		arg_dict['HH'] = HH
-		arg_dict['MM'] = MM
-
-		if 'step=' in arg:
+			arg_dict['HH'] = HH
+			arg_dict['MM'] = MM
+		elif 'step=' in arg:
 			arg_dict['time_step'] = float(arg.split('=')[1])
-		else: # use 1 day by default
-			arg_dict['time_step'] = 24
 
 	return arg_dict
 
@@ -1309,20 +1247,34 @@ def show_interp(data,x,y,interp_data,ilev):
 	pl.colorbar()
 	pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,muted=False):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,muted=False,lat=None,lon=None,alt=None,site_abbrv=None):
 	"""
 	This code only works with GEOS-5 FP-IT data.
 	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
 
-	start_date: datetime object for first date, YYYYMMDD_HH, _HH is optional and defaults to _00
-	end_date:  datetime object for last date, YYYYMMDD_HH, _HH is optional and defaults to _00
-	func_dict: output of equivalent_latitude_functions
-	GEOS_path: full path to the directory containing all the GEOS5-FP-IT files
+	Inputs:
+		- start_date: datetime object for first date, YYYYMMDD_HH, _HH is optional and defaults to _00
+		- end_date:  datetime object for last date, YYYYMMDD_HH, _HH is optional and defaults to _00
+		- func_dict: output of equivalent_latitude_functions
+		- GEOS_path: full path to the directory containing all the GEOS5-FP-IT files, the directory must contain a 'Np' folder with profile data, and a 'Nx' folder with surface data
+		- locations: dictionary of sites, defaults to the one in tccon_sites.py
+		- muted: if True there will be no print statements except for warnings and errors
+		- (optional) lat: latitude in [-90,90] range
+		- (optional) lon: longitude in [0,360] range
+		- (optional) alt: altitude (meters)
+		- (optional) site_abbrv: two letter site abbreviation
+	Outputs:
+		- .mod files at every GEOS5 time within the given date range
+
+	If any of alt/lat/lon is given, the other two must be given too as well as site_abbrv
 
 	When giving dates with _HHMM, dates must correspond exactly to GEOS5 times, so 3 hourly UTC times starting at HHMM=0000
 	"""
 
-	site_dict = tccon_site_info()
+	if lat is not None: # a custom location was given
+		locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
+
+	site_dict = tccon_site_info(locations)
 
 	GGGPATH = os.environ['GGGPATH']
 	mod_path = os.path.join(GGGPATH,'models','gnd','fpit')
@@ -1670,18 +1622,24 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,mu
 	if not muted:
 		print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
 
-def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM=None,time_step=None,muted=False):
+def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None):
 	"""
 	Inputs:
 		- site_abbvr: two letter site abbreviation
 		- start_date: YYYYMMDD (set from date_range in parse_args)
 		- end_date: YYYYMMDD  (set from date_range in parse_args)
 		- mode: one of ncep, merradap42, merradap72, merraglob, fpglob, fpitglob
-		- HH:MM (default: '12:00' ): string of starting time 'HH:MM' in local time
-		- time_step (default: 24): time step in hours
-		- func_dict: for the 'glob' modes, a list of functions to get equivalent latitude for a given potential vorticity and potential temperature
+		- (optional) HH: local hour (default: 12)
+		- (optional) MM: minute (default: 0)
+		- (optional) time step in hours (default: 24) 
+		- (optional) muted: if True there won't be print statements expect for warninsg and errors
+		- (optional) lat: latitude in [-90,90] range
+		- (optional) lon: longitude in [0,360] range
+		- (optional) alt: altitude (meters)
 	Outputs:
 		- .mod files at every time_step within the given date range
+
+	If any of alt/lat/lon is given, the other two must be given too
 	"""
 	if 'merradap' in mode: # get the earthdata credentials
 		try:
@@ -1694,9 +1652,12 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM
 	if not muted:
 		print 'GGGPATH =',GGGPATH
 
+	if lat is not None: # a custom location was given
+		locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
+
 	ncdf_path = os.path.join(GGGPATH,'ncdf')
 
-	site_dict = tccon_site_info()
+	site_dict = tccon_site_info(locations)
 
 	try:
 		print 'Site:',site_dict[site_abbrv]['name'],site_dict[site_abbrv]['loc']
@@ -1719,7 +1680,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,HH=None,MM
 	if not muted:
 		print 'Starting local time for interpolation:',local_date.strftime('%Y-%m-%d %H:%M')
 
-	time_step = timedelta(hours=time_step) # time step between mod files; will need to change the mod file naming and gsetup to do sub-daily files
+	time_step = timedelta(hours=time_step) # time step between mod files; will need to change the mod file naming and gsetup to do sub-3-hourly files
 	if not muted:
 		print 'Time step:',time_step.total_seconds()/3600.0,'hours'
 	
@@ -1870,7 +1831,7 @@ if __name__ == "__main__": # this is only executed when the code is used directl
 
 		mod_maker(**arguments)
 
-	else: # using fp-it daily files
-		### New code that can generate slant paths and uses GEOS5-FP-IT daily files
-		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['geos_path'],'Np'),start_date=arguments['start_date'],end_date=arguments['end_date'],muted=arguments['muted'])
-		mod_maker_new(start_date=arguments['start_date'],end_date=arguments['end_date'],func_dict=arguments['func_dict'],GEOS_path=arguments['geos_path'],muted=arguments['muted'])
+	else: # using fp-it 3-hourly files
+		### New code that can generate slant paths and uses GEOS5-FP-IT 3-hourly files
+		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['GEOS_path'],'Np'),start_date=arguments['start_date'],end_date=arguments['end_date'],muted=arguments['muted'])
+		mod_maker_new(**arguments)

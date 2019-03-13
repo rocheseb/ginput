@@ -17,7 +17,7 @@ The first time the code is run the skyfield library will download 4 files named 
 
 ### How to run it ###
 
-python mod_maker.py arg1 geos_path=arg2
+python mod_maker.py arg1 geos_path=arg2 site=arg3 lat=arg4 lon=arg5 alt=arg6
 
 arg1: date range YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months; or a single date (YYYYMMDD) in which case the end date is +24h
 
@@ -25,7 +25,17 @@ You can also give YYYYMMDD_HH instead to specify the hour, but these must be exa
 
 arg2: full path to directory containing the daily GEOS5-FP-IT files
 
-if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+arg3: (optional) site name
+
+arg4: (optional) latitude in [-90,90] range
+
+arg5: (optional) longitude in [0,360] range
+
+arg6: (optional) altitude (meters)
+
+A custom site location can be given, in that case arg3,arg4,arg5, and arg6 must be specified
+
+add 'mute' in the command line (somwehere after arg1) and there will be no print statements other than warnings and error messages 
 
 ### Input files ###
 
@@ -56,7 +66,7 @@ This will not include equivalent latitude
 Comparisons between mod profiles obtained from the different sources can be found here http://www.atmosp.physics.utoronto.ca/~sroche/mod_maker/ncep_merra_fp_fpit/
 
 ### How to run it ###
-python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5
+python mod_maker.py arg1 site=arg2 mode=arg3 time=arg4 step=arg5 lat=arg6 lon=arg7 alt=arg8
 
 arg1: date range (YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have to worry about end of months) or single date (YYYYMMDD).
 
@@ -70,7 +80,15 @@ arg4: (optional, default=12:00)  hour:minute (HH:MM) for the starting time in lo
 
 arg5: (optional, default=24) time step in hours (can be decimal)
 
-if the command line include 'mute' the program will not print outputs to the terminal, except error messages
+arg6: (optional) latitude in [-90,90] range
+
+arg7: (optional) longitude in [0,360] range
+
+arg8: (optional) altitude (meters)
+
+A custom site location can be given, in that case arg6,arg7, and arg8 must be specified and a site name must be made up for arg2
+
+add 'mute' in the command line (somwehere after arg1) and there will be no print statements other than warnings and error messages 
 
 ### Input files ###
 
