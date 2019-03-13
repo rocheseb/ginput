@@ -61,7 +61,9 @@ arg6: (optional) altitude (meters)
 
 A custom site location can be given, in that case arg3,arg4,arg5, and arg6 must be specified
 
-add 'mute' in the command line (somewhere after arg1) and there will be no print statements other than warnings and error messages 
+add 'mute' in the command line (somewhere after arg1) and there will be no print statements other than warnings and error messages
+
+add 'slant' in the command line (somewhere after arg1) to generate both vertical and slant MOD files.
 
 two folders are expected in the geos_path directory:
 in geos_path/Np you must have all the 42 levels GEOS5-FP-IT files
@@ -76,7 +78,7 @@ with xx the two letter site abbreviation and yy either 'vertical' or 'slant'
 The slant .mod files are only generated when the SZA is above 90 degrees.
 #########################################################################################################################################################################
 
-There is dictionary of sites with their respective lat/lon, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
+There is dictionary of sites with their respective lat/lon in tccon_sites.py, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
 """
 
 import os, sys
@@ -100,7 +102,7 @@ import pytz
 import warnings
 
 from slantify import * # code to make slant paths
-from tccon_sites import site_dict,tccon_site_info
+from tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites 
 
 def compute_h2o_dmf(qv,rmm):
 	"""
@@ -141,7 +143,7 @@ def svp_wv_over_ice(temp):
 
 	return svp
 
-def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False):
+def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False,slant=False):
 	"""
 	Creates a GGG-format .mod file
 	INPUTS:
@@ -946,6 +948,9 @@ def parse_args(argu=sys.argv):
 		muted = True
 	arg_dict['muted'] = muted
 
+	if 'slant' in argu:
+		arg_dict['slant'] = True
+
 	# parse the selected range of dates for which .mod files will be generated
 	date_range = argu[1].split('-')
 	try:
@@ -1043,11 +1048,13 @@ def GEOS_files(GEOS_path,start_date,end_date):
 
 	return select_files,select_dates
 
-def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None,muted=False):
+def equivalent_latitude_functions_new(GEOS_path,start_date=None,end_date=None,muted=False,**kwargs):
 	"""
 	Inputs:
-		- dataset: global dataset for fp, fp-it, or merra
-
+		- GEOS_path: full path to the folder containing GEOS5-fpit files, an 'Np' folder with 3-hourly files is expected under that path
+		- start_date: datetime object
+		- end_date: datetime object (exclusive)
+		- muted: if True there will be no print statements
 	Outputs:
 		- func_dict: list of functions, at each dataset time, to get equivalent latitude for a given PV and PT
 
@@ -1056,13 +1063,15 @@ def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None,mu
 	takes ~ 3-4 minutes per date
 	"""
 
-	select_files, select_dates = GEOS_files(ncdf_path,start_date,end_date)
+	GEOS_path = os.path.join(GEOS_path,'Np')
+
+	select_files, select_dates = GEOS_files(GEOS_path,start_date,end_date)
 
 	if not muted:
 		print '\nGenerating equivalent latitude functions for {} times'.format(len(select_dates))
 
 	# Use any file for stuff that is the same in all files
-	with netCDF4.Dataset(os.path.join(ncdf_path,select_files[0]),'r') as dataset:
+	with netCDF4.Dataset(os.path.join(GEOS_path,select_files[0]),'r') as dataset:
 		lat = dataset['lat'][:]
 		lat[180] = 0.0
 		lon = dataset['lon'][:]
@@ -1111,7 +1120,7 @@ def equivalent_latitude_functions_new(ncdf_path,start_date=None,end_date=None,mu
 			sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(date_ID+1,ntim,np.mean(nmin)*(ntim-date_ID)))
 			sys.stdout.flush()
 		
-		with netCDF4.Dataset(os.path.join(ncdf_path,select_files[date_ID])) as dataset:
+		with netCDF4.Dataset(os.path.join(GEOS_path,select_files[date_ID])) as dataset:
 		        
 			PT = (dataset['T'][0]*coeff_mat).data # Compute potential temperature
 
@@ -1247,7 +1256,7 @@ def show_interp(data,x,y,interp_data,ilev):
 	pl.colorbar()
 	pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,muted=False,lat=None,lon=None,alt=None,site_abbrv=None):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,**kwargs):
 	"""
 	This code only works with GEOS-5 FP-IT data.
 	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1258,6 +1267,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		- func_dict: output of equivalent_latitude_functions
 		- GEOS_path: full path to the directory containing all the GEOS5-FP-IT files, the directory must contain a 'Np' folder with profile data, and a 'Nx' folder with surface data
 		- locations: dictionary of sites, defaults to the one in tccon_sites.py
+		- slant: if True both slant and vertical .mod files will be generated
 		- muted: if True there will be no print statements except for warnings and errors
 		- (optional) lat: latitude in [-90,90] range
 		- (optional) lon: longitude in [0,360] range
@@ -1421,97 +1431,103 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 				if var not in ['T','lev']:
 					INTERP_DATA[site]['prof'][var] = ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof'][var])
 			INTERP_DATA[site]['prof']['T'] =  ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof']['T'])
+
+			INTERP_DATA[site]['surf']['SZA'] = rad2deg(sun_angles(UTC_date,deg2rad(site_dict[site]['lat']),deg2rad(site_dict[site]['lon_180']),site_dict[site]['alt'],INTERP_DATA[site]['surf']['PS'],INTERP_DATA[site]['surf']['T2M'])[0])
+			print 'SZA',INTERP_DATA[site]['surf']['SZA']
 		
-		# get slant path coordinates corresponding to the altitude levels above each site
-		if not muted:
-			print '\t-Slantify:'
-		for i,site in enumerate(site_dict.keys()): # loops over sites
+		if slant:
+			# get slant path coordinates corresponding to the altitude levels above each site
 			if not muted:
-				sys.stdout.write('\r\t\t site {:3d} / {}  {:>20}'.format(i+1,nsite,site_dict[site]['name']))
-				sys.stdout.flush()
-
-			site_alt = site_dict[site]['alt']
-			site_lat = site_dict[site]['lat']
-			site_lon = site_dict[site]['lon_180']
-
-			# vertical grid above site
-			H = INTERP_DATA[site]['prof']['H']*1000.0
-			pres = INTERP_DATA[site]['surf']['PS'] # surface pressure (hPa)
-			temp = INTERP_DATA[site]['surf']['T2M']-273.15 # surface temperature (celsius)
-
-			# get the (lat,lon,alt) of points on sunray correspondings to the vertical altitudes
-			site_dict[site]['slant_coords'] = slantify(UTC_date,site_lat,site_lon,site_alt,H,pres=pres,temp=temp)
-			for var in ['lat','lon','alt','vertical','slant']:
-				site_dict[site]['slant_coords'][var] = ma.masked_where(H.mask,site_dict[site]['slant_coords'][var])
-		if not muted:
-			print '\r\t\t{:<40s}'.format('DONE')
-
-		# Set two lists with all the latitudes and longitudes of all sites at all slant levels
-		slant_lat = []
-		slant_lon = []
-		slat_slon = []
-		for site in site_dict:
-			if site_dict[site]['slant_coords']['sza']<90: # only make profiles where sun is above the horizon
-				slat = site_dict[site]['slant_coords']['lat']
-				slon = site_dict[site]['slant_coords']['lon']
-				slant_lat.extend(slat)
-				slant_lon.extend(slon)
-				for i in range(len(slat)):
-					if slat[i] is ma.masked:
-						continue
-					if (slat[i],slon[i]) not in slat_slon:
-						slat_slon.append((slat[i],slon[i]))
-
-		IDs_list = np.array([querry_indices([lat,lon],slat,slon,box_lat_half_width,box_lon_half_width) for slat,slon in slat_slon])
-
-		slant_lat = np.array([slat for slat,slon in slat_slon])
-		slant_lon = np.array([slon for slat,slon in slat_slon])
-
-		# Interpolate to each slant level (lat,lon)
-		# This will give a vertical profile at every (lat,lon) of all the slant levels
-		if not muted:
-			print '\t-Interpolate to each slant level (lat,lon) ...'
-		with warnings.catch_warnings():
-			warnings.simplefilter("ignore")
-			NEW_INTERP_DATA = {}
-			for var in varlist:
+				print '\t-Slantify:'
+			for i,site in enumerate(site_dict.keys()): # loops over sites
 				if not muted:
-					sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
+					sys.stdout.write('\r\t\t site {:3d} / {}  {:>20}'.format(i+1,nsite,site_dict[site]['name']))
 					sys.stdout.flush()
-				if DATA[var].ndim==2:
-					NEW_INTERP_DATA[var] = lat_lon_interp(DATA[var],lat,lon,slant_lat,slant_lon,IDs_list)
-					continue
 
-				NEW_INTERP_DATA[var] = np.zeros([nlev,len(IDs_list)])
-				for ilev,level_data in enumerate(DATA[var]):
-					NEW_INTERP_DATA[var][ilev] = lat_lon_interp(level_data,lat,lon,slant_lat,slant_lon,IDs_list)
+				site_alt = site_dict[site]['alt']
+				site_lat = site_dict[site]['lat']
+				site_lon = site_dict[site]['lon_180']
+
+				# vertical grid above site
+				H = INTERP_DATA[site]['prof']['H']*1000.0
+				pres = INTERP_DATA[site]['surf']['PS'] # surface pressure (hPa)
+				temp = INTERP_DATA[site]['surf']['T2M']-273.15 # surface temperature (celsius)
+
+
+				# get the (lat,lon,alt) of points on sunray correspondings to the vertical altitudes
+				site_dict[site]['slant_coords'] = slantify(UTC_date,site_lat,site_lon,site_alt,H,pres=pres,temp=temp)
+				for var in ['lat','lon','alt','vertical','slant']:
+					site_dict[site]['slant_coords'][var] = ma.masked_where(H.mask,site_dict[site]['slant_coords'][var])
 			if not muted:
 				print '\r\t\t{:<40s}'.format('DONE')
-		# setup masks
-		for var in set(varlist)-set(['PHIS']):
-			NEW_INTERP_DATA[var] = ma.masked_where(np.isnan(NEW_INTERP_DATA[var]),NEW_INTERP_DATA[var])
 
-		# Now just get the data along the slant paths
-		if not muted:
-			print '\t-Get data along slant paths ...'
-		SLANT_DATA = {}
-		for site in site_dict: # for each site
-			if site_dict[site]['slant_coords']['sza']<90:
-				SLANT_DATA[site] = site_dict[site]['slant_coords']
-				SLANT_DATA[site]['H'] = SLANT_DATA[site]['alt']
-				SLANT_DATA[site]['lev'] = INTERP_DATA[site]['prof']['lev']
-				for var in set(varlist)-set(['H','PHIS']): # for each variable
-					SLANT_DATA[site][var] = np.array([])				
-					for i in range(len(SLANT_DATA[site]['H'])): # for each slant point
-						slat,slon = SLANT_DATA[site]['lat'][i] , SLANT_DATA[site]['lon'][i]
-						try:
-							ID = slat_slon.index((slat,slon))
-						except ValueError:
-							SLANT_DATA[site][var] = np.append(SLANT_DATA[site][var],np.nan)
-						else:
-							SLANT_DATA[site][var] = np.append(SLANT_DATA[site][var],NEW_INTERP_DATA[var][i,ID])
-					
-					SLANT_DATA[site][var] = ma.masked_where(np.isnan(SLANT_DATA[site][var]),SLANT_DATA[site][var])
+			# Set two lists with all the latitudes and longitudes of all sites at all slant levels
+			slant_lat = []
+			slant_lon = []
+			slat_slon = []
+			for site in site_dict:
+				if site_dict[site]['slant_coords']['sza']<90: # only make profiles where sun is above the horizon
+					slat = site_dict[site]['slant_coords']['lat']
+					slon = site_dict[site]['slant_coords']['lon']
+					slant_lat.extend(slat)
+					slant_lon.extend(slon)
+					for i in range(len(slat)):
+						if slat[i] is ma.masked:
+							continue
+						if (slat[i],slon[i]) not in slat_slon:
+							slat_slon.append((slat[i],slon[i]))
+
+			IDs_list = np.array([querry_indices([lat,lon],slat,slon,box_lat_half_width,box_lon_half_width) for slat,slon in slat_slon])
+
+			slant_lat = np.array([slat for slat,slon in slat_slon])
+			slant_lon = np.array([slon for slat,slon in slat_slon])
+
+			# Interpolate to each slant level (lat,lon)
+			# This will give a vertical profile at every (lat,lon) of all the slant levels
+			if not muted:
+				print '\t-Interpolate to each slant level (lat,lon) ...'
+			with warnings.catch_warnings():
+				warnings.simplefilter("ignore")
+				NEW_INTERP_DATA = {}
+				for var in varlist:
+					if not muted:
+						sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
+						sys.stdout.flush()
+					if DATA[var].ndim==2:
+						NEW_INTERP_DATA[var] = lat_lon_interp(DATA[var],lat,lon,slant_lat,slant_lon,IDs_list)
+						continue
+
+					NEW_INTERP_DATA[var] = np.zeros([nlev,len(IDs_list)])
+					for ilev,level_data in enumerate(DATA[var]):
+						NEW_INTERP_DATA[var][ilev] = lat_lon_interp(level_data,lat,lon,slant_lat,slant_lon,IDs_list)
+				if not muted:
+					print '\r\t\t{:<40s}'.format('DONE')
+			# setup masks
+			for var in set(varlist)-set(['PHIS']):
+				NEW_INTERP_DATA[var] = ma.masked_where(np.isnan(NEW_INTERP_DATA[var]),NEW_INTERP_DATA[var])
+
+			# Now just get the data along the slant paths
+			if not muted:
+				print '\t-Get data along slant paths ...'
+			SLANT_DATA = {}
+			for site in site_dict: # for each site
+				if site_dict[site]['slant_coords']['sza']<90:
+					SLANT_DATA[site] = site_dict[site]['slant_coords']
+					SLANT_DATA[site]['H'] = SLANT_DATA[site]['alt']
+					SLANT_DATA[site]['lev'] = INTERP_DATA[site]['prof']['lev']
+					for var in set(varlist)-set(['H','PHIS']): # for each variable
+						SLANT_DATA[site][var] = np.array([])				
+						for i in range(len(SLANT_DATA[site]['H'])): # for each slant point
+							slat,slon = SLANT_DATA[site]['lat'][i] , SLANT_DATA[site]['lon'][i]
+							try:
+								ID = slat_slon.index((slat,slon))
+							except ValueError:
+								SLANT_DATA[site][var] = np.append(SLANT_DATA[site][var],np.nan)
+							else:
+								SLANT_DATA[site][var] = np.append(SLANT_DATA[site][var],NEW_INTERP_DATA[var][i,ID])
+						
+						SLANT_DATA[site][var] = ma.masked_where(np.isnan(SLANT_DATA[site][var]),SLANT_DATA[site][var])
+		# end of 'if slant'
 
 		# Interpolate T,RH,MMW down to 1000 hPa
 		# Or extrapolate so that when linearly interpolating to the surface level using two levels that bracket the surface pressure, the values match the surface values
@@ -1522,7 +1538,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		for site in site_dict:
 			try:
 				all_data = [SLANT_DATA[site],INTERP_DATA[site]['prof']]
-			except KeyError:
+			except:
 				all_data = [INTERP_DATA[site]['prof']]
 
 			for elem in all_data:
@@ -1569,15 +1585,14 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 				elem['H2O_DMF'] = compute_h2o_dmf(elem['QV'],rmm) # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
 		
 		if not muted:
-			print '\t\t {:3d} / {} sites with SZA<90'.format(len(SLANT_DATA.keys()),nsite)
+			if slant:
+				print '\t\t {:3d} / {} sites with SZA<90'.format(len(SLANT_DATA.keys()),nsite)
 			print '\t-Write mod files ...'
 		
 		# write the .mod files
 		version = 'mod_maker_10.6   2017-04-11   GCT'
 
 		for site in INTERP_DATA:
-
-			INTERP_DATA[site]['surf']['SZA'] = site_dict[site]['slant_coords']['sza']
 
 			site_lat = site_dict[site]['lat']
 			site_lon_180 = site_dict[site]['lon_180']
@@ -1589,9 +1604,10 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			if not os.path.exists(vertical_mod_path):
 				os.makedirs(vertical_mod_path)
 
-			slant_mod_path =  os.path.join(mod_path,site,'slant')
-			if not os.path.exists(slant_mod_path):
-				os.makedirs(slant_mod_path)
+			if slant:
+				slant_mod_path =  os.path.join(mod_path,site,'slant')
+				if not os.path.exists(slant_mod_path):
+					os.makedirs(slant_mod_path)
 				
 			# directions for .mod file name
 			if site_lat > 0:
@@ -1610,19 +1626,21 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			
 			# write vertical mod file
 			mod_file_path = os.path.join(vertical_mod_path,mod_name)
-			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA[site]['prof'],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted)
-			# write slant mod_file
-			if site in SLANT_DATA.keys():
-				if not muted:
-					print '\t\t\t{:>20s} + slant'.format('')
-				mod_file_path = os.path.join(slant_mod_path,mod_name)
-				write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted)
+			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA[site]['prof'],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted,slant=slant)
+			
+			if slant:
+				# write slant mod_file
+				if site in SLANT_DATA.keys():
+					if not muted:
+						print '\t\t\t{:>20s} + slant'.format('')
+					mod_file_path = os.path.join(slant_mod_path,mod_name)
+					write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted,slant=slant)
 		if not muted:
 			print '\ndate {:4d} / {} DONE in {:.0f} seconds'.format(date_ID+1,len(select_dates),time.time()-start_it)
 	if not muted:
 		print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
 
-def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None):
+def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None,**kwargs):
 	"""
 	Inputs:
 		- site_abbvr: two letter site abbreviation
@@ -1833,5 +1851,5 @@ if __name__ == "__main__": # this is only executed when the code is used directl
 
 	else: # using fp-it 3-hourly files
 		### New code that can generate slant paths and uses GEOS5-FP-IT 3-hourly files
-		arguments['func_dict'] = equivalent_latitude_functions_new(os.path.join(arguments['GEOS_path'],'Np'),start_date=arguments['start_date'],end_date=arguments['end_date'],muted=arguments['muted'])
+		arguments['func_dict'] = equivalent_latitude_functions_new(**arguments)
 		mod_maker_new(**arguments)

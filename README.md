@@ -7,11 +7,11 @@ The code can be run in two ways:
 
 ## 1 - NEW: ##
 
-used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once using GEOS5-FP-IT daily files
+used to generate MOD files on GEOS5-FP-IT times for all TCCON sites at once using GEOS5-FP-IT 3-hourly files
 
-It will generate MOD files both along the vertical above the site location and along the sun ray
+It will generate MOD files both along the vertical above the site location, and along the sun ray if required
 
-Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT daily files
+Running the code like this will generate MOD files for ALL sites withtin the date range on GEOS5 times (every 3 hours) using GEOS5-FP-IT 3-hourly files
 
 The first time the code is run the skyfield library will download 4 files named 'de421.bsp', 'deltat.data', 'deltat.preds', and 'Leap_Second.dat'
 
@@ -23,7 +23,7 @@ arg1: date range YYYYMMDD-YYYYMMDD, second one not inclusive, so you don't have 
 
 You can also give YYYYMMDD_HH instead to specify the hour, but these must be exact GEOS5 times (UTC times 3 hourly from 00)
 
-arg2: full path to directory containing the daily GEOS5-FP-IT files
+arg2: full path to directory containing the 3-hourly GEOS5-FP-IT files
 
 arg3: (optional) site name
 
@@ -35,7 +35,9 @@ arg6: (optional) altitude (meters)
 
 A custom site location can be given, in that case arg3,arg4,arg5, and arg6 must be specified
 
-add 'mute' in the command line (somwehere after arg1) and there will be no print statements other than warnings and error messages 
+add 'mute' in the command line (somwehere after arg1) and there will be no print statements other than warnings and error messages
+
+add 'slant' in the command line (somewhere after arg1) to generate both vertical and slant MOD files.
 
 ### Input files ###
 
@@ -92,7 +94,7 @@ add 'mute' in the command line (somwehere after arg1) and there will be no print
 
 ### Input files ###
 
-The fpglob or fpitglob modes expect two files in GGGPATH/ncdf containing concatenated daily files for surface and multi-level data, the concatenated files need to be generated beforehand
+The fpglob or fpitglob modes expect two files in GGGPATH/ncdf containing concatenated 3-hourly files for surface and multi-level data, the concatenated files need to be generated beforehand
 
 e.g.
 

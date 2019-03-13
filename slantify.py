@@ -174,6 +174,39 @@ def distance_between(position1,position2):
 
 	return d
 
+def sun_angles(date,lat,lon,alt,pres=0,temp=0):
+	"""
+	Inputs:
+		- date: datetime object
+		- lat: geodetic latitude (radians)
+		- lon: longitude (radians)
+		- alt: altitude (meters)
+		- (optional) pres: surface pressure (mbar)
+		- (optional) temp: surface temperature (Celcius)
+	Outputs:
+		- corrected_sza: solar zenith angle (radians)
+		- azim: solar azimuth angle (radians)
+	"""
+	
+	# setup observer at date,lat,lon,alt
+	obs = ephem.Observer()
+	obs.date = date
+	obs.lon = lon
+	obs.lat = lat
+	obs.elevation = alt
+	# if surface pressure and temperature are provided for date,lat,lon then atmospheric refraction will also be taken into account when computing the sun position
+	obs.pressure = pres	# when set to 0 it will not be used
+	obs.temp = temp
+
+	# setup sun relative to the observer
+	sun = ephem.Sun() 
+	sun.compute(obs)
+	# this includes some corrections (e.g. parallax); see: https://rhodesmill.org/pyephem/radec
+	corrected_sza= 0.5*np.pi-sun.alt	# solar zenith angle (radians)
+	azim = sun.az	# azimuth angle (radians)
+
+	return corrected_sza,azim
+
 def slantify(date,lat,lon,alt,vertical_distances,pres=0,temp=0,plots=False):
 	"""
 	Inputs:
@@ -216,22 +249,7 @@ def slantify(date,lat,lon,alt,vertical_distances,pres=0,temp=0,plots=False):
 	# radius of geoid at lat (meters)
 	rg = r_geoid(lat,lon,re,rp)
 
-	# setup observer at date,lat,lon,alt
-	obs = ephem.Observer()
-	obs.date = date
-	obs.lon = lon
-	obs.lat = lat
-	obs.elevation = alt
-	# if surface pressure and temperature are provided for date,lat,lon then atmospheric refraction will also be taken into account when computing the sun position
-	obs.pressure = pres	# when set to 0 it will not be used
-	obs.temp = temp
-
-	# setup sun relative to the observer
-	sun = ephem.Sun() 
-	sun.compute(obs)
-	# this includes some corrections (e.g. parallax); see: https://rhodesmill.org/pyephem/radec
-	corrected_sza= 0.5*np.pi-sun.alt	# solar zenith angle (radians)
-	azim = sun.az	# azimuth angle (radians)
+	corrected_sza, azim = sun_angles(date,lat,lon,alt,pres,temp) # get solar zenith and azimuth angles
 
 	ssp_lat,ssp_lon = ssp(date)		# latitude and longitude of sub-solar point
 
