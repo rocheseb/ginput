@@ -85,7 +85,7 @@ The slant .mod files are only generated when the SZA is above 90 degrees.
 
 There is dictionary of sites with their respective lat/lon in tccon_sites.py, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
 """
-
+import argparse
 import os, sys
 import numpy as np
 import numpy.ma as ma
@@ -108,6 +108,12 @@ import warnings
 
 from slantify import * # code to make slant paths
 from tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites 
+
+
+def shell_error(msg, ecode=1):
+	print msg
+	sys.exit(ecode)
+
 
 def compute_h2o_dmf(qv,rmm):
 	"""
@@ -945,90 +951,57 @@ def parse_args(argu=sys.argv):
 	"""
 	parse commandline arguments (see code header or README.md)
 	"""
-
-	arg_dict = {}
-
-	muted = False
-	if 'mute' in argu:
-		muted = True
-	arg_dict['muted'] = muted
-
-	if 'slant' in argu:
-		arg_dict['slant'] = True
-
-	# parse the selected range of dates for which .mod files will be generated
-	date_range = argu[1].split('-')
-	try:
-		start_date = datetime.strptime(date_range[0],'%Y%m%d')
-	except:
-		start_date = datetime.strptime(date_range[0],'%Y%m%d_%H')
-
-	try:
-		end_date = datetime.strptime(date_range[1],'%Y%m%d')
-	except:
+	def parse_date(datestr):
 		try:
-			end_date = datetime.strptime(date_range[1],'%Y%m%d_%H')
-		except IndexError: # if a single date is given set the end date as the next day 
+			date_out = datetime.strptime(datestr, '%Y%m%d')
+		except ValueError:
+			date_out = datetime.strptime(datestr, '%Y%m%d_%H')
+		return date_out
+
+	def parse_date_range(datestr):
+		dates = datestr.split('-')
+		start_date = parse_date(dates[0])
+		if len(dates) > 1:
+			end_date = parse_date(dates[1])
+		else:
 			end_date = start_date + timedelta(days=1)
 
-	if start_date>=end_date:
-		print 'Error: the first argument must be a date range YYYYMMDD-YYYYMMDD or a single date YYYYMMDD'
-		sys.exit()
-	if not muted:
-		print 'Date range: from',start_date.strftime('%Y-%m-%d %H:%M'),'to',end_date.strftime('%Y-%m-%d %H:%M')
+		return start_date, end_date
 
-	arg_dict['start_date'] = start_date
-	arg_dict['end_date'] = end_date
+	# For Py3 compatibility, convert keys iterator into an explicit list.
+	valid_site_ids = list(site_dict.keys())
 
-	for arg in argu:
-		if 'alt=' in arg:
-			arg_dict['alt'] = float(arg.split('=')[1])
-		elif 'lat=' in arg:
-			arg_dict['lat'] = float(arg.split('=')[1])
-		elif 'lon=' in arg:
-			arg_dict['lon'] = float(arg.split('=')[1])
-		elif 'geos_path=' in arg:
-			geos_path = arg.split('=')[1]
-			if not os.path.exists(geos_path):
-				print 'Wrong path given for geos_path:',geos_path
-				sys.exit()
-			arg_dict['GEOS_path'] = geos_path
-		elif 'site=' in arg:
-			site_abbrv = arg.split('=')[1].lower()
-			arg_dict['site_abbrv'] = site_abbrv
-		elif 'mode=' in arg:
-			mode = arg.split('=')[1].lower()
-			arg_dict['mode'] = mode
-			if False not in [elem not in mode for elem in ['merradap','merraglob','fpglob','fpitglob','ncep']]:
-				print 'Wrong mode, must be one of [ncep, merradap42, merradap72, merraglob, fpglob, fpitglob]'
-				sys.exit()
-			print 'Mode:',mode.upper()
-		elif 'time=' in arg:
-			HHMM = arg.split('=')[1]
-			# hour and minute for time interpolation, default is local noon
-			time_input = re.search('([0-9][0-9]):([0-9][0-9])',HHMM).groups()
+	parser = argparse.ArgumentParser(description='Generate TCCON .mod files')
+	parser.add_argument('date_range', type=parse_date_range,
+						help='The range of dates to generate .mod files for. May be given as YYYYMMDD-YYYYMMDD, or '
+							'YYYYMMDD_HH-YYYYMMDD_HH, where the ending date is exclusive. A single date may be given, '
+							'in which case the ending date is assumed to be one day later.')
+	parser.add_argument('GEOS_path', help='Path to the GEOS FP(-IT) netCDF files. Must be directory with subdirectories '
+										  'Nx and Np, containing surface and profile paths respectively.')
+	parser.add_argument('-s', '--save-path', help='Location to save .mod files to. Subdirectories organized by met type, '
+												'site, and vertical/slant .mod files will be created. If not given, '
+												'will attempt to save files under $GGGPATH/models/gnd')
+	parser.add_argument('-q', '--quiet', dest='muted', action='store_true', help='Suppress log output to command line.')
+	parser.add_argument('--slant', action='store_true', help='Generate slant .mod files, in addition to vertical .mod '
+															'files.')
+	parser.add_argument('--alt', type=float, help='Site altitude in meters, if defining a custom site.')
+	parser.add_argument('--lon', type=float, help='Site longitude in degrees east, if defining a custom site. Values '
+												'should be positive; i.e. 90 W should be given as 270.')
+	parser.add_argument('--lat', type=float, help='Site latitude, in degrees (north = positive, south = negative).')
+	parser.add_argument('--site', choices=valid_site_ids, help='Two-letter site abbreviation. Providing this will '
+															'produce .mod files only for that site.')
 
-			HH = int(time_input[0])
-			MM = int(time_input[1])
+	arg_dict = vars(parser.parse_args())
 
-			# small checks
-			if HH>=24 or HH<0:
-				print 'Need 0<=H<24'
-				sys.exit()
-			if MM>=60 or MM<0:
-				print 'Need 0<=MM<60'
-				sys.exit()
-
-			arg_dict['HH'] = HH
-			arg_dict['MM'] = MM
-		elif 'step=' in arg:
-			arg_dict['time_step'] = float(arg.split('=')[1])
-		elif 'save_path' in arg:
-			arg_dict['save_path'] = arg.split('=')[1]
-		elif 'ncdf_path' in arg:
-			arg_dict['ncdf_path'] = arg.split('=')[1]
+	# Error checking and some splitting of variables
+	arg_dict['start_date'], arg_dict['end_date'] = arg_dict['date_range']
+	if arg_dict['end_date'] < arg_dict['start_date']:
+		shell_error('Error: end of date range (if given) must be after the start')
+	if not os.path.exists(arg_dict['GEOS_path']):
+		shell_error('Given GEOS data path ({}) does not exist'.format(arg_dict['GEOS_path']))
 
 	return arg_dict
+
 
 def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path):
 
@@ -1301,6 +1274,9 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		mod_path = os.path.join(save_path,'fpit')
 	else: # if a destination path is not given, try saving MOD files in GGGPATH/models/gnd/fpit
 		GGGPATH = os.environ['GGGPATH']
+		if GGGPATH is None:
+			raise RuntimeError('No custom save_path provided, and the GGGPATH environmental variable is not set. '
+							'One of these must be provided.')
 		mod_path = os.path.join(GGGPATH,'models','gnd','fpit')
 	if not os.path.exists(mod_path):
 		if not muted:
