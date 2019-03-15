@@ -1694,17 +1694,24 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 	if not muted:
 		print 'lat,lon,masl:',site_dict[site_abbrv]['lat'],site_dict[site_abbrv]['lon'],site_dict[site_abbrv]['alt']
 
+	try:
+		GGGPATH = os.environ['GGGPATH'] # reads the GGGPATH environment variable
+	except:
+		if not save_path or not ncdf_path:
+			print 'No GGGPATH environment variable'
+			sys.exit()
+	else:
+		if not ncdf_path: # if a data path is not given try with GGGPATH/ncdf
+			ncdf_path = os.path.join(GGGPATH,'ncdf')		
+
 	simple = {'merradap42':'merra','merradap72':'merra','merraglob':'merra','ncep':'ncep','fpglob':'fp','fpitglob':'fpit'}
 	if save_path: # using user specified destination folder
 		mod_path = os.path.join(save_path,simple[mode],site_abbrv) # .mod files will be saved here
 	else:
-		GGGPATH = os.environ['GGGPATH'] # reads the GGGPATH environment variable
 		if not muted:
 			print 'GGGPATH =',GGGPATH
-
-		if not ncdf_path: # if a data path is not given try with GGGPATH/ncdf
-			ncdf_path = os.path.join(GGGPATH,'ncdf')
 		mod_path = os.path.join(GGGPATH,'models','gnd',simple[mode],site_abbrv)	# .mod files will be saved here
+
 	if not os.path.exists(mod_path):
 		os.makedirs(mod_path)
 	if not muted:
