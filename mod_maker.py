@@ -485,9 +485,11 @@ def read_data(dataset, varlist, lat_lon_box=0):
 	common_date_format = '{:0>4}-{:0>2}-{:0>2} {:0>2}:{:0>2}:{:0>2}'.format(*date_list)
 
 	start_date = datetime.strptime(common_date_format,'%Y-%m-%d %H:%M:%S')
-	astropy_start_date = Time(start_date)
+	with warnings.catch_warnings(): # silence the astropy erfa warning that triggers for dates prior to UTC (datasets can have epoch as 1800-01-01)
+		warnings.simplefilter("ignore")	
+		astropy_start_date = Time(start_date)
 
-	DATA['julday0'] = astropy_start_date.jd # gives same results as IDL's JULDAY function
+	DATA['julday0'] = astropy_start_date.jd # gives same results as IDL's JULDAY function that is used in mod_maker.pro
 
 	return DATA
 
