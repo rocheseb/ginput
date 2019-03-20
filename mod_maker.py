@@ -87,6 +87,7 @@ There is dictionary of sites with their respective lat/lon in tccon_sites.py, so
 """
 
 import os, sys
+from collections import OrderedDict
 import numpy as np
 import numpy.ma as ma
 from numpy import cos,sin,tan,arctan,arccos,arcsin,arctan2,deg2rad,rad2deg
@@ -164,13 +165,22 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 	t_ussa=[227.7, 239.2, 257.9, 270.6, 264.3, 245.2, 231.6, 198.0, 189.8, 235.0]
 	z_ussa=[31.1,  36.8,  42.4,  47.8,  53.3,  60.1,  64.9,  79.3,  92.0,  106.3]
 
+	# Define constants common to both NCEP and GEOS files: earth's radius, ecc2 (?), site latitude, surface gravity,
+	# profile bottom altitude, and base pressure. Tropopause pressure will be added under the NCEP/GEOS part of the code
+	# b/c we use different variables under those cases
+	# TODO: these should be defined in a constants file and just referenced here, at least the ones that are truly
+	#  constant
+	mod_constant_names = ('earth_radius', 'ecc2', 'obs_lat', 'surface_gravity', 'profile_base_geometric_alt',
+						  'base_pressure', 'tropopause_pressure')
+	mod_constants = [6378.137, 6.000E-05, site_lat, 9.81, data['H'][0], 1013.25]
 	if type(surf_data)==int: # ncep mode
-
+		# NCEP and GEOS provide different tropopause variables that need to be added
+		mod_constants.append(data['TROPP'])
 		# The head of the .mod file	
 		fmt = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
 		mod_content = []
 		mod_content+=[	'5  6\n',
-						fmt.format(6378.137,6.000E-05,site_lat,9.81,data['H'][0],1013.25,data['TROPP']),
+						fmt.format(*mod_constants),
 						version+'\n',
 						' mbar        Kelvin         km      g/mole      DMF       %\n',
 						'Pressure  Temperature     Height     MMW        H2O      RH\n',	]
@@ -238,22 +248,25 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 			mmw = compute_mmw(strat_wmf)
 			mod_content += [fmt.format(p_ussa[k],t_ussa[k]+Delta_T,z_ussa[k],mmw,strat_wmf,100*strat_wmf*p_ussa[k]/svp)]
 
-	else: # merra/geos mode
+		output_dict = dict()
+		print 'Warning: output dictionary for NCEP mode not implemented, will just be empty'
 
+	else: # merra/geos mode
+		mod_constants.append(surf_data['TROPPB'])
 		# The head of the .mod file	
 		fmt1 = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
 		mod_content = []
 		if func is None: # without equivalent latitude
 			fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}\n'
 			mod_content+=[	'7  10\n',
-							fmt1.format(6378.137,6.000E-05,site_lat,9.81,data['H'][0],1013.25,surf_data['TROPPB']),
+							fmt1.format(*mod_constants),
 							'Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT\n',
 							fmt2.format(*[surf_data[key] for key in ['PS','T2M','H','MMW','H2O_DMF','RH','SLP','TROPPB','TROPPV','TROPPT','TROPT']]),
 							version+'\n',
 							' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin     kg/kg\n',
 							'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT         O3\n',	]
 
-			fmt = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:10.3e} {:>6.1f}    {:10.3e}    {:8.3f}    {:9.3e}\n' # format for writting the lines
+			fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {O3:9.3e}\n' # format for writting the lines
 
 		else: # with equivalent latitude
 			fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}    {:7.3f}\n'
@@ -265,12 +278,22 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 							' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin      degrees     kg/kg\n',
 							'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT          EL         O3\n',	]
 
-			fmt = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:10.3e} {:>6.1f}    {:10.3e}    {:8.3f}    {:7.3f}    {:9.3e}\n' # format for writting the lines
+			fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {EL:7.3f}    {O3:9.3e}\n' # format for writting the lines
 
 		# not sure if merra needs all the filters/corrections used for ncep data?
 
 		# Export the Pressure, Temp and SHum
+		prototype_array = np.full((len(data['H2O_DMF'],)), np.nan, dtype=np.float)
+		final_data_keys = {'Pressure': 'lev', 'Temperature': 'T', 'Height': 'H', 'MMW': 'mmw', 'H2O': 'H2O_DMF',
+						'RH': 'RH', 'EPV': 'EPV', 'PT': 'PT', 'EL': 'EL', 'O3': 'O3'}
+		output_dict = dict()
+		for key in final_data_keys.keys():
+			output_dict[key] = prototype_array.copy()
+
 		for k,elem in enumerate(data['H2O_DMF']):
+			# will use to output the final data to the .mod file and the returned dict
+			line_dict = dict()
+
 			svp = svp_wv_over_ice(data['T'][k])
 			h2o_wmf = compute_h2o_wmf(data['H2O_DMF'][k]) # wet mole fraction of h2o
 
@@ -293,22 +316,30 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 				h2o_wmf = svp*data['RH'][k]/data['T'][k]
 				data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
 
-			mmw = compute_mmw(h2o_wmf)
-
+			for key in ('lev', 'T', 'H', 'H2O_DMF', 'RH', 'EPV', 'O3'):
+				line_dict[key] = data[key][k]
+			line_dict['mmw'] = compute_mmw(h2o_wmf)
 			# compute potential temperature
-			PT = data['T'][k]*(1000.0/data['lev'][k])**0.286
-
+			line_dict['PT'] = data['T'][k]*(1000.0/data['lev'][k])**0.286
 			if func is None:
-				mod_content += [fmt.format(data['lev'][k],data['T'][k],data['H'][k],mmw,data['H2O_DMF'][k],100*data['RH'][k],data['EPV'][k],PT,data['O3'][k])]
-			else: # compute equivalent latitude; 1e6 converts EPV to PVU (1e-6 K . m2 / kg / s)
-				EL = func(data['EPV'][k]*1e6,PT)[0]
-				mod_content += [fmt.format(data['lev'][k],data['T'][k],data['H'][k],mmw,data['H2O_DMF'][k],100*data['RH'][k],data['EPV'][k],PT,EL,data['O3'][k])]
+				line_dict['EL'] = None
+			else:
+				# compute equivalent latitude; 1e6 converts EPV to PVU (1e-6 K . m2 / kg / s)
+				line_dict['EL'] = func(line_dict['EPV']*1e6, line_dict['PT'])[0]
+
+			mod_content += [fmt.format(**line_dict)]
+			for outkey, linekey in final_data_keys.items():
+				output_dict[outkey][k] = line_dict[linekey]
+
+	output_dict['constants'] = {k: v for k, v in zip(mod_constant_names, mod_constants)}
 
 	with open(mod_path,'w') as outfile:
 		outfile.writelines(mod_content)
 
 	if not muted:
 		print mod_path
+
+	return output_dict
 
 def trilinear_interp(DATA,varlist,site_lon_360,site_lat,site_tim):
 	"""
@@ -1318,7 +1349,10 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 	rmm = 28.964/18.02	# Ratio of Molecular Masses (Dry_Air/H2O)
 
 	start = time.time()
+	mod_dicts = dict()
 	for date_ID,UTC_date in enumerate(select_dates):
+		mod_dicts[UTC_date] = dict()
+
 		start_it = time.time()
 
 		DATA = {}
@@ -1606,7 +1640,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		version = 'mod_maker_10.6   2017-04-11   GCT'
 
 		for site in INTERP_DATA:
-
+			mod_dicts[UTC_date][site] = dict()
 			site_lat = site_dict[site]['lat']
 			site_lon_180 = site_dict[site]['lon_180']
 
@@ -1639,7 +1673,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			
 			# write vertical mod file
 			mod_file_path = os.path.join(vertical_mod_path,mod_name)
-			write_mod(mod_file_path,version,site_lat,data=INTERP_DATA[site]['prof'],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted,slant=slant)
+			vertical_mod_dict = write_mod(mod_file_path,version,site_lat,data=INTERP_DATA[site]['prof'],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted,slant=slant)
 			
 			if slant:
 				# write slant mod_file
@@ -1647,11 +1681,19 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 					if not muted:
 						print '\t\t\t{:>20s} + slant'.format('')
 					mod_file_path = os.path.join(slant_mod_path,mod_name)
-					write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted,slant=slant)
+					slant_mod_dict = write_mod(mod_file_path,version,site_lat,data=SLANT_DATA[site],surf_data=INTERP_DATA[site]['surf'],func=func_dict[UTC_date],muted=muted,slant=slant)
+			else:
+				slant_mod_dict = dict()
+
+			mod_dicts[UTC_date][site]['vertical'] = vertical_mod_dict
+			mod_dicts[UTC_date][site]['slant'] = slant_mod_dict
 		if not muted:
 			print '\ndate {:4d} / {} DONE in {:.0f} seconds'.format(date_ID+1,len(select_dates),time.time()-start_it)
 	if not muted:
 		print 'ALL DONE in {:.1f} minutes'.format((time.time()-start)/60.0)
+
+	return mod_dicts
+
 
 def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None,save_path=None,ncdf_path=None,**kwargs):
 	"""
