@@ -1,4 +1,5 @@
 import datetime as dt
+from dateutil.relativedelta import relativedelta
 import numpy as np
 import os
 import pandas as pd
@@ -429,6 +430,12 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=0.0):
 def date_to_frac_year(date_in):
     doy = float(date_in.strftime('%j'))
     return doy / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
+
+
+def frac_years_to_reldelta(frac_year):
+    age_years = np.floor(frac_year)
+    age_fracs = np.mod(frac_year, 1)
+    return [relativedelta(years=y, days=365.25 * d) for y, d in zip(age_years, age_fracs)]
 
 
 def start_of_month(date_in, out_type=dt.date):
