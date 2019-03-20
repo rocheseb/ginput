@@ -1363,6 +1363,8 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		with netCDF4.Dataset(os.path.join(GEOS_path,'Np',select_files[date_ID]),'r') as dataset:
 
 			for var in varlist:
+				# Taking dataset[var][0] is equivalent to dataset[var][0,:,:,:], which since there's only one time per
+				# file just cuts the data from 4D to 3D
 				DATA[var] = dataset[var][0]
 			DATA['lev'] = dataset['lev'][:]
 

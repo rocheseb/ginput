@@ -1,8 +1,12 @@
 import datetime as dt
 import numpy as np
+import os
 import pandas as pd
 import re
 from scipy.interpolate import interp2d
+import subprocess
+
+import mod_constants as const
 
 _std_model_pres_levels = np.array([1000.0, 975.0, 950.0, 925.0, 900.0, 875.0, 850.0, 825.0, 800.0, 775.0, 750.0, 725.0,
                                    700.0, 650.0, 600.0, 550.0, 500.0, 450.0, 400.0, 350.0, 300.0, 250.0, 200.0, 150.0,
@@ -66,6 +70,82 @@ def read_mod_file(mod_file, as_dataframes=False):
     return out_dict
 
 
+def write_map_file(map_file, site_lat, variables, units, var_order=None):
+    # variables and units must have the same keys
+    if var_order is None:
+        var_order = list(variables.keys())
+    if set(var_order) != set(variables.keys()) or set(var_order) != set(units.keys()):
+        raise ValueError('variables and units must be dictionaries with the same keys, and both must match the '
+                         'keys in var_order (if given)')
+
+    k1 = var_order[0]
+    size_check = np.size(variables[k1])
+    for k, v in variables.items():
+        if np.ndim(v) != 1:
+            raise ValueError('All values in variables must be 1 dimensional. {} is not.'.format(k))
+        elif np.size(v) != size_check:
+            raise ValueError('All values in variables must have the same shape. {badvar} has a different shape '
+                             '({badshape}) than {chkvar} ({chkshape})'.format(badvar=k, badshape=np.shape(v),
+                                                                              chkvar=k1, chkshape=size_check))
+
+    header_lines = []
+    # Header line 2: file name (no path)
+    header_lines.append(os.path.basename(map_file))
+    # Header line 3: version info
+    hg_parent, hg_branch, hg_date = hg_commit_info()
+    header_lines.append('{pgrm:19} {vers:14} ({branch:19}) {date} {author:10}'
+                        .format(pgrm='MOD_MAKER.py', vers=hg_parent, branch=hg_branch, date=hg_date, author='SR, MK, JL'))
+    # Header line 4: wiki link
+    header_lines.append('Please see https://tccon-wiki.caltech.edu for a complete description of this file and its usage.')
+    # Header line 5-8: constants/site lat
+    header_lines.append('Avodagro (molecules/mole): {}'.format(const.avogadro))
+    header_lines.append('Mass_Dry_Air (kg/mole): {}'.format(const.mass_dry_air))
+    header_lines.append('Mass_H2O (kg/mole): {}'.format(const.mass_h2o))
+    header_lines.append('Latitude (degrees): {}'.format(site_lat))
+
+    # Line 1: number of header lines and variable columns
+    header_lines.insert(0, '{} {}'.format(len(header_lines)+1, len(variables)))
+
+    # Go ahead and write the header to the file
+    with open(map_file, 'w') as mapf:
+        for line in header_lines:
+            mapf.write(line + '\n')
+
+        # Now we write the variable names, units, and values. Need to get a list of keys to make sure the order we
+        # iterate through them is the same
+        mapf.write(','.join(var_order) + '\n')
+        mapf.write(','.join(units[k] for k in var_order) + '\n')
+
+        # Finally write the values.
+        for i in range(size_check):
+            formatted_values = ['{:.5G}'.format(variables[k][i]) for k in var_order]
+            mapf.write(','.join(formatted_values))
+            if i < size_check - 1:
+                mapf.write('\n')
+
+
+def hg_commit_info(hg_dir=None):
+    if hg_dir is None:
+        hg_dir = os.path.dirname(__file__)
+    if len(hg_dir) == 0:
+        # If in the current directory, then dirname(__file__) gives an empty string, which isn't allowed as the argument
+        # to cwd in check_output
+        hg_dir = '.'
+    summary = subprocess.check_output(['hg', 'log', '-l', '1'], cwd=hg_dir).splitlines()
+    log_dict = dict()
+    for line in summary:
+        splitline = line.split(':', 1)
+        if len(splitline) < 2:
+            continue
+        k, v = splitline
+        log_dict[k.strip()] = v.strip()
+
+    parent = re.search(r'(?<=:)\w+', log_dict['changeset']).group()
+    branch = log_dict['branch']
+    parent_date = log_dict['date']
+    return parent, branch, parent_date
+
+
 def age_of_air_trop(lat, z, z_trop, ref_lat=0.0):
     fl = lat / 22.0
     return 0.313 - 0.085 * np.exp(-((lat - ref_lat)/18)**2.0) - 0.268 * np.exp(-1.42 * z /(z + z_trop)) * fl / (np.sqrt(1 + fl**2.0))
@@ -77,6 +157,12 @@ def _lrange(*args):
     if not isinstance(r, list):
         r = list(r)
     return r
+
+
+def format_lat(lat, prec=0):
+    fmt = '{{:.{}f}}{{}}'.format(prec)
+    direction = 'N' if lat >= 0 else 'S'
+    return fmt.format(lat, direction)
 
 
 def calculate_model_potential_temperature(temp, pres_levels=_std_model_pres_levels):

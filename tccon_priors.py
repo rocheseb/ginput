@@ -165,9 +165,9 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     ow1 = np.argwhere(xx_overworld)[0]
     co2_entry_conc = co2_record.get_co2_for_dates(retrieval_date - co2_lag)
 
-    co2_endpoints = [co2_entry_conc, prof_co2[ow1]]
-    theta_endpoints = [tropopause_theta, prof_theta[ow1]]
-    xx_middleworld = tropopause_theta < prof_theta < 380
+    co2_endpoints = np.array([co2_entry_conc['co2_mean'].item(), prof_co2[ow1].item()])
+    theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
+    xx_middleworld = (tropopause_theta < prof_theta) & (prof_theta < 380.0)
     prof_co2[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, co2_endpoints)
 
     # TODO: add latency profile
@@ -242,9 +242,10 @@ class CO2TropicsRecord(object):
         df = self.co2_trend if deseasonalize else self.co2_seasonal
 
         flag = 0
+        years_extrap = 0
         day = 1
         fillval = np.nan
-        target_date = pd.Timestamp(year, month, day, 0)
+        target_date = pd.Timestamp(year, month, day)
         if limit_extrapolation_to is None:
             # 100 years in the future should be sufficiently far as to be effectively no limit
             limit_extrapolation_to = pd.Timestamp.now() + relativedelta(years=100)
@@ -260,41 +261,35 @@ class CO2TropicsRecord(object):
 
             else:
                 flag = 1
-                nyear = 6
+                nyear = 5
                 print('Date outside available time period... extrapolating!')
 
                 # Need to find the most recent year that we have data for this month
                 last_available_date = max(df.index)
-                latest_date = pd.Timestamp(year, month, day) - relativedelta(years=1)
+                latest_date = target_date
                 while latest_date > last_available_date:
                     latest_date -= relativedelta(years=1)
+                    years_extrap += 1
 
-                # Last data entry NOT within one year of desired date
-                if target_date - df.index[-1] >= pd.Timedelta(days=2*365):
-                    # TODO: check with Matt about this. May need to implement more general extrapolation for an
-                    #  arbitrary number of years
-                    raise NotImplementedError('Extrapolating CO2 values over more than two years not implemented')
-                elif target_date - df.index[-1] >= pd.Timedelta(days=365):
+                # TODO: ask Matt to revalidate this
+                # Get the most recent nyears CO2 concentrations for this month in the record. Set the initial CO2 value
+                # to the last of those.
+                prev_year = [y for y in range(years_extrap, nyear + years_extrap)]
+                prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
+                prev_co2 = df[df.index.isin(prev_date)]['co2_mean'].values
 
-                    # first extrapolate value for one year ago
-                    prev_year = [y for y in range(2, nyear + 1)]
-                    prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
-                    prev_co2 = df[df.index.isin(prev_date)]['co2_mean'].values
+                val = df.loc[latest_date]['co2_mean']
+                for start_yr in range(years_extrap):
+                    # For each year we need to extrapolate, calculate the growth rate as the average of the growth
+                    # rate over five years. This should help smooth out any El Nino effects, which would tend to
+                    # cause unusual growth rates.
                     growth = np.diff(prev_co2).mean()
-                    latest_date = pd.Timestamp(year, month, day) - relativedelta(years=prev_year[0])
-                    val_latest = df.loc[latest_date]['co2_mean'] + growth
+                    val += growth
 
-                    # update growth rate using latest extrapolated value
-                    val_update = np.delete(np.append((df[df.index.isin(prev_date)]['co2_mean'].values), val_latest), 0)
-                    growth_update = np.diff(val_update).mean()
-                    val = val_latest + growth_update
-
-                    # Last data entry within one year of desired date
-                else:
-                    prev_year = range(1, nyear)
-                    prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
-                    growth = np.diff(df[df.index.isin(prev_date)]['co2_mean'].values).mean()
-                    val = df.loc['%s-%s-%s' % (year - prev_year[0], month, day)]['co2_mean'] + growth
+                    # Now that we have the extrapolated value, update the last 5 CO2 values to include it and remove
+                    # the earliest one so that we have update CO2 values for the next time through the loop.
+                    prev_co2 = np.append(prev_co2, val)
+                    prev_co2 = np.delete(prev_co2, 0)
 
         elif target_date < df.index[0]:
 
@@ -314,7 +309,7 @@ class CO2TropicsRecord(object):
             print('Error!')
             val = fillval
 
-        return val, flag
+        return val, {'flag': flag, 'latency': years_extrap}
 
     def get_co2_for_dates(self, dates, deseasonalize=False):
         # Make inputs consistent: we expect dates to be a Pandas DatetimeIndex, but it may be a single timestamp or
@@ -396,7 +391,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record):
                                                          ref_lat=0.0)
 
 
-def generate_tccon_prior(mod_file_data, obs_date, species='co2'):
+def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx', write_map=False):
     if isinstance(mod_file_data, str):
         mod_file_data = mod_utils.read_mod_file(mod_file_data)
     elif not isinstance(mod_file_data, dict):
@@ -415,8 +410,6 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2'):
     p_trop_met = mod_file_data['scalar']['TROPPB']
     theta_trop_met = mod_utils.calculate_potential_temperature(p_trop_met, t_trop_met)
 
-    import pdb; pdb.set_trace()
-
     # The age-of-air calculation used for the tropospheric CO2 profile calculation needs the tropopause altitude.
     # Assume that potential temperature varies linearly with altitude to calculate that, use the potential temperature
     # of the tropopause to ensure consistency between the two parts of the profile.
@@ -433,13 +426,32 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2'):
     # average of the Mauna Loa and Samoa CO2 concentration using the existing GGG age-of-air parameterization assuming
     # a reference latitude of 0 deg. That will be used to set the base CO2 profile, which will then have a parameterized
     # seasonal cycle added on top of it.
-    z_grid = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
+    #z_grid = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
+    z_grid = np.arange(0., 65.)
     co2_prof = np.full_like(z_grid, np.nan)
     add_co2_trop_prior(co2_prof, obs_date, obs_lat, z_grid, z_trop_met, concentration_record)
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    add_co2_strat_prior(co2_prof, obs_date, theta_met, eq_lat_met, theta_trop_met, concentration_record)
+    theta_prof = mod_utils.mod_interpolation_new(z_grid, z_met, theta_met, interp_mode='linear')
+    # Not sure what the theoretical relationship between equivalent latitude and altitude is, and plotting it is too
+    # bouncy to tell, so just going to assume linear for now.
+    eq_lat_prof = mod_utils.mod_interpolation_new(z_grid, z_met, eq_lat_met, interp_mode='linear')
+    add_co2_strat_prior(co2_prof, obs_date, theta_prof, eq_lat_prof, theta_trop_met, concentration_record)
+
+    # For the map file we'll also want regular temperature and pressure on the grid
+    t_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Temperature'], interp_mode='linear')
+    p_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Pressure'], interp_mode='lin-log')
+
+    map_dict = {'Height': z_grid, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EL': eq_lat_prof, 'co2': co2_prof}
+    units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EL': 'degrees', 'co2': 'ppm'}
+    var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EL', 'co2')
+    if write_map:
+        map_dir = write_map if isinstance(write_map, str) else '.'
+        map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d')))
+        mod_utils.write_map_file(map_name, obs_lat, map_dict, units_dict, var_order=var_order)
+
+    return map_dict
 
 
 def _calculate_box_area(edge_lon, edge_lat):
