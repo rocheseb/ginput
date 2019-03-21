@@ -86,6 +86,7 @@ The slant .mod files are only generated when the SZA is above 90 degrees.
 There is dictionary of sites with their respective lat/lon in tccon_sites.py, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
 """
 import argparse
+import glob
 import os, sys
 from collections import OrderedDict
 import numpy as np
@@ -107,6 +108,7 @@ import pylab as pl
 import pytz
 import warnings
 
+import mod_utils
 from slantify import * # code to make slant paths
 from tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites 
 
@@ -165,6 +167,10 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 		data: dictionary of the inputs
 		surf_data: dictionary of the surface inputs (for merra/geos5)
 	"""
+
+	# Output scaling: define factors to multiply values by before writing to the .mod file. If a column name is not
+	# here, 1.0 is assumed. Only used for GEOS-type mod files currently.
+	output_scaling = {'RH': 100.0}
 
 	# Define US Standard Atmosphere (USSA) for use above 10 mbar
 	p_ussa=[10.0,  5.0,   2.0,   1.0,   0.5,    0.2,   0.1,   0.01,  0.001, 0.0001]
@@ -332,6 +338,11 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 			else:
 				# compute equivalent latitude; 1e6 converts EPV to PVU (1e-6 K . m2 / kg / s)
 				line_dict['EL'] = func(line_dict['EPV']*1e6, line_dict['PT'])[0]
+				print('{} EPV: {}, PT: {}, EL: {}'.format(k, line_dict['EPV']*1e6, line_dict['PT'], line_dict['EL']))
+
+			for key in line_dict.keys():
+				scale = output_scaling[key] if key in output_scaling else 1.0
+				line_dict[key] *= scale
 
 			mod_content += [fmt.format(**line_dict)]
 			for outkey, linekey in final_data_keys.items():
@@ -593,12 +604,12 @@ def gravity(gdlat,altit):
 	This is used to convert
 
 	Input Parameters:
-	    gdlat       GeoDetric Latitude (degrees)
-	    altit       Geometric Altitude (km)
+		gdlat       GeoDetric Latitude (degrees)
+		altit       Geometric Altitude (km)
 	
 	Output Parameter:
-	    gravity     Effective Gravitational Acceleration (m/s2)
-	    radius 		Radius of earth at gdlat
+		gravity     Effective Gravitational Acceleration (m/s2)
+		radius 		Radius of earth at gdlat
 	
 	Computes the effective Earth gravity at a given latitude and altitude.
 	This is the sum of the gravitational and centripital accelerations.
@@ -906,7 +917,7 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None,muted=False
 	for i in range(nlat):
 		for j in range(nlon):
 			coeff_mat[:,i,j] = coeff
-	        
+
 	nmin = [0.125]
 	func_dict = {} # dictionary mapping each time to the corresponding equivalent latitude function
 	total_start = time.time()
@@ -1019,8 +1030,9 @@ def parse_args(argu=sys.argv):
 	parser.add_argument('--lon', type=float, help='Site longitude in degrees east, if defining a custom site. Values '
 												'should be positive; i.e. 90 W should be given as 270.')
 	parser.add_argument('--lat', type=float, help='Site latitude, in degrees (north = positive, south = negative).')
-	parser.add_argument('--site', choices=valid_site_ids, help='Two-letter site abbreviation. Providing this will '
-															'produce .mod files only for that site.')
+	parser.add_argument('--site', dest='site_abbrv', choices=valid_site_ids, help='Two-letter site abbreviation. '
+																				  'Providing this will produce .mod '
+																				  'files only for that site.')
 
 	arg_dict = vars(parser.parse_args())
 
@@ -1045,11 +1057,14 @@ def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path):
 
 	return mod_name
 
-def GEOS_files(GEOS_path,start_date,end_date):
+def GEOS_files(GEOS_path, start_date, end_date):
 
-	# all GEOS5-FPIT Np files and their dates
-	ncdf_list = np.array(os.listdir(GEOS_path))
-	ncdf_dates = np.array([datetime.strptime(elem.split('.')[-3],'%Y%m%d_%H%M') for elem in ncdf_list])
+	# all GEOS5-FPIT Np/Nx files and their dates. Use 'glob' to avoid listing other files (e.g. the download link list)
+	# in the directory. Whether glob.glob() and os.listdif() returns a sorted list is platform dependendent. Since the
+	# main mod_maker logic depends on the profile and surface file lists being in the same order, we need to sort them.
+	ncdf_list = sorted(glob.glob(os.path.join(GEOS_path, 'GEOS*.nc4')))
+	ncdf_list = np.array([os.path.basename(f) for f in ncdf_list])
+	ncdf_dates = np.array([datetime.strptime(elem.split('.')[-3], '%Y%m%d_%H%M') for elem in ncdf_list])
 
 	# just the one between the 'start_date' and 'end_date' dates
 	select_files = ncdf_list[(ncdf_dates>=start_date) & (ncdf_dates<end_date)]
@@ -1061,7 +1076,7 @@ def GEOS_files(GEOS_path,start_date,end_date):
 
 	return select_files,select_dates
 
-def equivalent_latitude_functions_new(GEOS_path,start_date=None,end_date=None,muted=False,**kwargs):
+def equivalent_latitude_functions_geos(GEOS_path, start_date=None, end_date=None, muted=False, **kwargs):
 	"""
 	Inputs:
 		- GEOS_path: full path to the folder containing GEOS5-fpit files, an 'Np' folder with 3-hourly files is expected under that path
@@ -1095,25 +1110,7 @@ def equivalent_latitude_functions_new(GEOS_path,start_date=None,end_date=None,mu
 		lat_res = float(dataset.LatitudeResolution)
 		lon_res = float(dataset.LongitudeResolution)
 
-	lon_res = np.radians(lon_res)
-	lat_half_res = 0.5*lat_res
-
-	# Compute area of each grid cell and the total area
-	area = np.zeros([nlat,nlon])
-	earth_area = 0
-	for j in range(nlat):
-		Slat = lat[j]-lat_half_res
-		Nlat = lat[j]+lat_half_res
-
-		Slat = np.radians(Slat)
-		Nlat = np.radians(Nlat)
-		for i in range(nlon):
-			area[j,i] = lon_res*np.abs(sin(Slat)-sin(Nlat))
-
-	earth_area = np.sum(area)
-
-	if abs(np.sum(area)-earth_area)>0.0001: # ensure proper normalization so the total area of Earth is 4*pi
-		area = area*4*np.pi/earth_area # in units of squared Earth radius
+	area = mod_utils.calculate_area(lat, lon, lat_res, lon_res)
 
 	# pre-compute pressure coefficients for calculating potential temperature, this is the (Po/P)^(R/Cp) term
 	coeff = (1000.0/pres)**0.286
@@ -1134,56 +1131,10 @@ def equivalent_latitude_functions_new(GEOS_path,start_date=None,end_date=None,mu
 			sys.stdout.flush()
 		
 		with netCDF4.Dataset(os.path.join(GEOS_path,select_files[date_ID])) as dataset:
-		        
 			PT = (dataset['T'][0]*coeff_mat).data # Compute potential temperature
-
 			EPV = (dataset['EPV'][0].data)*1e6 # Potential vorticity in PVU = 1e-6 K . m2 / kg / s	
 
-		# Get rid of fill values, this fills the bottom of profiles with the first valid value
-		PT[PT>1e4]=np.nan
-		EPV[EPV>1e8]=np.nan
-		for i in range(nlat):
-			pd.DataFrame(PT[:,i,:]).fillna(method='bfill',axis=0,inplace=True)
-			pd.DataFrame(EPV[:,i,:]).fillna(method='bfill',axis=0,inplace=True)
-
-		# Define a fixed potential temperature grid, with increasing spacing
-		# this is done arbitrarily to get sufficient levels for the interpolation to work well, and not too much for the computations to take less time
-		#fixed_PT = np.arange(np.min(PT),np.max(PT),20) # fixed potential temperature grid
-		fixed_PT = sorted(list(set(range(int(np.min(PT)),300,2)+range(300,350,5)+range(350,500,10)+range(500,750,20)+range(750,1000,30)+range(1000,int(np.max(PT)),100))))
-		new_nlev = len(fixed_PT)
-
-		# Get PV on the fixed PT levels ~ 2 seconds per date
-		new_EPV = np.zeros([new_nlev,nlat,nlon])
-		for i in range(nlat):
-			for j in range(nlon):
-				new_EPV[:,i,j] = np.interp(fixed_PT,PT[:,i,j],EPV[:,i,j])
-
-		# Compute equivalent latitudes
-		EL = np.zeros([new_nlev,100])
-		EPV_thresh = np.zeros([new_nlev,100])
-		for k in range(new_nlev): # loop over potential temperature levels
-			maxPV = np.max(new_EPV[k]) # global max PV
-			minPV = np.min(new_EPV[k]) # global min PV
-
-			# define 100 PV values between the min and max PV
-			EPV_thresh[k] = np.linspace(minPV,maxPV,100)
-
-			for l,thresh in enumerate(EPV_thresh[k]):
-				area_total = np.sum(area[new_EPV[k]>=thresh])
-				EL[k,l] = arcsin(1-area_total/(2*np.pi))*90.0*2/np.pi
-
-		# Define a fixed potentital vorticity grid, with increasing spacing away from 0
-		#fixed_PV = np.arange(np.min(EPV_thresh),np.max(EPV_thresh)+10,10) # fixed PV grid
-		fixed_PV = sorted(list(set(range(int(np.min(EPV_thresh)-50),-1000,50)+range(-1000,-500,20)+range(-500,-100,10)+range(-100,-10,1)+list(np.arange(-10,-1,0.1))+list(np.arange(-1,1,0.01))+list(np.arange(1,10,0.1))+range(10,100,1)+range(100,500,10)+range(500,1000,20)+range(1000,int(np.max(EPV_thresh)+50),50))))
-		if 0.0 not in fixed_PV: # need a point at 0.0 for the interpolations to work better
-			fixed_PV = np.sort(np.append(fixed_PV,0.0))
-
-		# Generate interpolating function to get EL for a given PV and PT
-		interp_EL = np.zeros([new_nlev,len(fixed_PV)])
-		for k in range(new_nlev):
-			interp_EL[k] = np.interp(fixed_PV,EPV_thresh[k],EL[k])
-
-		func_dict[date] = interp2d(fixed_PV,fixed_PT,interp_EL)
+		func_dict[date] = mod_utils.calculate_eq_lat(PT, EPV, area)
 
 		end = time.time()
 		nmin.append(int(end-start)/60.0)
@@ -1569,12 +1520,15 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			for elem in all_data:
 				H = elem['H']
 				patch = {'surf':{},'first':{}}
-				missing_p = elem['lev'][H.mask] # pressure levels with masked data
+				if np.any(elem['lev'].mask):
+					raise NotImplementedError('The "lev" variable has masked elements, this is not supported')
+				level_pres = elem['lev'].data
+				missing_p = level_pres[H.mask] # pressure levels with masked data
 				if len(missing_p)!=0:
 					surf_p = INTERP_DATA[site]['surf']['PS'] # surface pressure
 
-					first_p = elem['lev'][~H.mask][0] # first valid pressure level
-					first_ID = np.where(elem['lev']==first_p)[0]
+					first_p = level_pres[~H.mask][0] # first valid pressure level
+					first_ID = np.where(level_pres==first_p)[0]
 
 					patch['surf']['H'] = INTERP_DATA[site]['surf']['H']
 					patch['surf']['RH'] = INTERP_DATA[site]['surf']['RH']/100.0
@@ -1592,20 +1546,20 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 						for var in ['RH','QV','T','H']: # must do H last since the last line will get rid of its masks
 							patch_var = [patch['surf'][var],patch['first'][var]]
 							f = interp1d(patch_p,patch_var,fill_value='extrapolate') 
-							elem[var][H.mask] = f(missing_p)
+							elem[var][H.mask] = f(missing_p)  # cannot interpolate with masked array, the "lev" variable should never
 					else: # use the surface value and the first level above it to extrapolate down to 1000 hPa
-						valid_p = elem['lev'][~H.mask]
+						valid_p = level_pres[~H.mask]
 						first_p = valid_p[valid_p<surf_p][0]
 						patch_p = np.array([surf_p,first_p]) # surface pressure and first level above it
 						for var in ['RH','QV','T','H']: # must do H last since the last line will get rid of its masks
 							valid_var = elem[var][~H.mask]
 							patch_var = np.array([patch['surf'][var],valid_var[valid_p<surf_p][0]])
 							f = interp1d(patch_p,patch_var,fill_value='extrapolate')
-							elem[var][:np.where(elem['lev']==first_p)[0][0]] = f(elem['lev'][:np.where(elem['lev']==first_p)[0][0]])
+							elem[var][:np.where(level_pres==first_p)[0][0]] = f(level_pres[:np.where(level_pres==first_p)[0][0]])
 
 					#for variables with no surface data, just use the value of the first valid level above the surface
 					for var in ['EPV','O3']: 
-						elem[var][:np.where(elem['lev']==first_p)[0][0]] = elem[var][np.where(elem['lev']==first_p)][0]
+						elem[var][:np.where(level_pres==first_p)[0][0]] = elem[var][np.where(level_pres==first_p)][0]
 
 				elem['H2O_DMF'] = compute_h2o_dmf(elem['QV'],rmm) # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
 		
@@ -1816,7 +1770,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 				try:
 					INTERP_DATA[varname] = INTERP_DATA[varname][without_fill_IDs]
 				except IndexError:
- 					pass
+					pass
 
 		if ('merradap' in mode) or ('glob' in mode):
 			site_tim = (astropy_date.jd-SURF_DATA['julday0'])*24.0 - utc_offset.total_seconds()/3600.0 # UTC hours since julday0
@@ -1885,5 +1839,5 @@ if __name__ == "__main__": # this is only executed when the code is used directl
 
 	else: # using fp-it 3-hourly files
 		### New code that can generate slant paths and uses GEOS5-FP-IT 3-hourly files
-		arguments['func_dict'] = equivalent_latitude_functions_new(**arguments)
+		arguments['func_dict'] = equivalent_latitude_functions_geos(**arguments)
 		mod_maker_new(**arguments)

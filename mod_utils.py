@@ -1,3 +1,5 @@
+from __future__ import print_function, division
+
 import datetime as dt
 from dateutil.relativedelta import relativedelta
 import numpy as np
@@ -166,6 +168,11 @@ def format_lat(lat, prec=0):
     return fmt.format(lat, direction)
 
 
+def round_to_zero(val):
+    sign = np.sign(val)
+    return np.floor(np.abs(val)) * sign
+
+
 def calculate_model_potential_temperature(temp, pres_levels=_std_model_pres_levels):
     if temp.ndim != 4:
         raise ValueError('temp expected to be 4D')
@@ -188,32 +195,49 @@ def calculate_potential_temperature(pres, temp):
     return temp * (1000/pres) ** 0.286
 
 
+def _construct_grid(*part_defs):
+    grid_components = [np.arange(*part) for part in part_defs]
+    # Keep only unique values and sort them
+    return np.unique(np.concatenate(grid_components))
+
+
 # Compute area of each grid cell and the total area
 def calculate_area(lat, lon, lat_res, lon_res):
+    """
+    Calculate grid cell area for an equirectangular grid.
+
+    :param lat: the vector of grid cell center latitudes, in degrees
+    :param lon: the vector of grid cell center longitudes, in degrees
+    :param lat_res: the width of a single grid cell in the latitudinal direction, in degrees
+    :param lon_res: the width of a single grid cell in the longitudinal direction, in degrees
+    :return: 2D array of areas, in units of fraction of Earth's surface area.
+    """
     nlat = lat.size
     nlon = lon.size
     lat_half_res = 0.5 * lat_res
 
     area = np.zeros([nlat, nlon])
-    import pdb; pdb.set_trace()
+
     for j in range(nlat):
         Slat = lat[j]-lat_half_res
         Nlat = lat[j]+lat_half_res
 
-        Slat = np.radians(Slat)
-        Nlat = np.radians(Nlat)
+        Slat = np.deg2rad(Slat)
+        Nlat = np.deg2rad(Nlat)
         for i in range(nlon):
             area[j, i] = np.deg2rad(lon_res)*np.abs(np.sin(Slat)-np.sin(Nlat))
 
     if abs(np.sum(area) - 4*np.pi) > 0.0001: # ensure proper normalization so the total area of Earth is 4*pi
-        raise RuntimeError('Total earth area is not 4pi.')
+        print('Total earth area is {:g} not 4pi (difference of {:g}), normalizing to 4pi.'
+              .format(np.sum(area), np.sum(area) - 4*np.pi))
+        area *= 4*np.pi/np.sum(area)
 
     return area
 
 
-# Get rid of fill values, this fills the bottom of profiles with the first valid value
 def calculate_eq_lat(PT, EPV, area):
     nlev, nlat, nlon = PT.shape
+    # Get rid of fill values, this fills the bottom of profiles with the first valid value
     PT[PT > 1e4] = np.nan
     EPV[EPV > 1e8] = np.nan
     for i in range(nlat):
@@ -227,18 +251,15 @@ def calculate_eq_lat(PT, EPV, area):
         raise ValueError('Potential temperature range is smaller than the [300, 1000] K assumed to create the '
                          'interpolation grid')
 
-    t_grid = _lrange(int(np.nanmin(PT)), 300, 2) + _lrange(300, 350, 5) + _lrange(350, 500, 10) + _lrange(500, 750, 20) + \
-             _lrange(750, 1000, 30) + _lrange(1000, int(np.nanmax(PT)), 100)
-
-    # ensure that there's only unique values of PT and they are in order.
-    t_grid = sorted(list(set(t_grid)))
-    new_nlev = len(t_grid)
+    theta_grid = _construct_grid((round_to_zero(np.nanmin(PT)), 300.0, 2), (300.0, 350.0, 5.0), (350.0, 500.0, 10.0),
+                                 (500.0, 750.0, 20.0), (750.0, 1000.0, 30.0), (1000.0, round_to_zero(np.nanmax(PT)), 100.0))
+    new_nlev = np.size(theta_grid)
 
     # Get PV on the fixed PT levels ~ 2 seconds per date
     new_EPV = np.zeros([new_nlev, nlat, nlon])
     for i in range(nlat):
         for j in range(nlon):
-            new_EPV[:, i, j] = np.interp(t_grid, PT[:, i, j], EPV[:, i, j])
+            new_EPV[:, i, j] = np.interp(theta_grid, PT[:, i, j], EPV[:, i, j])
 
     # Compute equivalent latitudes
     EL = np.zeros([new_nlev, 100])
@@ -254,20 +275,19 @@ def calculate_eq_lat(PT, EPV, area):
             area_total = np.sum(area[new_EPV[k]>=thresh])
             EL[k,l] = np.arcsin(1-area_total/(2*np.pi))*90.0*2/np.pi
 
-    # Define a fixed potentital vorticity grid, with increasing spacing away from 0
-    #pv_grid = np.arange(np.min(EPV_thresh),np.max(EPV_thresh)+10,10) # fixed PV grid
-    pv_grid = range(int(np.nanmin(EPV_thresh)-50),-1000,50)+range(-1000,-500,20)+range(-500,-100,10)+range(-100,-10,1)+list(np.arange(-10,-1,0.1))+list(np.arange(-1,1,0.01))+list(np.arange(1,10,0.1))+range(10,100,1)+range(100,500,10)+range(500,1000,20)+range(1000,int(np.nanmax(EPV_thresh)+50),50)
-    pv_grid = sorted(list(set(pv_grid)))
-    if 0.0 not in pv_grid: # need a point at 0.0 for the interpolations to work better
-        pv_grid = np.sort(np.append(pv_grid,0.0))
+    # Define a fixed potential vorticity grid, with increasing spacing away from 0
+    # The last term should ensure that 0 is in the grid
+    pv_grid = _construct_grid((round_to_zero(np.nanmin(EPV_thresh-50.0)), -1000.0, 50.0), (-1000.0, -500.0, 20.0), (-500.0, -100.0, 10.0),
+                              (-100.0, -10.0, 1.0), (-10.0, -1.0, 0.1), (-1.0, 1.0, 0.01), (1.0, 10.0, 0.1),
+                              (10.0, 100.0, 1.0), (100.0, 500.0, 10.0), (500.0, 1000.0, 20.0),
+                              (1000.0, round_to_zero(np.nanmax(EPV_thresh))+50.0, 50.0), (0.0, 0.1))
 
     # Generate interpolating function to get EL for a given PV and PT
     interp_EL = np.zeros([new_nlev,len(pv_grid)])
     for k in range(new_nlev):
         interp_EL[k] = np.interp(pv_grid,EPV_thresh[k],EL[k])
 
-    return pv_grid, t_grid, interp_EL
-    return interp2d(pv_grid,t_grid,interp_EL)
+    return interp2d(pv_grid, theta_grid, interp_EL)
 
 
 def mod_interpolation_legacy(z_grid, z_met, t_met, val_met, interp_mode=1, met_alt_geopotential=True):

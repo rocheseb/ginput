@@ -485,7 +485,6 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    import pdb; pdb.set_trace()
     _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_date, obs_lat, z_grid, z_trop_met, concentration_record,
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag)
     aoa_prof_trop = ancillary_trop['age_of_air']
