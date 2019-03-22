@@ -36,16 +36,10 @@ def _init_latency_profs(profs, n_lev):
         return profs
 
 
-def _init_aoa_prof(profs, n_lev):
+def _init_prof(profs, n_lev, n_profs=0):
     if profs is None:
-        return np.full((n_lev,), np.nan)
-    else:
-        return profs
-
-
-def _init_world_prof(profs, n_lev):
-    if profs is None:
-        return np.full((n_lev,), np.nan)
+        size = (n_lev, n_profs) if n_profs > 0 else (n_lev,)
+        return np.full(size, np.nan)
     else:
         return profs
 
@@ -125,7 +119,7 @@ def calculate_equiv_lat_from_pot_vort(pv, lon, lat):
 
 def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
                         co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None, prof_aoa=None,
-                        prof_world_flag=None):
+                        prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
     """
     Add the stratospheric CO2 to a TCCON prior profile
 
@@ -159,18 +153,20 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     """
     latency_keys = ('mean', 'min', 'max')
     n_lev = np.size(prof_co2)
-    profs_latency = _init_latency_profs(profs_latency, n_lev)
-    prof_aoa = _init_aoa_prof(prof_aoa, n_lev)
-    prof_world_flag = _init_world_prof(prof_world_flag, n_lev)
+    profs_latency = _init_prof(profs_latency, n_lev, 3)
+    prof_aoa = _init_prof(prof_aoa, n_lev)
+    prof_world_flag = _init_prof(prof_world_flag, n_lev)
+    prof_co2_date = _init_prof(prof_co2_date, n_lev)
+    prof_co2_date_width = _init_prof(prof_co2_date_width, n_lev)
 
     # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
     # restrict to >= 380 K later.
     xx_overworld = prof_theta >= 380
     prof_world_flag[xx_overworld] = const.overworld_flag
     retrieval_doy = int(np.round(mod_utils.date_to_frac_year(retrieval_date) * 365.25))
-    age_of_air = get_mean_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
-    prof_aoa[xx_overworld] = age_of_air[xx_overworld]
-    age_of_air = np.array(mod_utils.frac_years_to_reldelta(age_of_air))
+    age_of_air_years = get_mean_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
+    prof_aoa[xx_overworld] = age_of_air_years[xx_overworld]
+    age_of_air = np.array(mod_utils.frac_years_to_reldelta(age_of_air_years))
 
     # Now, assuming that the CLAMS age is the mean age of the stratospheric air and that we can assume the CO2 has
     # not changed since it entered the stratosphere, we look up the CO2 at the boundary condition. Assume that the
@@ -184,14 +180,15 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     # air older than that.
 
     for i in np.argwhere(xx_overworld).flat:
-        age_start = (1 - age_window_spread) * age_of_air[i]
-        avg_start_date = retrieval_date + age_start - co2_lag
-        age_end = (1 + age_window_spread) * age_of_air[i]
-        avg_end_date = retrieval_date + age_end - co2_lag
+        avg_mid_date = retrieval_date - co2_lag + age_of_air[i]
+        avg_start_date = avg_mid_date - age_window_spread * age_of_air[i]
+        avg_end_date = avg_mid_date + age_window_spread * age_of_air[i]
 
         prof_co2[i], latency_i = co2_record.avg_co2_in_date_range(avg_start_date, avg_end_date, deseasonalize=False)
         for j, k in enumerate(latency_keys):
             profs_latency[i, j] = latency_i[k]
+        prof_co2_date[i] = mod_utils.date_to_decimal_year(avg_mid_date)
+        prof_co2_date_width[i] = 2 * age_window_spread * age_of_air_years[i]
 
     # Last we need to fill in the "middleworld" between the tropopause and 380 K. The simplest way to do it is to
     # assume that at the tropopause the CO2 is equal to the lagged MLO/SAM record and interpolate linearly in theta
@@ -240,11 +237,13 @@ def get_mean_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict(
 
 
 class CO2TropicsRecord(object):
+    months_avg_for_trend = 12
+
     def __init__(self):
         self.co2_seasonal = self.get_mlo_smo_mean()
         # Deseasonalize the data by taking a 12 month rolling average. May replace with a more sophisticated approach
         # in the future.
-        self.co2_trend = self.co2_seasonal.rolling(12, center=True).mean().dropna()
+        self.co2_trend = self.co2_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna()
 
     @classmethod
     def read_insitu_co2(cls, fpath, fname):
@@ -413,11 +412,13 @@ class CO2TropicsRecord(object):
 
 
 def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, profs_latency=None, prof_aoa=None,
-                       prof_world_flag=None):
+                       prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
     n_lev = np.size(prof_co2)
-    profs_latency = _init_latency_profs(profs_latency, n_lev)
-    prof_aoa = _init_aoa_prof(prof_aoa, n_lev)
-    prof_world_flag = _init_world_prof(prof_world_flag, n_lev)
+    profs_latency = _init_prof(profs_latency, n_lev, 3)
+    prof_aoa = _init_prof(prof_aoa, n_lev)
+    prof_world_flag = _init_prof(prof_world_flag, n_lev)
+    prof_co2_date = _init_prof(prof_co2_date, n_lev)
+    prof_co2_date_width = _init_prof(prof_co2_date_width, n_lev)
 
     # First get the ages of air for every grid point within the troposphere.
     xx_trop = z_grid <= z_trop
@@ -432,6 +433,11 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     prof_co2[xx_trop] = co2_df['co2_mean'].values
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop, :] = co2_df['latency'].values.reshape(-1, 1)
+    # Record the date that the CO2 was taken from as a year with a fraction
+    co2_dates = np.array([mod_utils.date_to_decimal_year(v) for v in co2_df.index])
+    prof_co2_date[xx_trop] = co2_dates
+    # The width for the age is defined as what time window we average over to detrend
+    prof_co2_date_width[xx_trop] = co2_record.months_avg_for_trend / 12.0
 
     # Finally, apply a parameterized seasonal cycle. This is better than using the seasonal cycle in the MLO/SMO data
     # because that is dominated by the NH cycle. This approach allows the seasonal cycle to vary in sign and intensity
@@ -440,10 +446,11 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     prof_co2[xx_trop] *= mod_utils.seasonal_cycle_factor(obs_lat, z_grid[xx_trop], z_trop, year_fraction, species='co2',
                                                          ref_lat=0.0)
 
-    return prof_co2, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag}
+    return prof_co2, {'co2_latency': profs_latency, 'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width,
+                      'age_of_air': prof_aoa, 'stratum': prof_world_flag}
 
 
-def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx', write_map=False):
+def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx', use_geos_grid=True, write_map=False):
     if isinstance(mod_file_data, str):
         mod_file_data = mod_utils.read_mod_file(mod_file_data)
     elif not isinstance(mod_file_data, dict):
@@ -465,7 +472,7 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
     # The age-of-air calculation used for the tropospheric CO2 profile calculation needs the tropopause altitude.
     # Assume that potential temperature varies linearly with altitude to calculate that, use the potential temperature
     # of the tropopause to ensure consistency between the two parts of the profile.
-    z_trop_met = mod_utils.mod_interpolation_new(theta_trop_met, theta_met, z_met, interp_mode='linear')
+    z_trop_met = mod_utils.interp_to_tropopause_height(theta_met, z_met, theta_trop_met)
 
     species = species.lower()
     if species == 'co2':
@@ -479,39 +486,54 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
     # a reference latitude of 0 deg. That will be used to set the base CO2 profile, which will then have a parameterized
     # seasonal cycle added on top of it.
     #z_grid = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
-    z_grid = np.arange(0., 65.)
+    if use_geos_grid:
+        z_grid = z_met
+        theta_prof = theta_met
+        eq_lat_prof = eq_lat_met
+        t_prof = mod_file_data['profile']['Temperature']
+        p_prof = mod_file_data['profile']['Pressure']
+    else:
+        z_grid = np.arange(0., 65.)
+        theta_prof = mod_utils.mod_interpolation_new(z_grid, z_met, theta_met, interp_mode='linear')
+        # Not sure what the theoretical relationship between equivalent latitude and altitude is, and plotting it is too
+        # bouncy to tell, so just going to assume linear for now.
+        eq_lat_prof = mod_utils.mod_interpolation_new(z_grid, z_met, eq_lat_met, interp_mode='linear')
+        # For the map file we'll also want regular temperature and pressure on the grid
+        t_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Temperature'],
+                                                 interp_mode='linear')
+        p_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Pressure'],
+                                                 interp_mode='lin-log')
+
     n_lev = np.size(z_grid)
     co2_prof = np.full_like(z_grid, np.nan)
+    co2_date_prof = np.full_like(z_grid, np.nan)
+    co2_date_width_prof = np.full_like(z_grid, np.nan)
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
     _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_date, obs_lat, z_grid, z_trop_met, concentration_record,
-                                           profs_latency=latency_profs, prof_world_flag=stratum_flag)
+                                           profs_latency=latency_profs, prof_world_flag=stratum_flag,
+                                           prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    theta_prof = mod_utils.mod_interpolation_new(z_grid, z_met, theta_met, interp_mode='linear')
-    # Not sure what the theoretical relationship between equivalent latitude and altitude is, and plotting it is too
-    # bouncy to tell, so just going to assume linear for now.
-    eq_lat_prof = mod_utils.mod_interpolation_new(z_grid, z_met, eq_lat_met, interp_mode='linear')
-    _, ancillary_strat = add_co2_strat_prior(co2_prof, obs_date, theta_prof, eq_lat_prof, theta_trop_met, concentration_record,
-                                             profs_latency=latency_profs, prof_world_flag=stratum_flag)
+    _, ancillary_strat = add_co2_strat_prior(co2_prof, obs_date, theta_prof, eq_lat_prof, theta_trop_met,
+                                             concentration_record, profs_latency=latency_profs,
+                                             prof_world_flag=stratum_flag, prof_co2_date=co2_date_prof,
+                                             prof_co2_date_width=co2_date_width_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
-
-    # For the map file we'll also want regular temperature and pressure on the grid
-    t_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Temperature'], interp_mode='linear')
-    p_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Pressure'], interp_mode='lin-log')
 
     map_dict = {'Height': z_grid, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EL': eq_lat_prof,
                 'co2': co2_prof, 'mean_co2_latency': latency_profs[:, 0], 'min_co2_latency': latency_profs[:, 1],
                 'max_co2_latency': latency_profs[:, 2], 'trop_age_of_air': aoa_prof_trop,
-                'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag}
+                'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'co2_date': co2_date_prof,
+                'co2_date_width': co2_date_width_prof}
     units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EL': 'degrees', 'co2': 'ppm',
                   'mean_co2_latency': 'yr', 'min_co2_latency': 'yr', 'max_co2_latency': 'yr', 'trop_age_of_air': 'yr',
-                  'strat_age_of_air': 'yr', 'atm_stratum': 'flag'}
+                  'strat_age_of_air': 'yr', 'atm_stratum': 'flag', 'co2_date': 'yr', 'co2_date_width': 'yr'}
     var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EL', 'co2', 'mean_co2_latency', 'min_co2_latency',
-                 'max_co2_latency', 'trop_age_of_air', 'strat_age_of_air', 'atm_stratum')
+                 'max_co2_latency', 'trop_age_of_air', 'strat_age_of_air', 'atm_stratum', 'co2_date', 'co2_date_width')
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
         map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d')))

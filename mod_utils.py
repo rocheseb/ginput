@@ -6,7 +6,7 @@ import numpy as np
 import os
 import pandas as pd
 import re
-from scipy.interpolate import interp2d
+from scipy.interpolate import interp1d, interp2d
 import subprocess
 
 import mod_constants as const
@@ -121,7 +121,7 @@ def write_map_file(map_file, site_lat, variables, units, var_order=None):
 
         # Finally write the values.
         for i in range(size_check):
-            formatted_values = ['{:.5G}'.format(variables[k][i]) for k in var_order]
+            formatted_values = ['{:.6G}'.format(variables[k][i]) for k in var_order]
             mapf.write(','.join(formatted_values))
             if i < size_check - 1:
                 mapf.write('\n')
@@ -407,19 +407,8 @@ def mod_interpolation_new(z_grid, z_met, vals_met, interp_mode='linear'):
     if do_log_y:
         vals_met = np.log(vals_met)
 
-    vals_grid = np.interp(z_grid, z_met, vals_met, left=np.nan, right=np.nan)
-    # Handle extrapolation to lower altitudes than the bottom met value.
-    xx_extrap = z_grid < np.min(z_met)
-    if np.any(np.isnan(vals_grid[xx_extrap])):
-        slope = vals_met[0] - vals_met[1]
-        vals_grid[xx_extrap] = (z_grid[xx_extrap] - z_met[0]) * slope
-
-    # Check that there are no levels remaining (i.e. at the top) to be extrapolated.
-    if np.any(np.isnan(vals_grid)):
-        msg = 'Some levels could not be interpolated to. '
-        if z_met[-1] < z_grid[-1]:
-            msg += 'This at least in part because the top level in the input .mod file is below the top grid level.'
-        raise InsufficientMetLevelsError(msg)
+    vals_interp = interp1d(z_met, vals_met, fill_value='extrapolate')
+    vals_grid = vals_interp(z_grid)
 
     # If doing logarithmic interpolation for the y variable need to restore the output values. (x not returned so no
     # need to restore.)
@@ -427,6 +416,21 @@ def mod_interpolation_new(z_grid, z_met, vals_met, interp_mode='linear'):
         vals_grid = np.exp(vals_grid)
 
     return vals_grid
+
+
+def interp_to_tropopause_height(theta, altitude, theta_trop):
+    # Find the last point where theta is decreasing. It should be increasing consistently above the boundary layer
+    # This prevents interpolating to a weirdly low tropopause if the boundary layer somehow contains the potential
+    # temperature of the tropopause (sometimes happens if it's extrapolated to the surface)
+
+    # np.nonzero returns a tuple, the first element is an array of indices where diff(theta) < 0
+    last_decr = np.max(np.nonzero(np.diff(theta) < 0)[0]) + 1
+    if altitude[last_decr] > 3:
+        raise RuntimeError('Decreasing potential temperature found above 3 km. This is not expected, and may '
+                           'cause erroneously high tropopause altitudes to be computed')
+
+    # Do the interpolation with just the altitudes where theta is monotonically increasing.
+    return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()
 
 
 def age_of_air(lat, z, ztrop, ref_lat=0.0):
@@ -445,6 +449,10 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=0.0):
     svnl = sv + 1.80 * np.exp(-((lat -74)/41)**2)*(0.5 - sv**2)
     sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
     return 1 + sca * season_cycle_coeffs[species]
+
+
+def date_to_decimal_year(date_in):
+    return date_in.year + date_to_frac_year(date_in)
 
 
 def date_to_frac_year(date_in):
