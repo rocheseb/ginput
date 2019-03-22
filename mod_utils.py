@@ -28,6 +28,13 @@ class InsufficientMetLevelsError(Exception):
     pass
 
 
+def _get_num_header_lines(filename):
+    with open(filename, 'r') as fobj:
+        header_info = fobj.readline()
+
+    return int(header_info.split()[0])
+
+
 def read_mod_file(mod_file, as_dataframes=False):
     """
     Read a TCCON .mod file.
@@ -43,10 +50,7 @@ def read_mod_file(mod_file, as_dataframes=False):
      dictionaries or data frames, depending on ``as_dataframes``.
     :rtype: dict
     """
-    with open(mod_file, 'r') as fobj:
-        header_info = fobj.readline()
-
-    n_header_lines = int(header_info.split()[0])
+    n_header_lines = _get_num_header_lines(mod_file)
     # Read the constants from the second line of the file. There's no header for these, we just have to rely on the
     # same constants being in the same position.
     constant_vars = pd.read_csv(mod_file, sep='\s+', header=None, nrows=1, skiprows=1,
@@ -70,6 +74,37 @@ def read_mod_file(mod_file, as_dataframes=False):
         out_dict['scalar'] = {k: v.item() for k, v in scalar_vars.items()}
         out_dict['profile'] = {k: v.values for k, v in profile_vars.items()}
 
+    return out_dict
+
+
+def read_map_file(map_file, as_dataframes=False):
+    n_header_lines = _get_num_header_lines(map_file)
+    with open(map_file, 'r') as mapf:
+        n_skip = 4
+        # Skip the first four lines to get to the constants - these should be (1) the number of header lines & columns,
+        # (2) filename, (3) version info, and (4) wiki reference.
+        for i in range(n_skip):
+            mapf.readline()
+
+        # The last two lines of the header are the column names and units; everything between line 5 and that should be
+        # physical constants. Start at n_skip+1 to account for 0 indexing vs. number of lines.
+        constants = dict()
+        for i in range(n_skip+1, n_header_lines-2):
+            line = mapf.readline()
+            # Lines have the form Name (units): value
+            name, value = line.split(':')
+            name, _ = name.split()
+            constants[name] = float(value)
+
+    df = pd.read_csv(map_file, header=n_header_lines-2, skiprows=[n_header_lines-1], na_values='NAN')
+    if not as_dataframes:
+        data = {k: v.values for k, v in df.items()}
+    else:
+        data = df
+
+    out_dict = dict()
+    out_dict['constants'] = constants
+    out_dict['profile'] = data
     return out_dict
 
 
@@ -107,7 +142,9 @@ def write_map_file(map_file, site_lat, variables, units, var_order=None):
     header_lines.append('Latitude (degrees): {}'.format(site_lat))
 
     # Line 1: number of header lines and variable columns
-    header_lines.insert(0, '{} {}'.format(len(header_lines)+1, len(variables)))
+    # The number of header lines is however many we've made so far, plus this one, the column names, and the column
+    # units (3 extra)
+    header_lines.insert(0, '{} {}'.format(len(header_lines)+3, len(variables)))
 
     # Go ahead and write the header to the file
     with open(map_file, 'w') as mapf:
@@ -460,10 +497,12 @@ def date_to_frac_year(date_in):
     return doy / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
 
 
-def frac_years_to_reldelta(frac_year):
+def frac_years_to_reldelta(frac_year, allow_nans=True):
+    if not allow_nans and np.any(np.isnan(frac_year)):
+        raise ValueError('NaNs not permitted in frac_year. Either remove them, or set `allow_nans=True`')
     age_years = np.floor(frac_year)
     age_fracs = np.mod(frac_year, 1)
-    return [relativedelta(years=y, days=365.25 * d) for y, d in zip(age_years, age_fracs)]
+    return [relativedelta(years=y, days=365.25 * d) if not (np.isnan(y) or np.isnan(d)) else np.nan for y, d in zip(age_years, age_fracs)]
 
 
 def start_of_month(date_in, out_type=dt.date):

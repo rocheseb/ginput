@@ -7,7 +7,7 @@ import numpy as np
 import os
 import pandas as pd
 import pyproj
-from scipy.interpolate import interp2d
+from scipy.interpolate import interp2d, LinearNDInterpolator
 from shapely.geometry import shape
 
 # TODO: move all into package and use a proper relative import
@@ -180,7 +180,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     # air older than that.
 
     for i in np.argwhere(xx_overworld).flat:
-        avg_mid_date = retrieval_date - co2_lag + age_of_air[i]
+        avg_mid_date = retrieval_date - co2_lag - age_of_air[i]
         avg_start_date = avg_mid_date - age_window_spread * age_of_air[i]
         avg_end_date = avg_mid_date + age_window_spread * age_of_air[i]
 
@@ -224,13 +224,26 @@ def get_mean_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict(
             raise RuntimeError('Failed to create equivalent lat/theta grids the same shape as CLAMS age')
 
     idoy = np.argwhere(clams_dat['doy'] == day_of_year).item()
-    age_interp = interp2d(clams_dat['eqlat_grid'], clams_dat['theta_grid'], clams_dat['age'][idoy, :, :])
-    # By default, interp2d builds a grid from the query points. We don't want that, we just want the points for
-    # (theta[i], eqlat[i]) which lie along the diagonal of the interpolated matrix.
-    prof_ages = np.diag(age_interp(eq_lat, theta))
+
+    el_grid, th_grid = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
+    clams_points = np.array([[el, th] for el, th in zip(el_grid.flat, th_grid.flat)])
+
+    # interp2d does not behave well here; it interpolates to points outside the range of eqlat/theta and gives a much
+    # noiser result.
+    age_interp = LinearNDInterpolator(clams_points, clams_dat['age'][idoy, :, :].flatten())
+    prof_ages = np.array([age_interp(el, th).item() for el, th in zip(eq_lat, theta)])
+
+    # For simplicity, we're just going to clamp ages for theta > max theta in CLAMS to the age given at the top of the
+    # profile. In theory, this shouldn't matter too much since (a) CLAMS seems to approach an asymptote at the top of
+    # the stratosphere and (b) there's just not that much mass up there.
+    import pdb; pdb.set_trace()
+    last_age = np.max(np.argwhere(~np.isnan(prof_ages)))
+    if last_age < prof_ages.size:
+        prof_ages[last_age+1:] = prof_ages[last_age]
+
     if as_timedelta:
         # The CLAMS ages are in years, but relativedeltas don't accept fractional years. Instead, separate the whole
-        # years and the fractional years. For simplicity, just assume 365 days per year.
+        # years and the fractional years.
         prof_ages = np.array(mod_utils.frac_years_to_reldelta(prof_ages))
 
     return prof_ages
@@ -267,6 +280,19 @@ class CO2TropicsRecord(object):
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
         df_combined['co2_mean'] = df_combined['co2'].mean(axis=1)
         df_combined.drop(['site', 'co2', 'year', 'month', 'day'], axis=1, inplace=True)
+
+        # Fill in any missing months. Add a flag so we can keep track of whether they've had to be interpolated or
+        # not. Having a consistent monthly frequency makes the rest of the code easier - we can just always assume that
+        # there will be a value at the beginning of every month.
+        n_months = df_combined.index.size
+        df_combined = df_combined.assign(interp_flag=np.zeros((n_months,), dtype=np.int))
+        all_months = pd.date_range(min(df_combined.index), max(df_combined.index), freq='MS')
+        df_combined = df_combined.reindex(all_months)
+        # set the interpolation flag
+        missing = pd.isna(df_combined['interp_flag'])
+        df_combined.loc[missing, 'interp_flag'] = 1
+        # Now only co2_mean should have missing values
+        df_combined.interpolate(method='index', inplace=True)
 
         return df_combined
 
