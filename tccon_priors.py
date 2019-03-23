@@ -29,18 +29,34 @@ def _is_pole(lat):
     return np.abs(np.abs(lat) - 90.0) < 1e-4
 
 
-def _init_latency_profs(profs, n_lev):
-    if profs is None:
-        return np.full((n_lev, 3), np.nan)
-    else:
-        return profs
-
-
 def _init_prof(profs, n_lev, n_profs=0):
+    """
+    Initialize arrays for various profiles.
+
+    :param profs: input profiles or None.
+    :param n_lev: the number of levels in the profiles.
+    :type n_lev: int
+
+    :param n_profs: how many profiles to make in the returned array. If 0, then an n_lev element vector is returned, if
+     >0, and n_lev-by-n_profs array
+    :type n_profs: int
+
+    :return: the initialized array, either the same profiles as given, or a new array initialized with NaNs with the
+     required shape if ``profs`` is ``None``.
+    :rtype: :class:`numpy.ndarray`
+    :raises ValueError: if the profiles were given (not ``None``) and have the wrong shape.
+    """
+    if n_profs < 0:
+        raise ValueError('n_profs must be >= 0')
     if profs is None:
         size = (n_lev, n_profs) if n_profs > 0 else (n_lev,)
         return np.full(size, np.nan)
     else:
+        target_shape = (n_lev,) if n_profs == 0 else (n_lev, n_profs)
+        if profs.shape != target_shape:
+            raise ValueError('Given profile do not have the expected shape! Expected: {}, actual: {}'.format(
+                target_shape, profs.shape
+            ))
         return profs
 
 
@@ -139,17 +155,33 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     :param tropopause_theta: the potential temperature at the tropopause, according to the input meteorology.
     :type tropopause_theta: float (in K)
 
-    :param co2_record: the Mauna Loa-Samoa CO2 record. Must be a dict with keys 'date', 'co2', 'latency'. 'date' must be
-     a sequence of datetimes giving the UTC date of the corresponding CO2 values, 'co2' a sequence of floats giving
-     the time series of CO2 measurements, and 'latency' a sequence of ints giving the number of years that that CO2
-     point had to be extrapolated (e.g. if the point on 1 June 2019 was calculated by extrapolating from 1 June 2017,
-     then this should be 2). If looked up directly, 'latency' for that point will be 0.
-    :type co2_record: dict('date': list(datetime.datetime), 'co2': list(float), 'latency': list(int))
+    :param co2_record: the Mauna Loa-Samoa CO2 record.
+    :type co2_record: :class:`CO2TropicsRecord`
 
     :param co2_lag: the lag between the MLO/SAM record and the CO2 concentration at the tropopause.
     :type co2_lag: :class:`~dateutil.relativedelta.relativedelta` or :class:`datetime.timedelta`
 
-    :return: the updated CO2 profile and the latency profile
+    :param age_window_spread: a decimal value setting how wide a window the simplified "age spectrum" would cover. For
+     s = ``age_window_spread`` and a = the age of air from CLAMS, then the CO2 age window will be :math:`a*(1-s)` to
+     :math:`a*(1+s)`
+    :type age_window_spread: float
+
+    The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
+    stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
+    NaNs. "nlev" below means the number of levels in the CO2 profile.
+
+    :param profs_latency: nlev-by-3 array that will store how far forward in time the Mauna Loa/Samoa CO2 record had to
+     be extrapolated, in years. The three columns will respectively contain the mean, min, and max latency.
+    :param prof_aoa: nlev-element vector of ages of air, in years.
+    :param prof_world_flag: nlev-element vector of ints which will indicate which levels are considered overworld and
+     which middleworld. The values used for each are defined in :mod:`mod_constants`
+    :param prof_co2_date: nlev-element vector that stores the date in the MLO/SMO record that the CO2 was taken from.
+     Since most levels will have a window of dates, this is the middle of those windows. The dates are stored as a
+     decimal year, e.g. 2016.5.
+    :param prof_co2_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
+     the CO2 concentrations.
+
+    :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
     latency_keys = ('mean', 'min', 'max')
     n_lev = np.size(prof_co2)
@@ -164,7 +196,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     xx_overworld = prof_theta >= 380
     prof_world_flag[xx_overworld] = const.overworld_flag
     retrieval_doy = int(np.round(mod_utils.date_to_frac_year(retrieval_date) * 365.25))
-    age_of_air_years = get_mean_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
+    age_of_air_years = get_clams_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
     prof_aoa[xx_overworld] = age_of_air_years[xx_overworld]
     age_of_air = np.array(mod_utils.frac_years_to_reldelta(age_of_air_years))
 
@@ -184,6 +216,10 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
         avg_start_date = avg_mid_date - age_window_spread * age_of_air[i]
         avg_end_date = avg_mid_date + age_window_spread * age_of_air[i]
 
+        if avg_end_date > retrieval_date:
+            raise RuntimeError('CO2 averaging window has an end date after the retrieval data. This physically should '
+                               'not happen, since that would imply part of the stratosphere came from the future.')
+
         prof_co2[i], latency_i = co2_record.avg_co2_in_date_range(avg_start_date, avg_end_date, deseasonalize=False)
         for j, k in enumerate(latency_keys):
             profs_latency[i, j] = latency_i[k]
@@ -196,7 +232,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     ow1 = np.argwhere(xx_overworld)[0]
     co2_entry_conc = co2_record.get_co2_for_dates(retrieval_date - co2_lag)
 
-    co2_endpoints = np.array([co2_entry_conc['co2_mean'].item(), prof_co2[ow1].item()])
+    co2_endpoints = np.array([co2_entry_conc.item(), prof_co2[ow1].item()])
     theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
     xx_middleworld = (tropopause_theta < prof_theta) & (prof_theta < 380.0)
     prof_co2[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, co2_endpoints)
@@ -204,11 +240,37 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
 
     # TODO: add latency profile
 
-    return prof_co2, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag}
+    return prof_co2, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag,
+                      'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width}
 
 
-def get_mean_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
+def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
+    """
+    Get the age of air predicted by the CLAMS model for points defined by potential temperature and equivalent latitude.
 
+    :param theta: a vector of potential temperatures, must be the same length as ``eq_lat``
+    :type theta: :class:`numpy.ndarray`
+
+    :param eq_lat: a vector of equivalent latitudes, must be the same length as ``theta``
+    :type eq_lat: :class:`numpy.ndarray`
+
+    :param day_of_year: which day of the year (e.g. Feb 1 = 32) to look up the age for
+    :type day_of_year: int
+
+    :param as_timedelta: set this to ``True`` to return the ages as :class:`relativedelta` instances. When ``False``
+     (default) just returned in fractional years.
+    :type as_timedelta: bool
+
+    :param clams_dat: a dictionary containing the CLAMS data with keys 'eqlat' (l-element vector), 'theta' (m-element
+     vector), 'doy' (n-element vector), and 'age' (l-by-m-by-n array). This can be passed manually if you want to use a
+     custom map of age of air vs. equivalent latitude and theta, but by default will be read in from the CLAMS file
+     provided by Arlyn Andrews and cached.
+    :type clams_dat: dict
+
+    :return: a vector of ages the same length as ``theta`` and ``eq_lat``. The contents of the vector depend on the
+     value of ``as_timedelta``.
+    :rtype: :class:`numpy.ndarray`
+    """
     if len(clams_dat) == 0:
         # Take advantage of mutable default arguments to cache the CLAMS data. The first time this function is called,
         # the dict will be empty, so the data will be loaded. The second time, since the dict will have been modified,
@@ -236,7 +298,6 @@ def get_mean_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict(
     # For simplicity, we're just going to clamp ages for theta > max theta in CLAMS to the age given at the top of the
     # profile. In theory, this shouldn't matter too much since (a) CLAMS seems to approach an asymptote at the top of
     # the stratosphere and (b) there's just not that much mass up there.
-    import pdb; pdb.set_trace()
     last_age = np.max(np.argwhere(~np.isnan(prof_ages)))
     if last_age < prof_ages.size:
         prof_ages[last_age+1:] = prof_ages[last_age]
@@ -250,6 +311,11 @@ def get_mean_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict(
 
 
 class CO2TropicsRecord(object):
+    """
+    This class stored the Mauna Loa/Samoa average CO2 record and provides methods to sample it.
+
+    No arguments required for initialization.
+    """
     months_avg_for_trend = 12
 
     def __init__(self):
@@ -260,6 +326,19 @@ class CO2TropicsRecord(object):
 
     @classmethod
     def read_insitu_co2(cls, fpath, fname):
+        """
+        Read a CO2 record file. Assumes that the file is of monthly average CO2.
+
+        :param fpath: the path to the directory containing the file.
+        :type fpath: str
+
+        :param fname: the name of the file
+        :type fname: str
+
+        :return: a data frame containing the monthly CO2 data along with the site, year, month, and day. The index will
+         be a timestamp of the measurment time.
+        :rtype: :class:`pandas.DataFrame`
+        """
         full_file_path = os.path.join(fpath, fname)
         with open(full_file_path, 'r') as f:
             hlines = f.readline().rstrip().split(': ')[1]
@@ -275,6 +354,16 @@ class CO2TropicsRecord(object):
 
     @classmethod
     def get_mlo_smo_mean(cls):
+        """
+        Generate the Mauna Loa/Samoa mean CO2 record from the files stored in this repository.
+
+        Reads in the :file:`data/ML_monthly_obs.txt` and :file:`data/SMO_monthly_obs.txt` files included in this
+        repository, averages them, and fills in any missing months by interpolation.
+
+        :return: the data frame containing the mean CO2 ('co2_mean') and a flag ('interp_flag') set to 1 for any months
+         that had to be interpolated. Index by timestamp.
+        :rtype: :class:`pandas.DataFrame`
+        """
         df_mlo = cls.read_insitu_co2(data_dir, 'ML_monthly_obs.txt')
         df_smo = cls.read_insitu_co2(data_dir, 'SMO_monthly_obs.txt')
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
@@ -297,6 +386,33 @@ class CO2TropicsRecord(object):
         return df_combined
 
     def get_co2_by_month(self, year, month, deseasonalize=False, limit_extrapolation_to=None):
+        """
+        Get CO2 for a specific month, extrapolating if necessary.
+
+        :param year: what year to query
+        :type year: int
+
+        :param month: what month to query
+        :type year: int
+
+        :param deseasonalize: set to ``True`` to use the CO2 record with the seasonal record smoothed out. Default is
+         ``False``, which keeps the seasonal record.
+        :type deseasonalize: bool
+
+        :param limit_extrapolation_to: a date beyond which not to extrapolate
+        :type limit_extrapolation_to: a datetime-like object
+
+        :return: the CO2 value for this month, and a dictionary with keys "flag" and "latency". "latency" will be the
+         number of years that the CO2 value had to be extrapolated. Flag will be one of:
+
+         * 0 = data read directly from record
+         * 1 = data had to be extrapolated
+         * 2 = requested date was before the start of the record
+         * 3 = requested date was after the date set by ``limit_extrapolation_to``
+         * 4 = unanticipated error occured.
+
+        :rtype: float, dict
+        """
         df = self.co2_trend if deseasonalize else self.co2_seasonal
 
         flag = 0
@@ -369,7 +485,25 @@ class CO2TropicsRecord(object):
 
         return val, {'flag': flag, 'latency': years_extrap}
 
-    def get_co2_for_dates(self, dates, deseasonalize=False):
+    def get_co2_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
+        """
+        Get CO2 for one or more dates.
+
+        This method will lookup CO2 for a specific date, interpolating between the monthly values as necessary.
+
+        :param dates: the date or dates to get CO2 for. If giving a single date, it may be any time that can be
+         converted to a Pandas :class:`~pandas.Timestamp`. If giving a series of dates, it must be a
+         :class:`pandas.DatetimeIndex`.
+
+        :param deseasonalize: whether to draw CO2 data from the trend only (``True``) or the seasonal cycle (``False``).
+        :type deseasonalize: bool
+
+        :param as_dataframe: whether to return the CO2 data as a dataframe (``True``) or numpy array (``False``)
+        :type as_dataframe: bool
+
+        :return: the CO2 data for the requested date(s), as a numpy vector or data frame. The data frame will also
+         include the latency (how many years the CO2 had to be extrapolated).
+        """
         # Make inputs consistent: we expect dates to be a Pandas DatetimeIndex, but it may be a single timestamp or
         # datetime. For now, we will not allow collections of datetimes, such inputs must be converted to DatetimeIndex
         # instances before being passed in.
@@ -411,10 +545,30 @@ class CO2TropicsRecord(object):
 
         df_resampled.interpolate(method='index', inplace=True)
 
-        # Return the dataframe with just the originally requested dates
-        return df_resampled.reindex(dates)
+        # Return with just the originally requested dates
+        df_resampled = df_resampled.reindex(dates)
+        if as_dataframe:
+            return df_resampled
+        else:
+            return df_resampled['co2_mean'].values
 
     def avg_co2_in_date_range(self, start_date, end_date, deseasonalize=False):
+        """
+        Average the MLO/SMO record between the given dates
+
+        :param start_date: the first date in the averaging period
+        :type start_date: datetime-like object
+
+        :param end_date: the last date in the averaging period
+        :type end_date: datetime-like object
+
+        :param deseasonalize: whether to draw CO2 data from the trend only (``True``) or the seasonal cycle (``False``).
+        :type deseasonalize: bool
+
+        :return: the average CO2 and a dictionary specifying the mean, minimum, and maximum latency (number of years the
+         CO2 had to be extrapolated)
+        :rtype: float, dict
+        """
         if not isinstance(start_date, dt.date) or not isinstance(end_date, dt.date):
             raise TypeError('start_date and end_date must be datetime.date objects (cannot be datetime.datetime objects)')
 
@@ -423,7 +577,7 @@ class CO2TropicsRecord(object):
         resolution = dt.timedelta(days=1)
 
         avg_idx = pd.date_range(start=start_date, end=end_date, freq=resolution)
-        df_resampled = self.get_co2_for_dates(avg_idx, deseasonalize=deseasonalize)
+        df_resampled = self.get_co2_for_dates(avg_idx, deseasonalize=deseasonalize, as_dataframe=True)
 
         mean_co2 = df_resampled['co2_mean'][avg_idx].mean()
         latency = dict()
@@ -432,13 +586,74 @@ class CO2TropicsRecord(object):
         latency['max'] = df_resampled['latency'][avg_idx].max()
         return mean_co2, latency
 
-    def get_co2_by_age(self, ref_date, age, deseasonalize=False):
+    def get_co2_by_age(self, ref_date, age, deseasonalize=False, as_dataframe=False):
+        """
+        Get CO2 for one or more times by specifying a reference date and age.
+
+        This called :meth:`get_co2_for_dates` internally, so the CO2 is interpolated to the specific day just as that
+        method does.
+
+        :param ref_date: the date that the ages are relative to.
+        :type ref_date: datetime-like object.
+
+        :param age: the number of years before the reference date to get CO2 from. May be a non-whole number.
+        :type age: float or sequence of floats
+
+        :param deseasonalize: whether to draw CO2 data from the trend only (``True``) or the seasonal cycle (``False``).
+        :type deseasonalize: bool
+
+        :param as_dataframe: whether to return the CO2 data as a dataframe (``True``) or numpy array (``False``)
+        :type as_dataframe: bool
+
+        :return: the CO2 data for the requested date(s), as a numpy vector or data frame. The data frame will also
+         include the latency (how many years the CO2 had to be extrapolated).
+        """
         co2_dates = [ref_date - dt.timedelta(days=a*365.25) for a in age]
-        return self.get_co2_for_dates(pd.DatetimeIndex(co2_dates), deseasonalize=deseasonalize)
+        return self.get_co2_for_dates(pd.DatetimeIndex(co2_dates), deseasonalize=deseasonalize,
+                                      as_dataframe=as_dataframe)
 
 
 def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, profs_latency=None, prof_aoa=None,
                        prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
+    """
+    Add troposphere CO2 to the prior profile.
+
+    :param prof_co2: the profile CO2 mixing ratios, in ppm. Will be modified in-place to add the stratospheric
+     component.
+    :type prof_co2: :class:`numpy.ndarray` (in ppm)
+
+    :param obs_date: the UTC date of the retrieval.
+    :type obs_date: :class:`datetime.datetime`
+
+    :param obs_lat: the latitude of the retrieval (degrees, south is negative)
+    :type obs_lat: float
+
+    :param z_grid: the grid of altitudes (in kilometers) that the CO2 profile is on.
+    :type z_grid: :class:`numpy.ndarray`
+
+    :param z_trop: the altitude of the tropopause (in kilometers)
+    :type z_trop: float
+
+    :param co2_record: the Mauna Loa-Samoa CO2 record.
+    :type co2_record: :class:`CO2TropicsRecord`
+
+    The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
+    stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
+    NaNs. "nlev" below means the number of levels in the CO2 profile.
+
+    :param profs_latency: nlev-by-3 array that will store how far forward in time the Mauna Loa/Samoa CO2 record had to
+     be extrapolated, in years. The three columns will respectively contain the mean, min, and max latency.
+    :param prof_aoa: nlev-element vector of ages of air, in years.
+    :param prof_world_flag: nlev-element vector of ints which will indicate which levels are considered overworld and
+     which middleworld. The values used for each are defined in :mod:`mod_constants`
+    :param prof_co2_date: nlev-element vector that stores the date in the MLO/SMO record that the CO2 was taken from.
+     Since most levels will have a window of dates, this is the middle of those windows. The dates are stored as a
+     decimal year, e.g. 2016.5.
+    :param prof_co2_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
+     the CO2 concentrations.
+
+    :return: the updated CO2 profile and a dictionary of the ancillary profiles.
+    """
     n_lev = np.size(prof_co2)
     profs_latency = _init_prof(profs_latency, n_lev, 3)
     prof_aoa = _init_prof(prof_aoa, n_lev)
@@ -455,7 +670,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     # Now use that to look up the CO2 from the MLO/SMO record. This assumes that the age-of-air accounts for the fact
     # that the NH will generally precede the tropics and SH in CO2. This is not a great assumption currently, but may
     # be good enough.
-    co2_df = co2_record.get_co2_by_age(obs_date, air_age, deseasonalize=True)
+    co2_df = co2_record.get_co2_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
     prof_co2[xx_trop] = co2_df['co2_mean'].values
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop, :] = co2_df['latency'].values.reshape(-1, 1)
@@ -477,10 +692,43 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
 
 
 def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx', use_geos_grid=True, write_map=False):
+    """
+    Driver function to generate the TCCON prior profiles for a single observation.
+
+    :param mod_file_data: data from a .mod file prepared by Mod Maker. May either be a path to a .mod file, or a
+     dictionary from :func:`~mod_utils.read_mod_file`.
+    :type mod_file_data: str or dict
+
+    :param obs_date: the date of the observation
+    :type obs_date: datetime-like object
+
+    :param species: which species to generate the prior profile for. Currently only CO2 is implemented (case
+     insensitive).
+    :type species: str
+
+    :param site_abbrev: the two-letter site abbreviation. Currently only used in naming the output file.
+    :type site_abbrev: str
+
+    :param use_geos_grid: when ``True``, the native 42-level GEOS-FP pressure grid is used as the vertical grid for the
+     CO2 profiles. Set to ``False`` to use a grid with 1 km altitude spacing
+    :type use_geos_grid: bool
+
+    :param write_map: set to ``False`` to disable writing the output pseudo .map file and just return the dictionary of
+     profiles. Set to a path where to save the .map file in order to save it, e.g. set ``write_map='.'`` to save to the
+     current directory.
+    :type write_map: bool or str
+
+    :return: a dictionary containing all the profiles (including many for debugging) and a dictionary containing the
+     units of the values in each profile.
+    :rtype: dict, dict
+    """
     if isinstance(mod_file_data, str):
         mod_file_data = mod_utils.read_mod_file(mod_file_data)
     elif not isinstance(mod_file_data, dict):
         raise TypeError('mod_file_data must be a string (path pointing to a .mod file) or a dictionary')
+
+    if write_map and not isinstance(write_map, str):
+        raise TypeError('If write_map is truthy, then it must be a string')
 
     obs_lat = mod_file_data['constants']['obs_lat']
 
@@ -511,7 +759,7 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
     # average of the Mauna Loa and Samoa CO2 concentration using the existing GGG age-of-air parameterization assuming
     # a reference latitude of 0 deg. That will be used to set the base CO2 profile, which will then have a parameterized
     # seasonal cycle added on top of it.
-    #z_grid = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
+
     if use_geos_grid:
         z_grid = z_met
         theta_prof = theta_met
@@ -519,6 +767,7 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
         t_prof = mod_file_data['profile']['Temperature']
         p_prof = mod_file_data['profile']['Pressure']
     else:
+        # z_grid = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
         z_grid = np.arange(0., 65.)
         theta_prof = mod_utils.mod_interpolation_new(z_grid, z_met, theta_met, interp_mode='linear')
         # Not sure what the theoretical relationship between equivalent latitude and altitude is, and plotting it is too
@@ -565,7 +814,7 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
         map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d')))
         mod_utils.write_map_file(map_name, obs_lat, map_dict, units_dict, var_order=var_order)
 
-    return map_dict
+    return map_dict, units_dict
 
 
 def _calculate_box_area(edge_lon, edge_lat):
