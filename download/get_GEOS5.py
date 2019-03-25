@@ -1,6 +1,6 @@
 #!~/anaconda2/bin/python
  # -*- coding: utf-8 -*-
-
+from __future__ import print_function
 import os
 from datetime import datetime, timedelta
 import sys
@@ -110,7 +110,7 @@ if __name__=="__main__":
 		os.makedirs(outpath)
 	func_dict[mode](start,end,surf=True,outpath=os.path.join(outpath,'getFPIT.dat'))
 
-	for line in execute('wget -i getFPIT.dat'.split(),cwd=outpath):
+	for line in execute('wget -N -i getFPIT.dat'.split(),cwd=outpath):
 		print(line, end="")
 
 	# profile data
@@ -120,5 +120,5 @@ if __name__=="__main__":
 		os.makedirs(outpath)
 	func_dict[mode](start,end,surf=False,outpath=os.path.join(outpath,'getFPIT.dat'))
 
-	for line in execute('wget -i getFPIT.dat'.split(),cwd=outpath):
+	for line in execute('wget -N -i getFPIT.dat'.split(),cwd=outpath):
 		print(line, end="")
