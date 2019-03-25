@@ -338,7 +338,6 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 			else:
 				# compute equivalent latitude; 1e6 converts EPV to PVU (1e-6 K . m2 / kg / s)
 				line_dict['EL'] = func(line_dict['EPV']*1e6, line_dict['PT'])[0]
-				print('{} EPV: {}, PT: {}, EL: {}'.format(k, line_dict['EPV']*1e6, line_dict['PT'], line_dict['EL']))
 
 			for key in line_dict.keys():
 				scale = output_scaling[key] if key in output_scaling else 1.0
@@ -1023,6 +1022,8 @@ def parse_args(argu=sys.argv):
 	parser.add_argument('-s', '--save-path', help='Location to save .mod files to. Subdirectories organized by met type, '
 												'site, and vertical/slant .mod files will be created. If not given, '
 												'will attempt to save files under $GGGPATH/models/gnd')
+	parser.add_argument('--keep-latlon-prec', action='store_true', help='Retain lat/lon to 2 decimals in the .mod file names')
+	parser.add_argument('--save-in-utc', action='store_true', help='Use UTC time in .mod file name, instead of local')
 	parser.add_argument('-q', '--quiet', dest='muted', action='store_true', help='Suppress log output to command line.')
 	parser.add_argument('--slant', action='store_true', help='Generate slant .mod files, in addition to vertical .mod '
 															'files.')
@@ -1046,15 +1047,26 @@ def parse_args(argu=sys.argv):
 	return arg_dict
 
 
-def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path):
+def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=False):
 
 	YYYYMMDD = date.strftime('%Y%m%d')
 	HHMM = date.strftime('%H%M')
-	if time_step < timedelta(days=1):
-		mod_name = '{}_{}_{:0>2.0f}{:>1}_{:0>3.0f}{:>1}.mod'.format(YYYYMMDD,HHMM,round(abs(site_lat)),ns,round(abs(site_lon_180)),ew)
+	if in_utc:
+		HHMM += 'Z'
+	if round_latlon:
+		site_lat = round(abs(site_lat))
+		site_lon = round(abs(site_lon_180))
+		latlon_precision = 0
 	else:
-		mod_name = '{}_{:0>2.0f}{:>1}_{:0>3.0f}{:>1}.mod'.format(YYYYMMDD,round(abs(site_lat)),ns,round(abs(site_lon_180)),ew)
+		site_lat = abs(site_lat)
+		site_lon = abs(site_lon_180)
+		latlon_precision = 2
+	if time_step < timedelta(days=1):
+		mod_fmt = '{{ymd}}_{{hm}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
+	else:
+		mod_fmt = '{{ymd}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
 
+	mod_name = mod_fmt.format(ymd=YYYYMMDD, hm=HHMM, lat=site_lat, ns=ns, lon=site_lon, ew=ew)
 	return mod_name
 
 def GEOS_files(GEOS_path, start_date, end_date):
@@ -1220,7 +1232,7 @@ def show_interp(data,x,y,interp_data,ilev):
 	pl.colorbar()
 	pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,save_path=None,**kwargs):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,save_path=None,keep_latlon_prec=False,save_in_utc=False,**kwargs):
 	"""
 	This code only works with GEOS-5 FP-IT data.
 	It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1246,6 +1258,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 	"""
 
 	if lat: # True when lat!=None, a custom location was given
+		site_abbrv = 'xx' if site_abbrv is None else site_abbrv
 		locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
 	elif site_abbrv: # if not custom location is given, but a site abbreviation is given, just do that one site
 		locations = {site_abbrv:locations[site_abbrv]}
@@ -1576,7 +1589,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			site_lat = site_dict[site]['lat']
 			site_lon_180 = site_dict[site]['lon_180']
 
-			utc_offset = timedelta(hours=site_dict[site]['lon_180']/15.0)
+			utc_offset = timedelta(hours=site_dict[site]['lon_180']/15.0) if not save_in_utc else timedelta(hours=0)
 			local_date = UTC_date + utc_offset
 
 			vertical_mod_path =  os.path.join(mod_path,site,'vertical')
@@ -1599,7 +1612,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			else:
 				ew = 'W'
 
-			mod_name = mod_file_name(local_date,timedelta(hours=3),site_lat,site_lon_180,ew,ns,mod_path)
+			mod_name = mod_file_name(local_date,timedelta(hours=3),site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec,in_utc=save_in_utc)
 			if not muted:
 				print '\t\t\t{:<20s} : {}'.format(site_dict[site]['name'], mod_name)
 			
@@ -1627,7 +1640,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 	return mod_dicts
 
 
-def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None,save_path=None,ncdf_path=None,**kwargs):
+def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=site_dict,HH=12,MM=0,time_step=24,muted=False,lat=None,lon=None,alt=None,save_path=None,ncdf_path=None,keep_latlon_prec=False,**kwargs):
 	"""
 	Inputs:
 		- site_abbvr: two letter site abbreviation
@@ -1812,7 +1825,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 			ew = 'W'
 
 		# use the local date for the name of the .mod file
-		mod_name = mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path)
+		mod_name = mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec)
 		mod_file_path = os.path.join(mod_path,mod_name)
 		if not muted:
 			print '\n',mod_name
@@ -1832,7 +1845,6 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
 
 	arguments = parse_args()
-
 	if 'mode' in arguments.keys(): # the fp / fpit mode works with concatenated files
 
 		mod_maker(**arguments)

@@ -6,9 +6,9 @@ import netCDF4 as ncdf
 import numpy as np
 import os
 import pandas as pd
-import pyproj
+#import pyproj
 from scipy.interpolate import interp2d, LinearNDInterpolator
-from shapely.geometry import shape
+#from shapely.geometry import shape
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
@@ -430,13 +430,13 @@ class CO2TropicsRecord(object):
             if (target_date > llimit) & (target_date < df.index[-1]):
 
                 flag = 0
-                print('Reading data from file...')
+                #print('Reading data from file...')
                 val = df.loc[target_date]['co2_mean']
 
             else:
                 flag = 1
                 nyear = 5
-                print('Date outside available time period... extrapolating!')
+                #print('Date outside available time period... extrapolating!')
 
                 # Need to find the most recent year that we have data for this month
                 last_available_date = max(df.index)
@@ -468,19 +468,19 @@ class CO2TropicsRecord(object):
         elif target_date < df.index[0]:
 
             flag = 2
-            print('No data available before {}! Setting fill value...'.format(df.index[0]))
+            #print('No data available before {}! Setting fill value...'.format(df.index[0]))
             val = fillval
 
         elif target_date > limit_extrapolation_to:
 
             flag = 3
-            print('Data too far in the future. Setting fill value...')
+            #print('Data too far in the future. Setting fill value...')
             val = fillval
 
         else:
 
             flag = 4
-            print('Error!')
+            #print('Error!')
             val = fillval
 
         return val, {'flag': flag, 'latency': years_extrap}
@@ -536,6 +536,7 @@ class CO2TropicsRecord(object):
         sample_date_idx = dates.copy()
         sample_date_idx = sample_date_idx.append(monthly_idx)
         sample_date_idx = sample_date_idx.sort_values()  # is needed for successful interpolation
+	sample_date_idx = pd.unique(sample_date_idx)  # deal with the possibility that one of the requested dates was a month start
         df_resampled = monthly_df.reindex(sample_date_idx)
 
         # Verify we have non-NaN values for all monthly reference points
@@ -691,7 +692,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
                       'age_of_air': prof_aoa, 'stratum': prof_world_flag}
 
 
-def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx', use_geos_grid=True, write_map=False):
+def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
 
@@ -731,6 +732,8 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
         raise TypeError('If write_map is truthy, then it must be a string')
 
     obs_lat = mod_file_data['constants']['obs_lat']
+    # Make the UTC date a datetime object that is rounded to a date (hour/minute/etc = 0)
+    obs_utc_date = dt.datetime.combine((obs_date - utc_offset).date(), dt.time())
 
     z_met = mod_file_data['profile']['Height']
     theta_met = mod_file_data['profile']['PT']
@@ -786,14 +789,14 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_date, obs_lat, z_grid, z_trop_met, concentration_record,
+    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_grid, z_trop_met, concentration_record,
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag,
                                            prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_co2_strat_prior(co2_prof, obs_date, theta_prof, eq_lat_prof, theta_trop_met,
+    _, ancillary_strat = add_co2_strat_prior(co2_prof, obs_utc_date, theta_prof, eq_lat_prof, theta_trop_met,
                                              concentration_record, profs_latency=latency_profs,
                                              prof_world_flag=stratum_flag, prof_co2_date=co2_date_prof,
                                              prof_co2_date_width=co2_date_width_prof)
@@ -811,7 +814,7 @@ def generate_tccon_prior(mod_file_data, obs_date, species='co2', site_abbrev='xx
                  'max_co2_latency', 'trop_age_of_air', 'strat_age_of_air', 'atm_stratum', 'co2_date', 'co2_date_width')
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
-        map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d')))
+        map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M')))
         mod_utils.write_map_file(map_name, obs_lat, map_dict, units_dict, var_order=var_order)
 
     return map_dict, units_dict

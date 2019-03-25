@@ -461,10 +461,14 @@ def interp_to_tropopause_height(theta, altitude, theta_trop):
     # temperature of the tropopause (sometimes happens if it's extrapolated to the surface)
 
     # np.nonzero returns a tuple, the first element is an array of indices where diff(theta) < 0
-    last_decr = np.max(np.nonzero(np.diff(theta) < 0)[0]) + 1
+    decr_theta = np.diff(theta) < 0
+    if not np.any(decr_theta):
+        last_decr = 0
+    else:
+        last_decr = np.max(np.nonzero(decr_theta)[0]) + 1
     if altitude[last_decr] > 3:
-        raise RuntimeError('Decreasing potential temperature found above 3 km. This is not expected, and may '
-                           'cause erroneously high tropopause altitudes to be computed')
+        print('Decreasing potential temperature found above 3 km ({} km). This is not expected, and may '
+              'cause erroneously high tropopause altitudes to be computed'.format(altitude[last_decr]))
 
     # Do the interpolation with just the altitudes where theta is monotonically increasing.
     return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()
