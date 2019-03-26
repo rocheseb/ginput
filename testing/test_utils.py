@@ -1,0 +1,118 @@
+from __future__ import print_function
+
+import datetime as dt
+from glob import glob
+from hashlib import sha1
+import os
+import shutil
+import sys
+
+_mydir = os.path.abspath(os.path.realpath(os.path.dirname(__file__)))
+# Add the paths to the mod maker and download utilities.
+# TODO: replace with proper relative imports when this is a package
+sys.path.append(os.path.abspath(os.path.join(_mydir, '..')))
+sys.path.append(os.path.abspath(os.path.join(_mydir, '..', 'download')))
+
+_input_data_dir = os.path.join(_mydir, 'test_input_data')
+_geos_fp_dir = os.path.join(_input_data_dir, 'geosfp')
+_geos_sha_file = os.path.join(_geos_fp_dir, 'fp_hashes.sha1')
+
+test_date = dt.datetime(2016, 5, 1)
+
+
+import get_GEOS5
+
+
+# Python 2/3 compatibility. Never use "input" in Py2 because it executes whatever input it receives as code
+if sys.version_info.major == 2:
+    input = raw_input
+
+
+class InputDataMismatchError(Exception):
+    pass
+
+
+class UserCancelledDownloadError(Exception):
+    pass
+
+
+def hash_file(filename):
+    block_size = 2**16
+    hash_obj = sha1()
+    with open(filename, 'rb') as fobj:
+        buf = fobj.read(block_size)
+        while len(buf) > 0:
+            hash_obj.update(buf)
+            buf = fobj.read(block_size)
+
+    return hash_obj.hexdigest()
+
+
+def write_hash_list(hash_filename, files_to_hash):
+    with open(hash_filename, 'w') as wobj:
+        for f in files_to_hash:
+            sha_sum = hash_file(f)
+            # Strip off the leading path to the test data directory, when checking, we add that back on
+            # so that the hash file can be used across machines
+            local_f = f.replace(_input_data_dir, '')
+            local_f = local_f.lstrip('/')
+            wobj.write('{hash}  {file}\n'.format(hash=sha_sum, file=local_f))
+
+
+def read_hash_list(hash_filename):
+    hash_dict = dict()
+    with open(hash_filename, 'r') as fobj:
+        for line in fobj:
+            hash_obj, filename = line.split()
+            filename = os.path.join(_input_data_dir, filename)
+            hash_dict[filename] = hash_obj
+
+    return hash_dict
+
+
+def check_hash_list(hash_list_filename):
+    hash_dict = read_hash_list(hash_list_filename)
+    for filename, hash_hex in hash_dict.items():
+        new_hash_hex = hash_file(filename)
+        if hash_hex != new_hash_hex:
+            return False
+
+    return True
+
+
+def download_test_geos_data(rebuild=False):
+    # Check if we need to download files. We should only need to do this if some of the files are missing. If redownload
+    # is True though, that means we're recreating the test data set so we need to delete the existing directories
+    # and also recreate the hash file.
+
+    # check hashes, unless we're forcing a rebuild (where we redownload new files and write their hashes to the record)
+    if not rebuild:
+        if not check_hash_list(_geos_sha_file):
+            print('One or more SHA1 hashes for GEOS FP files do not match expected, or files are missing.\n'
+                  'Redownload now (~1 GB)? (y to download, anything else to abort)')
+            user_ans = input('')
+            if user_ans.lower().strip() != 'y':
+                raise UserCancelledDownloadError('User elected not to download GEOS FP data')
+
+        else:
+            return
+
+    if os.path.exists(os.path.join(_geos_fp_dir, 'Np')):
+        shutil.rmtree(os.path.join(_geos_fp_dir, 'Np'))
+    if os.path.exists(os.path.join(_geos_fp_dir, 'Nx')):
+        shutil.rmtree(os.path.join(_geos_fp_dir, 'Nx'))
+
+    get_GEOS5.driver(start=test_date, end=test_date+dt.timedelta(days=1), mode='FP', path=_geos_fp_dir)
+
+    if rebuild:
+        surf_files = glob(os.path.join(_geos_fp_dir, 'Nx', 'GEOS*.nc4'))
+        prof_files = glob(os.path.join(_geos_fp_dir, 'Np', 'GEOS*.nc4'))
+        all_files = sorted(surf_files + prof_files)
+        write_hash_list(_geos_sha_file, all_files)
+    elif not check_hash_list(_geos_sha_file):
+        raise InputDataMismatchError('After downloading the GEOS FP data, the hashes still do not match what is '
+                                     'expected. The most likely explanation is that a new version of GEOS FP was '
+                                     'released. If you are not a maintainer for GGG, please contact one and provide '
+                                     'this error message. If you are a maintainer, then you will need to rerun the '
+                                     'test suite with the new GEOS FP version and ensure the correct .mod files are '
+                                     'produced, then update the SHA1 hash file.')

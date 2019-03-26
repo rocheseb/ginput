@@ -536,7 +536,7 @@ class CO2TropicsRecord(object):
         sample_date_idx = dates.copy()
         sample_date_idx = sample_date_idx.append(monthly_idx)
         sample_date_idx = sample_date_idx.sort_values()  # is needed for successful interpolation
-	sample_date_idx = pd.unique(sample_date_idx)  # deal with the possibility that one of the requested dates was a month start
+        sample_date_idx = pd.unique(sample_date_idx)  # deal with the possibility that one of the requested dates was a month start
         df_resampled = monthly_df.reindex(sample_date_idx)
 
         # Verify we have non-NaN values for all monthly reference points
