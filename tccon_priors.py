@@ -614,8 +614,8 @@ class CO2TropicsRecord(object):
                                       as_dataframe=as_dataframe)
 
 
-def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, profs_latency=None, prof_aoa=None,
-                       prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
+def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, ref_lat=45.0, profs_latency=None,
+                       prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
     """
     Add troposphere CO2 to the prior profile.
 
@@ -662,9 +662,16 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     prof_co2_date = _init_prof(prof_co2_date, n_lev)
     prof_co2_date_width = _init_prof(prof_co2_date_width, n_lev)
 
-    # First get the ages of air for every grid point within the troposphere.
+    # First get the ages of air for every grid point within the troposphere. The formula that Geoff Toon developed for
+    # age of air has some nice properties, namely it has about a 6 month interhemispheric lag time at the surface which
+    # decreases as you go higher up in elevation. It was built around reference measurements in the NH though, so to
+    # make it age relative to MLO/SMO, we subtract the age at the surface at the equator. This gives us negative age in
+    # the NH, which is right, b/c the NH CO2 concentration should precede MLO/SMO.  The reference latitude in this
+    # context should specify where CO2 is emitted from, hence the 45 N (middle of NH) default.
     xx_trop = z_grid <= z_trop
-    air_age = mod_utils.age_of_air(obs_lat, z_grid[xx_trop], z_trop)
+    obs_air_age = mod_utils.age_of_air(obs_lat, z_grid[xx_trop], z_trop, ref_lat=ref_lat)
+    mlo_smo_air_age = mod_utils.age_of_air(0.0, np.array([0.01]), z_trop, ref_lat=ref_lat).item()
+    air_age = obs_air_age - mlo_smo_air_age
     prof_aoa[xx_trop] = air_age
     prof_world_flag[xx_trop] = const.trop_flag
 
@@ -689,7 +696,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
                                                          ref_lat=0.0)
 
     return prof_co2, {'co2_latency': profs_latency, 'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width,
-                      'age_of_air': prof_aoa, 'stratum': prof_world_flag}
+                      'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat}
 
 
 def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True, write_map=False):
@@ -793,6 +800,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag,
                                            prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
+    trop_ref_lat = ancillary_trop['ref_lat']
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
@@ -815,7 +823,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
         map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M')))
-        mod_utils.write_map_file(map_name, obs_lat, map_dict, units_dict, var_order=var_order)
+        mod_utils.write_map_file(map_name, obs_lat, trop_ref_lat, map_dict, units_dict, var_order=var_order)
 
     return map_dict, units_dict
 

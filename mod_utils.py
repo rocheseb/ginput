@@ -91,9 +91,9 @@ def read_map_file(map_file, as_dataframes=False):
         constants = dict()
         for i in range(n_skip+1, n_header_lines-2):
             line = mapf.readline()
-            # Lines have the form Name (units): value
+            # Lines have the form Name (units): value - ignore anything in parentheses
             name, value = line.split(':')
-            name, _ = name.split()
+            name, _ = re.sub(r'\(.+\)', '', name).strip()
             constants[name] = float(value)
 
     df = pd.read_csv(map_file, header=n_header_lines-2, skiprows=[n_header_lines-1], na_values='NAN')
@@ -108,7 +108,7 @@ def read_map_file(map_file, as_dataframes=False):
     return out_dict
 
 
-def write_map_file(map_file, site_lat, variables, units, var_order=None):
+def write_map_file(map_file, site_lat, prof_ref_lat, variables, units, var_order=None):
     # variables and units must have the same keys
     if var_order is None:
         var_order = list(variables.keys())
@@ -135,11 +135,12 @@ def write_map_file(map_file, site_lat, variables, units, var_order=None):
                         .format(pgrm='MOD_MAKER.py', vers=hg_parent, branch=hg_branch, date=hg_date, author='SR, MK, JL'))
     # Header line 4: wiki link
     header_lines.append('Please see https://tccon-wiki.caltech.edu for a complete description of this file and its usage.')
-    # Header line 5-8: constants/site lat
+    # Header line 5 to (n-2): constants/site lat
     header_lines.append('Avodagro (molecules/mole): {}'.format(const.avogadro))
     header_lines.append('Mass_Dry_Air (kg/mole): {}'.format(const.mass_dry_air))
     header_lines.append('Mass_H2O (kg/mole): {}'.format(const.mass_h2o))
     header_lines.append('Latitude (degrees): {}'.format(site_lat))
+    header_lines.append('Ref. lat (degrees): {}'.format(prof_ref_lat))
 
     # Line 1: number of header lines and variable columns
     # The number of header lines is however many we've made so far, plus this one, the column names, and the column
@@ -184,11 +185,6 @@ def hg_commit_info(hg_dir=None):
     branch = log_dict['branch']
     parent_date = log_dict['date']
     return parent, branch, parent_date
-
-
-def age_of_air_trop(lat, z, z_trop, ref_lat=0.0):
-    fl = lat / 22.0
-    return 0.313 - 0.085 * np.exp(-((lat - ref_lat)/18)**2.0) - 0.268 * np.exp(-1.42 * z /(z + z_trop)) * fl / (np.sqrt(1 + fl**2.0))
 
 
 def _lrange(*args):
