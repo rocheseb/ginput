@@ -536,7 +536,7 @@ class CO2TropicsRecord(object):
         sample_date_idx = dates.copy()
         sample_date_idx = sample_date_idx.append(monthly_idx)
         sample_date_idx = sample_date_idx.sort_values()  # is needed for successful interpolation
-	sample_date_idx = pd.unique(sample_date_idx)  # deal with the possibility that one of the requested dates was a month start
+        sample_date_idx = pd.unique(sample_date_idx)  # deal with the possibility that one of the requested dates was a month start
         df_resampled = monthly_df.reindex(sample_date_idx)
 
         # Verify we have non-NaN values for all monthly reference points
@@ -655,7 +655,8 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
 
     :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
-    n_lev = np.size(prof_co2)
+    n_lev = np.size(z_grid)
+    prof_co2 = _init_prof(prof_co2, n_lev)
     profs_latency = _init_prof(profs_latency, n_lev, 3)
     prof_aoa = _init_prof(prof_aoa, n_lev)
     prof_world_flag = _init_prof(prof_world_flag, n_lev)
@@ -675,9 +676,6 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     prof_aoa[xx_trop] = air_age
     prof_world_flag[xx_trop] = const.trop_flag
 
-    # Now use that to look up the CO2 from the MLO/SMO record. This assumes that the age-of-air accounts for the fact
-    # that the NH will generally precede the tropics and SH in CO2. This is not a great assumption currently, but may
-    # be good enough.
     co2_df = co2_record.get_co2_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
     prof_co2[xx_trop] = co2_df['co2_mean'].values
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
@@ -693,7 +691,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     # with latitude.
     year_fraction = mod_utils.date_to_frac_year(obs_date)
     prof_co2[xx_trop] *= mod_utils.seasonal_cycle_factor(obs_lat, z_grid[xx_trop], z_trop, year_fraction, species='co2',
-                                                         ref_lat=0.0)
+                                                         ref_lat=ref_lat)
 
     return prof_co2, {'co2_latency': profs_latency, 'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width,
                       'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat}

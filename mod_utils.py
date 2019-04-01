@@ -77,29 +77,34 @@ def read_mod_file(mod_file, as_dataframes=False):
     return out_dict
 
 
-def read_map_file(map_file, as_dataframes=False):
+def read_map_file(map_file, as_dataframes=False, skip_header=False):
     n_header_lines = _get_num_header_lines(map_file)
-    with open(map_file, 'r') as mapf:
-        n_skip = 4
-        # Skip the first four lines to get to the constants - these should be (1) the number of header lines & columns,
-        # (2) filename, (3) version info, and (4) wiki reference.
-        for i in range(n_skip):
-            mapf.readline()
+    constants = dict()
+    if not skip_header:
+        with open(map_file, 'r') as mapf:
+            n_skip = 4
+            # Skip the first four lines to get to the constants - these should be (1) the number of header lines &
+            # columns, (2) filename, (3) version info, and (4) wiki reference.
+            for i in range(n_skip):
+                mapf.readline()
 
-        # The last two lines of the header are the column names and units; everything between line 5 and that should be
-        # physical constants. Start at n_skip+1 to account for 0 indexing vs. number of lines.
-        constants = dict()
-        for i in range(n_skip+1, n_header_lines-2):
-            line = mapf.readline()
-            # Lines have the form Name (units): value - ignore anything in parentheses
-            name, value = line.split(':')
-            name, _ = re.sub(r'\(.+\)', '', name).strip()
-            constants[name] = float(value)
+            # The last two lines of the header are the column names and units; everything between line 5 and that should
+            # be physical constants. Start at n_skip+1 to account for 0 indexing vs. number of lines.
+
+            for i in range(n_skip+1, n_header_lines-1):
+                line = mapf.readline()
+                # Lines have the form Name (units): value - ignore anything in parentheses
+                name, value = line.split(':')
+                name = re.sub(r'\(.+\)', '', name).strip()
+                constants[name] = float(value)
 
     df = pd.read_csv(map_file, header=n_header_lines-2, skiprows=[n_header_lines-1], na_values='NAN')
+    # Sometimes extra space gets kept in the headers - remove that
+    df.rename(columns=lambda h: h.strip(), inplace=True)
     if not as_dataframes:
         data = {k: v.values for k, v in df.items()}
     else:
+
         data = df
 
     out_dict = dict()
@@ -417,7 +422,7 @@ def mod_interpolation_new(z_grid, z_met, vals_met, interp_mode='linear'):
     :return: the values interpolated to the TCCON grid.
     :rtype: :class:`numpy.ndarray`
     """
-    interp_mode_compat_mapping = {0: 'linear', 1: 'linear', 2: 'lin-log'}
+    interp_mode_compat_mapping = {0: 'linear', 1: 'linear', 2: 'lin-log', 3: 'log-lin', 4: 'log-log'}
     err_msg = 'interp_mode = {} is invalid. It must be one of the strings "{}" or one of the integers {}'.format(
         interp_mode, '", "'.join(interp_mode_compat_mapping.values()),
         ', '.join([str(k) for k in interp_mode_compat_mapping.keys()])
@@ -495,6 +500,10 @@ def date_to_decimal_year(date_in):
 def date_to_frac_year(date_in):
     doy = float(date_in.strftime('%j'))
     return doy / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
+
+
+def frac_year_to_doy(yr_in):
+    return yr_in * 365.25
 
 
 def frac_years_to_reldelta(frac_year, allow_nans=True):
