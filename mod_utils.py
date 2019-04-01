@@ -113,7 +113,7 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     return out_dict
 
 
-def write_map_file(map_file, site_lat, prof_ref_lat, variables, units, var_order=None):
+def write_map_file(map_file, site_lat, prof_ref_lat, strat_used_eqlat, variables, units, var_order=None):
     # variables and units must have the same keys
     if var_order is None:
         var_order = list(variables.keys())
@@ -146,6 +146,7 @@ def write_map_file(map_file, site_lat, prof_ref_lat, variables, units, var_order
     header_lines.append('Mass_H2O (kg/mole): {}'.format(const.mass_h2o))
     header_lines.append('Latitude (degrees): {}'.format(site_lat))
     header_lines.append('Ref. lat (degrees): {}'.format(prof_ref_lat))
+    header_lines.append('Stratosphere used eq lat: {}'.format(int(strat_used_eqlat)))
 
     # Line 1: number of header lines and variable columns
     # The number of header lines is however many we've made so far, plus this one, the column names, and the column

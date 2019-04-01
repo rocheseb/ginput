@@ -134,8 +134,8 @@ def calculate_equiv_lat_from_pot_vort(pv, lon, lat):
 
 
 def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
-                        co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None, prof_aoa=None,
-                        prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
+                        co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None,
+                        prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
     """
     Add the stratospheric CO2 to a TCCON prior profile
 
@@ -697,7 +697,8 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
                       'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat}
 
 
-def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True, write_map=False):
+def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True,
+                         use_eqlat_strat=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
 
@@ -742,7 +743,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
 
     z_met = mod_file_data['profile']['Height']
     theta_met = mod_file_data['profile']['PT']
-    eq_lat_met = mod_file_data['profile']['EL']
+    eq_lat_met = mod_file_data['profile']['EL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
 
     # We need the tropopause potential temperature. The GEOS FP-IT files give the temperature itself, and the pressure,
     # so we can calculate the potential temperature. Pressure needs to be in hPa, which it is by default.
@@ -821,7 +822,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
         map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M')))
-        mod_utils.write_map_file(map_name, obs_lat, trop_ref_lat, map_dict, units_dict, var_order=var_order)
+        mod_utils.write_map_file(map_name, obs_lat, trop_ref_lat, use_eqlat_strat, map_dict, units_dict, var_order=var_order)
 
     return map_dict, units_dict
 
