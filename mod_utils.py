@@ -330,6 +330,36 @@ def calculate_eq_lat(PT, EPV, area):
     return interp2d(pv_grid, theta_grid, interp_EL)
 
 
+def geosfp_file_names(product, file_type, utc_dates, utc_hours=None):
+    product_patterns = {'fp': 'GEOS.fp.asm.inst3_{dim}d_asm_{type}.{date_time}.V01.nc4',
+                        'fpit': 'GEOS.fpit.asm.inst3_{dim}d_asm_{type}.GEOS5124.{date_time}.V01.nc4'}
+    file_type_dims = {'Np': 3, 'Nx': 2}
+    try:
+        pattern = product_patterns[product]
+    except KeyError:
+        raise ValueError('product "{}" has not been defined. Allowed values are: {}'
+                         .format(product, ', '.join(product_patterns.keys())))
+
+    try:
+        file_dims = file_type_dims[file_type]
+    except KeyError:
+        raise ValueError('file_type "{}" is not recognized. Allowed values are: {}'
+                         .format(file_type, ', '.join(file_type_dims.keys())))
+
+    geos_utc_hours = np.arange(0, 24, 3)
+    if utc_hours is not None:
+        geos_utc_hours = geos_utc_hours[np.isin(geos_utc_hours, utc_hours)]
+
+    geos_file_names = []
+    for date in utc_dates:
+        for hr in geos_utc_hours:
+            date_time = dt.datetime(date.year, date.month, date.day, hr).strftime('%Y%m%d_%H%M')
+            this_name = pattern.format(dim=file_dims, type=file_type, date_time=date_time)
+            geos_file_names.append(this_name)
+
+    return geos_file_names
+
+
 def mod_interpolation_legacy(z_grid, z_met, t_met, val_met, interp_mode=1, met_alt_geopotential=True):
     """
     Legacy interpolation for .mod file profiles onto the TCCON grid
