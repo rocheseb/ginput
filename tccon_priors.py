@@ -12,7 +12,10 @@ from scipy.interpolate import interp2d, LinearNDInterpolator
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
+import ioutils
 import mod_constants as const
+
+import line_profiler
 
 earth_radius = 6371e3  # meters
 
@@ -132,7 +135,7 @@ def calculate_equiv_lat_from_pot_vort(pv, lon, lat):
 
     return eq_lat
 
-
+@profile
 def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
                         co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None,
                         prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
@@ -385,6 +388,7 @@ class CO2TropicsRecord(object):
 
         return df_combined
 
+    @profile
     def get_co2_by_month(self, year, month, deseasonalize=False, limit_extrapolation_to=None):
         """
         Get CO2 for a specific month, extrapolating if necessary.
@@ -423,7 +427,7 @@ class CO2TropicsRecord(object):
         if limit_extrapolation_to is None:
             # 100 years in the future should be sufficiently far as to be effectively no limit
             limit_extrapolation_to = pd.Timestamp.now() + relativedelta(years=100)
-        llimit = min(df.index)
+        llimit = df.index.min()
 
         if llimit < target_date <= limit_extrapolation_to:
 
@@ -431,7 +435,9 @@ class CO2TropicsRecord(object):
 
                 flag = 0
                 #print('Reading data from file...')
-                val = df.loc[target_date]['co2_mean']
+                # As of pandas version 0.24.1, df.co2_mean[target_date] was ~10x faster than
+                # df.loc[target_date]['co2_mean']
+                val = df.co2_mean[target_date]
 
             else:
                 flag = 1
@@ -485,6 +491,7 @@ class CO2TropicsRecord(object):
 
         return val, {'flag': flag, 'latency': years_extrap}
 
+    @profile
     def get_co2_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
         """
         Get CO2 for one or more dates.
@@ -516,8 +523,8 @@ class CO2TropicsRecord(object):
             else:
                 dates = pd.DatetimeIndex([timestamp_in])
 
-        start_date = min(dates)
-        end_date = max(dates)
+        start_date = dates.min()
+        end_date = dates.max()
 
         # Need to make sure we get data that bracket the start and end date, so set them the first days of month
         start_date_subset = mod_utils.start_of_month(start_date, out_type=pd.Timestamp)
@@ -528,8 +535,8 @@ class CO2TropicsRecord(object):
         monthly_idx = pd.date_range(start_date_subset, end_date_subset, freq='MS')
         monthly_df = pd.DataFrame(index=monthly_idx, columns=['co2_mean', 'latency'], dtype=np.float)
         for timestamp in monthly_df.index:
-            monthly_df['co2_mean'][timestamp], info_dict = self.get_co2_by_month(timestamp.year, timestamp.month, deseasonalize=deseasonalize)
-            monthly_df['latency'][timestamp] = info_dict['latency']
+            monthly_df.co2_mean[timestamp], info_dict = self.get_co2_by_month(timestamp.year, timestamp.month, deseasonalize=deseasonalize)
+            monthly_df.latency[timestamp] = info_dict['latency']
 
         # Now we resample to the dates requested, making sure to keep the values at the start of each month on either
         # end of the record to ensure interpolation is successful
@@ -553,6 +560,7 @@ class CO2TropicsRecord(object):
         else:
             return df_resampled['co2_mean'].values
 
+    @profile
     def avg_co2_in_date_range(self, start_date, end_date, deseasonalize=False):
         """
         Average the MLO/SMO record between the given dates
@@ -756,6 +764,9 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     # Assume that potential temperature varies linearly with altitude to calculate that, use the potential temperature
     # of the tropopause to ensure consistency between the two parts of the profile.
     z_trop_met = mod_utils.interp_to_tropopause_height(theta_met, z_met, theta_trop_met)
+    if z_trop_met < np.nanmin(z_met):
+        raise RuntimeError('Tropopause altitude calculated to be below that the bottom of the profile. Something has '
+                           'gone horribly wrong.')
 
     species = species.lower()
     if species == 'co2':
@@ -827,21 +838,79 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     return map_dict, units_dict
 
 
-def _calculate_box_area(edge_lon, edge_lat):
-    # https://stackoverflow.com/a/4683144
-    lon1, lon2 = sorted(edge_lon)
-    lat1, lat2 = sorted(edge_lat)
+def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None, met_type='geos-fpit', use_eqlat_strat=True,
+                                **prior_kwargs):
+    # First, read in the met data, calculating equivalent latitude if necessary
 
-    latmid = np.mean(edge_lat)
-    lonmid = np.mean(edge_lon)
+    prof_vars = ['T', 'H'] + (['EPV'] if use_eqlat_strat else [])
+    surf_vars = ['TROPPB', 'TROPT', 'PS']
+    if met_type.startswith('geos'):
+        geos_product = met_type.split('-')[1]
+        geos_prof_data, geos_surf_data, geos_dates = mod_utils.read_geos_files(
+            start_date, end_date, geos_path, prof_vars, surf_vars, product=geos_product, concatenate_arrays=True,
+            set_mask_to_nan=True
+        )
+        # Height in GEOS is in meters, want kilometers
+        geos_prof_data['H'] *= 0.001
+        # Tropopause pressure in Pa, want hPa
+        geos_surf_data['TROPPB'] *= 0.01
+    else:
+        raise ValueError('met_type "{}" is not recognized'.format(met_type))
 
-    poly_lons = np.array([lon1, lon2, lon2, lon1, lon1])
-    poly_lats = np.array([lat1, lat1, lat2, lat2, lat1])
 
-    # May need special handling at poles
-    eq_area_proj = pyproj.Proj('+proj=aea +lat_1={lat1} +lat_2={lat2} +lat_0={latmid} +lon_0={lonmid}'
-                               .format(lat1=lat1, lat2=lat2, latmid=latmid, lonmid=lonmid))
+    # Second, calculate derived quantities (theta and, if necessary, equivalent latitude)
+    geos_prof_data['PT'] = mod_utils.calculate_model_potential_temperature(geos_prof_data['T'],
+                                                                           pres_levels=geos_prof_data['lev'])
+    if use_eqlat_strat:
+        area = mod_utils.calculate_area(geos_prof_data['lat'], geos_prof_data['lon'])
+        geos_prof_data['EL'] = mod_utils.calculate_eq_lat_on_grid(geos_prof_data['PT'], geos_prof_data['EPV']*1e6, area)
+    else:
+        geos_prof_data['EL'] = np.full_like(geos_prof_data['PT'], np.nan)
 
-    x, y = eq_area_proj(poly_lons, poly_lats)
-    box_poly = {'type': 'Polygon', 'coordinates': [zip(x,y)]}
-    return shape(box_poly).area
+    # Third, pass each column to as a mod file-like dictionary, passing it to generate_tccon_prior, and storing the
+    # result in a CO2 array.
+    ntimes, nlev, nlat, nlon = geos_prof_data['H'].shape
+    co2 = np.full_like(geos_prof_data['H'], np.nan)
+    prior_kwargs.update({'use_eqlat_strat': use_eqlat_strat, 'write_map': False, 'use_geos_grid': True})
+
+    gc2mod_name_map = {'T': 'Temperature', 'H': 'Height'}
+    n_columns = ntimes * nlat * nlon
+    pbar = mod_utils.ProgressBar(n_columns, prefix='Calculating CO2 priors', style='counter')
+    for i in range(n_columns):
+        pbar.print_bar(i)
+
+        itime, ilat, ilon = np.unravel_index(i, (ntimes, nlat, nlon))
+        mod_dict = dict()
+        mod_dict['profile'] = {'Pressure': geos_prof_data['lev']}
+        for var_name, var_arr in geos_prof_data.items():
+            mod_name = gc2mod_name_map[var_name] if var_name in gc2mod_name_map else var_name
+            if np.ndim(var_arr) > 1:
+                mod_dict['profile'][mod_name] = var_arr[itime, :, ilat, ilon]
+
+        mod_dict['scalar'] = dict()
+        for var_name, var_arr in geos_surf_data.items():
+            mod_name = gc2mod_name_map[var_name] if var_name in gc2mod_name_map else var_name
+            if np.ndim(var_arr) > 1:
+                mod_dict['scalar'][mod_name] = var_arr[itime, ilat, ilon]
+
+        mod_dict['constants'] = {'obs_lat': geos_prof_data['lat'][ilat]}
+
+        map_dict, _ = generate_tccon_prior(mod_dict, geos_dates[itime], dt.timedelta(hours=0), **prior_kwargs)
+        co2[itime, :, ilat, ilon] = map_dict['co2']
+
+        if i > 10:
+            break
+
+    if save_name is not None:
+        with ncdf.Dataset(save_name, 'w') as nch:
+            londim = ioutils.make_ncdim_helper(nch, 'lon', geos_prof_data['lon'], units='degrees_east')
+            latdim = ioutils.make_ncdim_helper(nch, 'lat', geos_prof_data['lat'], units='degrees_north')
+            levdim = ioutils.make_ncdim_helper(nch, 'lev', geos_prof_data['lev'], units='hPa')
+            timedim, _ = ioutils.make_nctimedim_helper(nch, 'time', geos_dates)
+            ioutils.make_ncvar_helper(nch, 'co2', co2, (timedim, levdim, latdim, londim),
+                                      units='dry air mole fraction * 10^-6',
+                                      description='CO2 profiles calculated using the TCCON prior algorithm')
+            if use_eqlat_strat:
+                ioutils.make_ncvar_helper(nch, 'eqlat', geos_prof_data['EL'], (timedim, levdim, latdim, londim),
+                                          units='degrees_north',
+                                          description='Equivalent latitude calculated from Ertels Potential Vorticity')

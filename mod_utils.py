@@ -2,12 +2,15 @@ from __future__ import print_function, division
 
 import datetime as dt
 from dateutil.relativedelta import relativedelta
+import netCDF4 as ncdf
 import numpy as np
+from numpy import ma
 import os
 import pandas as pd
 import re
 from scipy.interpolate import interp1d, interp2d
 import subprocess
+import sys
 
 import mod_constants as const
 
@@ -26,6 +29,35 @@ earth_radius = 6371  # kilometers
 
 class InsufficientMetLevelsError(Exception):
     pass
+
+
+class ProgressBar(object):
+    def __init__(self, num_symbols, prefix='', suffix='', add_one=True, style='*'):
+        if len(prefix) > 0 and not prefix.endswith(' '):
+            prefix += ' '
+        if len(suffix) > 0 and not suffix.startswith(' '):
+            suffix = ' ' + suffix
+
+        if style == '*':
+            self._fmt_str = '{pre}[{{pstr:<{n}}}]{suf}'.format(pre=prefix, n=num_symbols, suf=suffix)
+        elif style == 'counter':
+            self._fmt_str = '{pre}{{i:>{l}}}/{n}{suf}'.format(pre=prefix, n=num_symbols, suf=suffix, l=len(str(num_symbols)))
+        else:
+            raise ValueError('style "{}" not recognized'.format(style))
+        self._add_one = add_one
+
+    def print_bar(self, i):
+        if self._add_one:
+            i += 1
+
+        pstr = '*' * i
+        pbar = self._fmt_str.format(pstr=pstr, i=i)
+        sys.stdout.write('\r' + pbar)
+        sys.stdout.flush()
+
+    def finish(self):
+        sys.stdout.write('\n')
+        sys.stdout.flush()
 
 
 def _get_num_header_lines(filename):
@@ -172,6 +204,78 @@ def write_map_file(map_file, site_lat, prof_ref_lat, tropopause_alt, strat_used_
                 mapf.write('\n')
 
 
+def read_geos_files(start_date, end_date, geos_path, profile_variables, surface_variables, product='fpit',
+                    keep_time_dim=True, concatenate_arrays=False, set_mask_to_nan=False):
+    def read_var_helper(nchandle, varname, keep_time=keep_time_dim):
+        if keep_time:
+            data = nchandle.variables[varname][:]
+        else:
+            data = nchandle.variables[varname][0]
+
+        if set_mask_to_nan:
+            data = data.filled(np.nan)
+
+        return data
+
+    def read_files_helper(file_list, variables, is_profile):
+        var_data = {v: [] for v in variables}
+        for fidx, fname in enumerate(file_list):
+
+            with ncdf.Dataset(fname, 'r') as nchandle:
+                lon = read_var_helper(nchandle, 'lon', keep_time=True)
+                lat = read_var_helper(nchandle, 'lat', keep_time=True)
+                if is_profile:
+                    lev = read_var_helper(nchandle, 'lev', keep_time=True)
+                if fidx == 0:
+                    var_data['lon'] = lon
+                    var_data['lat'] = lat
+                    if is_profile:
+                        var_data['lev'] = lev
+                else:
+                    chk = not ma.allclose(var_data['lon'], lon) or not ma.allclose(var_data['lat'], lat)
+                    if is_profile:
+                        chk = chk or not ma.allclose(var_data['lev'], lev)
+
+                    if chk:
+                        # TODO: replace this with proper GEOS error from the backend analysis
+                        raise RuntimeError('lat, lon, and/or lev are inconsistent among the GEOS files')
+
+                for var in variables:
+                    var_data[var].append(read_var_helper(nchandle, var))
+
+        if concatenate_arrays:
+            for var, data in var_data.items():
+                if isinstance(data, list):
+                    # The lon/lat/lev variables don't need concatenated, we checked that they don't change with time
+                    # so there's only one array for them, not a list.
+                    var_data[var] = concatenate(data, axis=0)
+
+        return var_data
+
+    if concatenate_arrays and not keep_time_dim:
+        raise NotImplementedError('concatenate_arrays = True requires keep_time_dim = True')
+
+    if set_mask_to_nan:
+        concatenate = np.concatenate
+    else:
+        concatenate = ma.concatenate
+
+    geos_prof_files, file_dates = geosfp_file_names(product, 'Np', start_date, end_date)
+    geos_surf_files, surf_file_dates = geosfp_file_names(product, 'Nx', start_date, end_date)
+
+    # Check that the file lists have the same dates
+    if len(file_dates) != len(surf_file_dates) or any(file_dates[i] != surf_file_dates[i] for i in range(len(file_dates))):
+        raise RuntimeError('Somehow listed different profile and surface files')
+    elif concatenate_arrays:
+        file_dates = pd.DatetimeIndex(file_dates)
+
+    geos_prof_files = [os.path.join(geos_path, 'Np', f) for f in geos_prof_files]
+    geos_surf_files = [os.path.join(geos_path, 'Nx', f) for f in geos_surf_files]
+    prof_data = read_files_helper(geos_prof_files, profile_variables, is_profile=True)
+    surf_data = read_files_helper(geos_surf_files, surface_variables, is_profile=False)
+    return prof_data, surf_data, file_dates
+
+
 def hg_commit_info(hg_dir=None):
     if hg_dir is None:
         hg_dir = os.path.dirname(__file__)
@@ -242,18 +346,32 @@ def _construct_grid(*part_defs):
 
 
 # Compute area of each grid cell and the total area
-def calculate_area(lat, lon, lat_res, lon_res):
+def calculate_area(lat, lon, lat_res=None, lon_res=None):
     """
     Calculate grid cell area for an equirectangular grid.
 
     :param lat: the vector of grid cell center latitudes, in degrees
     :param lon: the vector of grid cell center longitudes, in degrees
-    :param lat_res: the width of a single grid cell in the latitudinal direction, in degrees
-    :param lon_res: the width of a single grid cell in the longitudinal direction, in degrees
+    :param lat_res: the width of a single grid cell in the latitudinal direction, in degrees. If omitted, will be
+     calculated from the lat vector.
+    :param lon_res: the width of a single grid cell in the longitudinal direction, in degrees. If omitted, will be
+     calculated from the lat vector.
     :return: 2D array of areas, in units of fraction of Earth's surface area.
     """
+    def calculate_resolution(coord_vec, coord_name):
+        res = np.diff(coord_vec)
+        if not np.all(res - res[0] < 0.001):
+            raise RuntimeError('Could not determine a unique {} resolution'.format(coord_name))
+        return res[0]
+
     nlat = lat.size
     nlon = lon.size
+
+    if lat_res is None:
+        lat_res = calculate_resolution(lat, 'lat')
+    if lon_res is None:
+        lon_res = calculate_resolution(lon, 'lon')
+
     lat_half_res = 0.5 * lat_res
 
     area = np.zeros([nlat, nlon])
@@ -273,6 +391,19 @@ def calculate_area(lat, lon, lat_res, lon_res):
         area *= 4*np.pi/np.sum(area)
 
     return area
+
+
+def calculate_eq_lat_on_grid(PT, EPV, area):
+    interpolator = calculate_eq_lat(PT, EPV, area)
+    # This is probably going to be horrifically slow - but interp2d sometimes gives weird results when called with
+    # vectors, so unfortunately we have to call this one element at a time
+    EL = np.full_like(PT, np.nan)
+    for i in range(PT.size):
+        itime, ilev, ilat, ilon = np.unravel_index(i, PT.shape)
+        this_pt = PT[itime, ilev, ilat, ilon]
+        this_epv = EPV[itime, ilev, ilat, ilon]
+        EL[itime, ilev, ilat, ilon] = interpolator(this_pt, this_epv)[0]
+    return EL
 
 
 def calculate_eq_lat(PT, EPV, area):
@@ -330,7 +461,7 @@ def calculate_eq_lat(PT, EPV, area):
     return interp2d(pv_grid, theta_grid, interp_EL)
 
 
-def geosfp_file_names(product, file_type, utc_dates, utc_hours=None):
+def _format_geosfp_name(product, file_type, date_time):
     product_patterns = {'fp': 'GEOS.fp.asm.inst3_{dim}d_asm_{type}.{date_time}.V01.nc4',
                         'fpit': 'GEOS.fpit.asm.inst3_{dim}d_asm_{type}.GEOS5124.{date_time}.V01.nc4'}
     file_type_dims = {'Np': 3, 'Nx': 2}
@@ -346,18 +477,62 @@ def geosfp_file_names(product, file_type, utc_dates, utc_hours=None):
         raise ValueError('file_type "{}" is not recognized. Allowed values are: {}'
                          .format(file_type, ', '.join(file_type_dims.keys())))
 
+    date_time = date_time.strftime('%Y%m%d_%H%M')
+    return pattern.format(dim=file_dims, type=file_type, date_time=date_time)
+
+
+def geosfp_file_names(product, file_type, start_date, end_date=None):
+    freq = pd.Timedelta(hours=3)
+    if end_date is None:
+        end_date = start_date + freq
+
+    geos_file_dates = pd.date_range(start=start_date, end=end_date - freq, freq=freq)
+    geos_file_names = []
+    for date in geos_file_dates:
+        this_name = _format_geosfp_name(product, file_type, date)
+        geos_file_names.append(this_name)
+
+    return geos_file_names, geos_file_dates
+
+
+def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None):
+    """
+    Create a list of GEOS-FP file names for specified dates
+
+    :param product: which GEOS-FP product to make names for: "fp" or "fpit"
+    :type product: str
+
+    :param file_type: which vertical coordinate type of file to use. Options are "Np" (3D by pressure) or "Nx"
+     (2D variables)
+    :type file_type: str
+
+    :param utc_dates: Dates (on UTC time) to read files for.
+    :type utc_dates: collection(datetime) or collection(datetime-like objects)
+
+    :param utc_hours: Which hours of the day to use (in UTC). If ``None``, then all hours that GEOS is produced on is
+     used (every 3 hours). Otherwise, pass a collection of integers to specify a subset of hours to use. (e.g.
+     [0, 3, 6, 9] to only use the files from the first half of each day).
+    :type utc_hours: None or collection(int)
+
+    :return: a list of GEOS file names
+    :rtype: list(str)
+    """
+
+
     geos_utc_hours = np.arange(0, 24, 3)
     if utc_hours is not None:
         geos_utc_hours = geos_utc_hours[np.isin(geos_utc_hours, utc_hours)]
 
     geos_file_names = []
+    geos_file_dates = []
     for date in utc_dates:
         for hr in geos_utc_hours:
-            date_time = dt.datetime(date.year, date.month, date.day, hr).strftime('%Y%m%d_%H%M')
-            this_name = pattern.format(dim=file_dims, type=file_type, date_time=date_time)
+            date_time = dt.datetime(date.year, date.month, date.day, hr)
+            this_name = _format_geosfp_name(product, file_type, date_time)
             geos_file_names.append(this_name)
+            geos_file_dates.append(date_time)
 
-    return geos_file_names
+    return geos_file_names, geos_file_dates
 
 
 def mod_interpolation_legacy(z_grid, z_met, t_met, val_met, interp_mode=1, met_alt_geopotential=True):
