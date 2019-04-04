@@ -26,6 +26,35 @@ class GEOSCoordinateError(GEOSError):
     pass
 
 
+class ProgressBar(object):
+    def __init__(self, num_symbols, prefix='', suffix='', add_one=True, style='*'):
+        if len(prefix) > 0 and not prefix.endswith(' '):
+            prefix += ' '
+        if len(suffix) > 0 and not suffix.startswith(' '):
+            suffix = ' ' + suffix
+
+        if style == '*':
+            self._fmt_str = '{pre}[{{pstr:<{n}}}]{suf}'.format(pre=prefix, n=num_symbols, suf=suffix)
+        elif style == 'counter':
+            self._fmt_str = '{pre}{{i:>{l}}}/{n}{suf}'.format(pre=prefix, n=num_symbols, suf=suffix, l=len(str(num_symbols)))
+        else:
+            raise ValueError('style "{}" not recognized'.format(style))
+        self._add_one = add_one
+
+    def print_bar(self, i):
+        if self._add_one:
+            i += 1
+
+        pstr = '*' * i
+        pbar = self._fmt_str.format(pstr=pstr, i=i)
+        sys.stdout.write('\r' + pbar)
+        sys.stdout.flush()
+
+    def finish(self):
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
+
 def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arange(10.0, 100.0, 10.0)):
     if np.ndim(theta) < 3 or np.ndim(theta) > 4:
         raise ValueError('theta expected to be a 3- or 4- D array')
@@ -127,9 +156,8 @@ def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', 
     end_date -= pd.Timedelta(days=1)
     for hr in hours:
         geos_names = mod_utils.geosfp_file_names(product, 'Np', pd.date_range(start=start_date, end=end_date), utc_hours=hr)
+        pbar = ProgressBar(len(geos_names), prefix='  Progress:', add_one=True, style='counter')
         for idx, fname in enumerate(geos_names):
-            print('  Loading GEOS file {} of {} for hour {}'.format(idx+1, len(geos_names), hr))
-
             full_name = os.path.join(geos_path, fname)
             if not os.path.isfile(full_name):
                 if skip_if_missing:
@@ -137,6 +165,7 @@ def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', 
                 else:
                     raise GEOSError('Missing one of the files required for {} to {}'.format(start_date, end_date))
             with ncdf.Dataset(full_name, 'r') as nci:
+                pbar.print_bar(idx)
                 # Need just latitude, theta and pressure levels. For the first file, just load theta (and make sure it's
                 # 4D). For the second file, append theta and verify that lat and pres levels are the same
                 this_lat = nci.variables['lat'][:]
@@ -166,6 +195,8 @@ def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', 
                                                   .format(new_file=full_name, chk_file=chk_file))
 
                 theta[idx] = this_theta
+
+        pbar.finish()
 
     return lat, plevs, theta
 
@@ -283,7 +314,7 @@ def iter_time_periods(year, freq):
 
 
 def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timedelta(days=14), by_hour=False,
-                                      skip_if_missing=False):
+                                      skip_if_missing=False, save_separate_files=False):
     if not by_hour:
         hours = (None,)
     else:
@@ -301,34 +332,55 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
         bin_centers = []
         theta_stats = []
         lat_stats = []
-        do_append = True
+        do_save = True
         for hr in hours:
             lat, plevs, theta = load_geos_data(geos_path, start, end, hours=(hr,), skip_if_missing=skip_if_missing)
             if lat is None:
-                do_append = False
+                do_save = False
                 continue
             this_bin_centers, this_theta_stats, this_lat_stats, percentiles = bin_lat_vs_theta(lat, theta, plevs)
             bin_centers.append(this_bin_centers)
             theta_stats.append(this_theta_stats)
             lat_stats.append(this_lat_stats)
 
-        if do_append:
+        if do_save:
             # Concatenate the individual hours in the theta_stats, lat_stats, and bin_centers lists into single arrays
             # that are (nhours)x(nbins)x(nvalues)
-            all_bin_centers.append(_cat_stats(bin_centers))
-            all_theta_stats.append(_cat_stats(theta_stats))
-            all_lat_stats.append(_cat_stats(lat_stats))
-            dates.append((start, midpoint, end))
+            if save_separate_files:
+                bin_centers = _cat_stats(bin_centers)[np.newaxis]
+                theta_stats = _cat_stats(theta_stats)
+                for k, v in theta_stats.items():
+                    theta_stats[k] = v[np.newaxis]
+                lat_stats = _cat_stats(lat_stats)
+                for k, v in lat_stats.items():
+                    lat_stats[k] = v[np.newaxis]
+                dates = [(start, midpoint, end)]
 
-    # Convert to (ndays)x(nhours)x(nbins)x(nvalues)
-    all_bin_centers = _cat_stats(all_bin_centers)
-    all_theta_stats = _cat_stats(all_theta_stats)
-    all_lat_stats = _cat_stats(all_lat_stats)
+                if by_hour:
+                    nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}-{}_by_hour.nc'.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d'))
+                else:
+                    nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}-{}.nc'.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d'))
 
-    if by_hour:
-        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_by_hour.nc'.format(year)
-    else:
-        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}.nc'.format(year)
+                nc_file_name = os.path.join(save_path, nc_file_name)
+                save_bin_ncdf_file(nc_file_name, dates, hours, bin_centers, theta_stats, lat_stats,
+                                   percentiles=percentiles)
+            else:
+                all_bin_centers.append(_cat_stats(bin_centers))
+                all_theta_stats.append(_cat_stats(theta_stats))
+                all_lat_stats.append(_cat_stats(lat_stats))
+                dates.append((start, midpoint, end))
 
-    nc_file_name = os.path.join(save_path, nc_file_name)
-    save_bin_ncdf_file(nc_file_name, dates, hours, all_bin_centers, all_theta_stats, all_lat_stats, percentiles=percentiles)
+    if not save_separate_files:
+        # Convert to (ndays)x(nhours)x(nbins)x(nvalues)
+        all_bin_centers = _cat_stats(all_bin_centers)
+        all_theta_stats = _cat_stats(all_theta_stats)
+        all_lat_stats = _cat_stats(all_lat_stats)
+        if by_hour:
+            nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_by_hour.nc'.format(year)
+        else:
+            nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}.nc'.format(year)
+
+        nc_file_name = os.path.join(save_path, nc_file_name)
+        save_bin_ncdf_file(nc_file_name, dates, hours, all_bin_centers, all_theta_stats, all_lat_stats,
+                           percentiles=percentiles)
+
