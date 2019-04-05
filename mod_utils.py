@@ -393,20 +393,26 @@ def calculate_area(lat, lon, lat_res=None, lon_res=None):
     return area
 
 
-def calculate_eq_lat_on_grid(PT, EPV, area):
-    interpolator = calculate_eq_lat(PT, EPV, area)
-    # This is probably going to be horrifically slow - but interp2d sometimes gives weird results when called with
-    # vectors, so unfortunately we have to call this one element at a time
+def calculate_eq_lat_on_grid(EPV, PT, area):
     EL = np.full_like(PT, np.nan)
-    for i in range(PT.size):
-        itime, ilev, ilat, ilon = np.unravel_index(i, PT.shape)
-        this_pt = PT[itime, ilev, ilat, ilon]
-        this_epv = EPV[itime, ilev, ilat, ilon]
-        EL[itime, ilev, ilat, ilon] = interpolator(this_pt, this_epv)[0]
+
+    for itime in range(PT.shape[0]):
+        interpolator = calculate_eq_lat(EPV[itime], PT[itime], area)
+        # This is probably going to be horrifically slow - but interp2d sometimes gives weird results when called with
+        # vectors, so unfortunately we have to call this one element at a time
+        pbar = ProgressBar(PT[itime].size, prefix='Calculating eq. lat for time {}/{}:'.format(itime, PT.shape[0]),
+                           style='counter')
+        for i in range(PT[itime].size):
+            pbar.print_bar(i)
+            ilev, ilat, ilon = np.unravel_index(i, PT[itime].shape)
+            this_pt = PT[itime, ilev, ilat, ilon]
+            this_epv = EPV[itime, ilev, ilat, ilon]
+            EL[itime, ilev, ilat, ilon] = interpolator(this_epv, this_pt)[0]
+
     return EL
 
 
-def calculate_eq_lat(PT, EPV, area):
+def calculate_eq_lat(EPV, PT, area):
     nlev, nlat, nlon = PT.shape
     # Get rid of fill values, this fills the bottom of profiles with the first valid value
     PT[PT > 1e4] = np.nan

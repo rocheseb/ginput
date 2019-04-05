@@ -1148,7 +1148,7 @@ def equivalent_latitude_functions_geos(GEOS_path, start_date=None, end_date=None
 			PT = (dataset['T'][0]*coeff_mat).data # Compute potential temperature
 			EPV = (dataset['EPV'][0].data)*1e6 # Potential vorticity in PVU = 1e-6 K . m2 / kg / s	
 
-		func_dict[date] = mod_utils.calculate_eq_lat(PT, EPV, area)
+		func_dict[date] = mod_utils.calculate_eq_lat(EPV, PT, area)
 
 		end = time.time()
 		nmin.append(int(end-start)/60.0)
@@ -1851,6 +1851,14 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 	if not muted:
 		print len(local_date_list),'mod files written'
 
+
+def driver(start_date, end_date, GEOS_path, save_path=None, keep_latlon_prec=False, save_in_utc=False, muted=False,
+		   slant=False, alt=None, lon=None, lat=None, site_abbrv=None):
+	func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
+												   muted=muted)
+	mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=GEOS_path, slant=slant,
+				  locations=site_dict, muted=muted, lat=lat, lon=lon, alt=alt, site_abbrv=site_abbrv,
+				  save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc)
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
 
 	arguments = parse_args()
@@ -1860,5 +1868,4 @@ if __name__ == "__main__": # this is only executed when the code is used directl
 
 	else: # using fp-it 3-hourly files
 		### New code that can generate slant paths and uses GEOS5-FP-IT 3-hourly files
-		arguments['func_dict'] = equivalent_latitude_functions_geos(**arguments)
-		mod_maker_new(**arguments)
+		driver(**arguments)

@@ -1,14 +1,16 @@
 from __future__ import print_function, division
 
+from contextlib import closing
+import ctypes
 import datetime as dt
 from dateutil.relativedelta import relativedelta
+import multiprocessing as mp
 import netCDF4 as ncdf
 import numpy as np
 import os
 import pandas as pd
-#import pyproj
 from scipy.interpolate import interp2d, LinearNDInterpolator
-#from shapely.geometry import shape
+import sys
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
@@ -135,7 +137,7 @@ def calculate_equiv_lat_from_pot_vort(pv, lon, lat):
 
     return eq_lat
 
-@profile
+
 def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
                         co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None,
                         prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
@@ -388,7 +390,6 @@ class CO2TropicsRecord(object):
 
         return df_combined
 
-    @profile
     def get_co2_by_month(self, year, month, deseasonalize=False, limit_extrapolation_to=None):
         """
         Get CO2 for a specific month, extrapolating if necessary.
@@ -491,7 +492,6 @@ class CO2TropicsRecord(object):
 
         return val, {'flag': flag, 'latency': years_extrap}
 
-    @profile
     def get_co2_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
         """
         Get CO2 for one or more dates.
@@ -560,7 +560,6 @@ class CO2TropicsRecord(object):
         else:
             return df_resampled['co2_mean'].values
 
-    @profile
     def avg_co2_in_date_range(self, start_date, end_date, deseasonalize=False):
         """
         Average the MLO/SMO record between the given dates
@@ -838,8 +837,62 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     return map_dict, units_dict
 
 
+def _tonumpyarray(mparr, shape):
+    return np.frombuffer(mparr).reshape(shape)
+
+
+def prior_par_wrapper(i):
+    mem_arr = shared_info_dict['shared_array']
+    co2 = np.frombuffer(mem_arr)
+    ntimes = shared_info_dict['ntimes']
+    nlev = shared_info_dict['nlev']
+    nlon = shared_info_dict['nlon']
+    nlat = shared_info_dict['nlat']
+
+    co2 = co2.reshape(ntimes, nlev, nlat, nlon)
+    prior_wrapper(i, co2, **shared_info_dict)
+
+
+def prior_wrapper(i, my_co2, ntimes, nlat, nlon, geos_prof_data, geos_surf_data, geos_dates, prior_kwargs, **kwargs):
+    gc2mod_name_map = {'T': 'Temperature', 'H': 'Height'}
+    itime, ilat, ilon = np.unravel_index(i, (ntimes, nlat, nlon))
+    print('Generating prior at t = {t}, y = {y}, x = {x}'.format(t=itime, y=ilat, x=ilon))
+    mod_dict = dict()
+    mod_dict['profile'] = {'Pressure': geos_prof_data['lev']}
+    for var_name, var_arr in geos_prof_data.items():
+        mod_name = gc2mod_name_map[var_name] if var_name in gc2mod_name_map else var_name
+        if np.ndim(var_arr) > 1:
+            mod_dict['profile'][mod_name] = var_arr[itime, :, ilat, ilon]
+
+    mod_dict['scalar'] = dict()
+    for var_name, var_arr in geos_surf_data.items():
+        mod_name = gc2mod_name_map[var_name] if var_name in gc2mod_name_map else var_name
+        if np.ndim(var_arr) > 1:
+            mod_dict['scalar'][mod_name] = var_arr[itime, ilat, ilon]
+
+    mod_dict['constants'] = {'obs_lat': geos_prof_data['lat'][ilat]}
+
+    map_dict, _ = generate_tccon_prior(mod_dict, geos_dates[itime], dt.timedelta(hours=0), **prior_kwargs)
+    my_co2[itime, :, ilat, ilon] = map_dict['co2']
+
+
+def save_gridded_priors(save_name, co2, geos_prof_data, geos_dates):
+    with ncdf.Dataset(save_name, 'w') as nch:
+        londim = ioutils.make_ncdim_helper(nch, 'lon', geos_prof_data['lon'], units='degrees_east')
+        latdim = ioutils.make_ncdim_helper(nch, 'lat', geos_prof_data['lat'], units='degrees_north')
+        levdim = ioutils.make_ncdim_helper(nch, 'lev', geos_prof_data['lev'], units='hPa')
+        timedim, _ = ioutils.make_nctimedim_helper(nch, 'time', geos_dates)
+        ioutils.make_ncvar_helper(nch, 'co2', co2, (timedim, levdim, latdim, londim),
+                                  units='dry air mole fraction * 10^-6',
+                                  description='CO2 profiles calculated using the TCCON prior algorithm')
+        ioutils.make_ncvar_helper(nch, 'eqlat', geos_prof_data['EL'], (timedim, levdim, latdim, londim),
+                                  units='degrees_north',
+                                  description='Equivalent latitude calculated from Ertels Potential Vorticity')
+
+
 def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None, met_type='geos-fpit', use_eqlat_strat=True,
-                                **prior_kwargs):
+                                n_procs=0, **prior_kwargs):
+    run_parallel = n_procs > 0
     # First, read in the met data, calculating equivalent latitude if necessary
 
     prof_vars = ['T', 'H'] + (['EPV'] if use_eqlat_strat else [])
@@ -857,60 +910,71 @@ def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None,
     else:
         raise ValueError('met_type "{}" is not recognized'.format(met_type))
 
-
     # Second, calculate derived quantities (theta and, if necessary, equivalent latitude)
     geos_prof_data['PT'] = mod_utils.calculate_model_potential_temperature(geos_prof_data['T'],
                                                                            pres_levels=geos_prof_data['lev'])
+
     if use_eqlat_strat:
         area = mod_utils.calculate_area(geos_prof_data['lat'], geos_prof_data['lon'])
-        geos_prof_data['EL'] = mod_utils.calculate_eq_lat_on_grid(geos_prof_data['PT'], geos_prof_data['EPV']*1e6, area)
+        geos_prof_data['EL'] = mod_utils.calculate_eq_lat_on_grid(geos_prof_data['EPV']*1e6, geos_prof_data['PT'], area)
     else:
         geos_prof_data['EL'] = np.full_like(geos_prof_data['PT'], np.nan)
 
     # Third, pass each column to as a mod file-like dictionary, passing it to generate_tccon_prior, and storing the
     # result in a CO2 array.
     ntimes, nlev, nlat, nlon = geos_prof_data['H'].shape
-    co2 = np.full_like(geos_prof_data['H'], np.nan)
     prior_kwargs.update({'use_eqlat_strat': use_eqlat_strat, 'write_map': False, 'use_geos_grid': True})
 
-    gc2mod_name_map = {'T': 'Temperature', 'H': 'Height'}
+    co2_size = geos_prof_data['H'].size
+    co2_shape = geos_prof_data['H'].shape
     n_columns = ntimes * nlat * nlon
-    pbar = mod_utils.ProgressBar(n_columns, prefix='Calculating CO2 priors', style='counter')
-    for i in range(n_columns):
-        pbar.print_bar(i)
 
-        itime, ilat, ilon = np.unravel_index(i, (ntimes, nlat, nlon))
-        mod_dict = dict()
-        mod_dict['profile'] = {'Pressure': geos_prof_data['lev']}
-        for var_name, var_arr in geos_prof_data.items():
-            mod_name = gc2mod_name_map[var_name] if var_name in gc2mod_name_map else var_name
-            if np.ndim(var_arr) > 1:
-                mod_dict['profile'][mod_name] = var_arr[itime, :, ilat, ilon]
+    # Must contain all the keywords args required by prior_wrapper except i and my_co2.
+    shared_info = {'ntimes': ntimes, 'nlev': nlev, 'nlat': nlat, 'nlon': nlon, 'geos_prof_data': geos_prof_data,
+                   'geos_surf_data': geos_surf_data, 'geos_dates': geos_dates, 'prior_kwargs': prior_kwargs}
 
-        mod_dict['scalar'] = dict()
-        for var_name, var_arr in geos_surf_data.items():
-            mod_name = gc2mod_name_map[var_name] if var_name in gc2mod_name_map else var_name
-            if np.ndim(var_arr) > 1:
-                mod_dict['scalar'][mod_name] = var_arr[itime, ilat, ilon]
+    #flat_indices = np.arange(n_columns)
+    flat_indices = np.arange(0, n_columns, 5000)
+    if run_parallel:
+        # Parallelization heavily inspired by https://stackoverflow.com/a/7908612
+        def par_init(shared_info_dict_):
+            # This may seem backward (assigning the input of the function to the global variable), but the way that
+            # multiprocessing works is that each worker will essentially execute this file itself to get all the
+            # function definitions and such, but it does not get the state of the variables from the parent process.
+            # Essentially its a completely new python process.
+            #
+            # Therefore, to pass variables from the parent process to the workers, this function gets called on each of
+            # the workers, receiving the info dict from the parent. It then assigns it as a global variable so that the
+            # workers can access it inside its assigned function (here prior_par_wrapper).
+            #
+            # This is probably wasteful of memory because I suspect that the entirety of shared_info_dict gets
+            # duplicated by each worker. It would be more efficient to use shared arrays for all of the GEOS data, but
+            # unless memory usage is a problem, this approach is *far* simpler.
+            global shared_info_dict
+            shared_info_dict = shared_info_dict_
 
-        mod_dict['constants'] = {'obs_lat': geos_prof_data['lat'][ilat]}
+        # To get the data back from the workers, create a shared array in memory. We need to convert it back to a shaped
+        # numpy array to do anything with it. We can use a RawArray because we don't need to lock the variable (to
+        # prevent multiple processes from accessing elements at the same time) because each worker has its own slice of
+        # the co2 array to operate on, and there should be no conflicts.
+        shared_array = mp.RawArray(ctypes.c_double, co2_size)
+        shared_info['shared_array'] = shared_array
+        co2 = _tonumpyarray(shared_array, co2_shape)
+        co2[:] = np.nan
 
-        map_dict, _ = generate_tccon_prior(mod_dict, geos_dates[itime], dt.timedelta(hours=0), **prior_kwargs)
-        co2[itime, :, ilat, ilon] = map_dict['co2']
+        # TODO: add kill message? https://stackoverflow.com/questions/29571671/basic-multiprocessing-with-while-loop
+        with closing(mp.Pool(processes=n_procs, initializer=par_init, initargs=(shared_info,))) as p:
+            p.map_async(prior_par_wrapper, flat_indices)
 
-        if i > 10:
-            break
+        p.join()
+    else:
+        co2 = np.full(co2_shape, np.nan)
+        pbar = mod_utils.ProgressBar(n_columns, prefix='Calculating CO2 priors', style='counter')
+        for i in flat_indices:
+            pbar.print_bar(i)
+            prior_wrapper(i, co2, **shared_info)
 
     if save_name is not None:
-        with ncdf.Dataset(save_name, 'w') as nch:
-            londim = ioutils.make_ncdim_helper(nch, 'lon', geos_prof_data['lon'], units='degrees_east')
-            latdim = ioutils.make_ncdim_helper(nch, 'lat', geos_prof_data['lat'], units='degrees_north')
-            levdim = ioutils.make_ncdim_helper(nch, 'lev', geos_prof_data['lev'], units='hPa')
-            timedim, _ = ioutils.make_nctimedim_helper(nch, 'time', geos_dates)
-            ioutils.make_ncvar_helper(nch, 'co2', co2, (timedim, levdim, latdim, londim),
-                                      units='dry air mole fraction * 10^-6',
-                                      description='CO2 profiles calculated using the TCCON prior algorithm')
-            if use_eqlat_strat:
-                ioutils.make_ncvar_helper(nch, 'eqlat', geos_prof_data['EL'], (timedim, levdim, latdim, londim),
-                                          units='degrees_north',
-                                          description='Equivalent latitude calculated from Ertels Potential Vorticity')
+        save_gridded_priors(save_name, co2, geos_prof_data, geos_dates)
+
+    return co2
