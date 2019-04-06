@@ -55,7 +55,7 @@ class ProgressBar(object):
         sys.stdout.flush()
 
 
-def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arange(10.0, 100.0, 10.0)):
+def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arange(10.0, 100.0, 10.0), bin_var='theta'):
     if np.ndim(theta) < 3 or np.ndim(theta) > 4:
         raise ValueError('theta expected to be a 3- or 4- D array')
     elif np.ndim(lat) != 1:
@@ -101,7 +101,19 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
 
     # digitize gives the indices of the upper edge of the bind, we want the bottom because that will work with the bin
     # centers
-    bin_inds = np.digitize(theta_vec, _theta_bin_edges) - 1
+    if bin_var == 'theta':
+        bin_centers = _theta_bin_centers
+        bin_edges = _theta_bin_edges
+        bin_inds = np.digitize(theta_vec, bin_edges) - 1
+    elif bin_var == 'latitude':
+        # Since the input latitude is always the same, we can calculate the bin edges from it
+        lat_half_res = np.mean(np.diff(lat))/2.0
+        bin_edges = np.concatenate((lat - lat_half_res, lat[-1] + lat_half_res))
+        bin_centers = lat
+        bin_inds = np.digitize(lat_vec, bin_edges) - 1
+    else:
+        raise ValueError('bin_var "{}" is not recognized'.format(bin_var))
+
     lat_bin_stats = []
     theta_bin_stats = []
     for bin in range(np.size(_theta_bin_edges) - 1):
@@ -142,7 +154,7 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
         theta_bin_out[op] = theta_op_results
         lat_bin_out[op] = lat_op_results
 
-    return _theta_bin_centers, theta_bin_out, lat_bin_out, percentiles
+    return bin_centers, theta_bin_out, lat_bin_out, percentiles
 
 
 def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', skip_if_missing=False):
@@ -226,7 +238,7 @@ def _convert_dates(dates, base_date, calendar='gregorian'):
     return date_arr, units_str, calendar
 
 
-def save_bin_ncdf_file(save_name, dates, hours, theta_bin_centers, theta_stats, lat_stats, percentiles):
+def save_bin_ncdf_file(save_name, dates, hours, bin_var, bin_centers, theta_stats, lat_stats, percentiles):
     def make_dim_helper(nc_handle, dim_name, dim_var, attrs=dict()):
         dim = nc_handle.createDimension(dim_name, np.size(dim_var))
         var = nc_handle.createVariable(dim_name, dim_var.dtype, dimensions=(dim_name,))
@@ -272,7 +284,7 @@ def save_bin_ncdf_file(save_name, dates, hours, theta_bin_centers, theta_stats, 
         times_dim = make_dim_helper(nch, 'times', mid_dates, attrs=times_attr)
 
         hours_dim = make_dim_helper(nch, 'hours', hours, attrs={'units': 'UTC hour', 'description': 'UTC hour of the GEOS files used'})
-        bins_dim = nch.createDimension('bins', theta_bin_centers.shape[2])
+        bins_dim = nch.createDimension('bins', bin_centers.shape[2])
         percentiles_dim = make_dim_helper(nch, 'percentiles', percentiles)
         values_dim = nch.createDimension('stat_values', 1)
 
@@ -282,7 +294,8 @@ def save_bin_ncdf_file(save_name, dates, hours, theta_bin_centers, theta_stats, 
         # Start writing the variables
         make_var_helper(nch, 'start_date', start_dates, (times_dim,), attrs=common_date_attrs)
         make_var_helper(nch, 'end_date', end_dates, (times_dim,), attrs=common_date_attrs)
-        make_var_helper(nch, 'theta_bin_centers', theta_bin_centers, std_3d_dims,
+        bin_center_var_name = 'theta_bin_centers' if bin_var == 'theta' else 'latitude_bin_centers'
+        make_var_helper(nch, bin_center_var_name, bin_centers, std_3d_dims,
                         attrs={'units': 'K', 'description': 'Potential temperature at the center of the bin'})
 
         for var_name, var_unit, var in [('theta', 'K', theta_stats), ('latitude', 'degrees (south is negative)', lat_stats)]:
@@ -314,7 +327,7 @@ def iter_time_periods(year, freq):
 
 
 def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timedelta(days=14), by_hour=False,
-                                      skip_if_missing=False, save_separate_files=False):
+                                      skip_if_missing=False, save_separate_files=False, bin_var='latitude'):
     if not by_hour:
         hours = (None,)
     else:
@@ -327,7 +340,6 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
     all_lat_stats = []
     dates = []
 
-    import pdb; pdb.set_trace()
     for start, midpoint, end in iter_time_periods(year, freq):
         bin_centers = []
         theta_stats = []
@@ -338,7 +350,8 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
             if lat is None:
                 do_save = False
                 continue
-            this_bin_centers, this_theta_stats, this_lat_stats, percentiles = bin_lat_vs_theta(lat, theta, plevs)
+            this_bin_centers, this_theta_stats, this_lat_stats, percentiles = bin_lat_vs_theta(lat, theta, plevs,
+                                                                                               bin_var=bin_var)
             bin_centers.append(this_bin_centers)
             theta_stats.append(this_theta_stats)
             lat_stats.append(this_lat_stats)
@@ -381,6 +394,6 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
             nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}.nc'.format(year)
 
         nc_file_name = os.path.join(save_path, nc_file_name)
-        save_bin_ncdf_file(nc_file_name, dates, hours, all_bin_centers, all_theta_stats, all_lat_stats,
+        save_bin_ncdf_file(nc_file_name, dates, hours, bin_var, all_bin_centers, all_theta_stats, all_lat_stats,
                            percentiles=percentiles)
 
