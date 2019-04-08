@@ -614,8 +614,102 @@ class CO2TropicsRecord(object):
                                       as_dataframe=as_dataframe)
 
 
-def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, ref_lat=45.0, profs_latency=None,
-                       prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
+def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_wt=1.0, dtheta_cutoff=0.25, theta_v_lat=dict()):
+    def read_pres_range(nc_handle):
+        range_str = nc_handle.theta_range  # it says theta range, its really the pressures theta is averaged over
+        range_values = [float(s) for s in range_str.split('-')]
+        if len(range_values) == 1:
+            range_values *= 2
+
+        return min(range_values), max(range_values)
+
+    def theta_lat_cost(dtheta, dlat):
+        return dtheta*theta_wt + dlat*lat_wt
+
+    def find_closest_theta(theta, lat, obs_theta):
+        # Find which index our obs_lat is closest to
+        start = np.argmin(np.abs(lat - obs_lat))
+
+        # Find the locations both north and south of the observation lat that have the smallest difference in theta
+        theta_diff = np.abs(theta - obs_theta)
+        south_min_ind = np.argmin(theta_diff[:start])
+        south_dtheta = theta_diff[south_min_ind]
+        south_dlat = np.abs(lat[south_min_ind] - obs_lat)
+        north_min_ind = np.argmin(theta_diff[start:]) + start
+        north_dtheta = theta_diff[north_min_ind]
+        north_dlat = np.abs(lat[north_min_ind] - obs_lat)
+
+        # In most cases, one or the other should have a much closer match. However, if both are similarly good, we need
+        # a way to break the tie. What we want is to pick the one that is closer geographically. To do that, we'll use
+        # basically a simple cost function that adds the difference in theta and latitude together. Eyeballing the plots
+        # of theta vs. latitude from the above file, the typical gradient in the NH is between 0.5 and 1 K/deg. To me
+        # that says that we can weight theta and latitude equally in the cost function.
+        if np.abs(south_dtheta - north_dtheta) > dtheta_cutoff:
+            if south_dtheta < north_dtheta:
+                return lat[south_min_ind]
+            else:
+                return lat[north_min_ind]
+        else:
+            if theta_lat_cost(south_dtheta, south_dlat) < theta_lat_cost(north_dtheta, north_dlat):
+                return lat[south_min_ind]
+            else:
+                return lat[north_min_ind]
+
+    if len(theta_v_lat) == 0:
+        theta_v_lat_file = os.path.join(const.data_dir, 'GEOS_FPIT_lat_vs_theta_2018_500-700hPa.nc')
+        with ncdf.Dataset(theta_v_lat_file, 'r') as nch:
+            theta_v_lat['theta'] = nch.variables['theta_mean'][:].squeeze()
+            theta_v_lat['lat'] = nch.variables['latitude_mean'][:].squeeze()
+            theta_v_lat['times'] = nch.variables['times'][:]
+            theta_v_lat['times_units'] = nch.variables['times'].units
+            theta_v_lat['times_calendar'] = nch.variables['times'].calendar
+
+            # Read the pressure range that we're using
+            theta_v_lat['pres_range'] = read_pres_range(nch)
+
+            # Append the first time slice (which will be the first two weeks of the year) to the end so that we can
+            # intepolate past the last date, assuming that the changes are cyclical. At the same time, let's record the
+            # year used in the dates
+            new_time = ncdf.num2date(theta_v_lat['times'][0], theta_v_lat['times_units'], theta_v_lat['times_calendar'])
+            theta_v_lat['year'] = year = new_time.year
+            new_time = ncdf.date2num(new_time.replace(year=year+1), theta_v_lat['times_units'], theta_v_lat['times_calendar'])
+            theta_v_lat['times'] = np.concatenate([theta_v_lat['times'], [new_time]], axis=0)
+            for k in ('theta', 'lat'):
+                theta_v_lat[k] = np.concatenate([theta_v_lat[k], theta_v_lat[k][0:1, :]], axis=0)
+
+    # First we need to get the lat vs. theta curve for this particular date
+    ntimes, nbins = theta_v_lat['theta'].shape
+    this_datenum = ncdf.date2num(obs_date.replace(year=theta_v_lat['year']), theta_v_lat['times_units'], theta_v_lat['times_calendar'])
+    this_theta_clim = np.full((nbins,), np.nan)
+    this_lat_clim = np.full((nbins,), np.nan)
+    for i in range(nbins):
+        this_theta_clim[i] = np.interp(this_datenum, theta_v_lat['times'], theta_v_lat['theta'][:, i])
+        this_lat_clim[i] = np.interp(this_datenum, theta_v_lat['times'], theta_v_lat['lat'][:, i])
+
+    # Then we find the theta for this profile
+    zz = (p_levels >= theta_v_lat['pres_range'][0]) & (p_levels <= theta_v_lat['pres_range'][1])
+    midtrop_theta = np.mean(prof_theta[zz])
+
+    # Last we find the part on the lookup curve that has the same mid-tropospheric theta as our profile. We have to be
+    # careful because we will have the same theta in both the NH and SH. The way we'll handle this is to require that we
+    # stay in the same hemisphere if we're in the extra tropics (|lat| > 30) and just find the closest latitude with the
+    # same theta in the climatology in the tropics
+    if np.abs(obs_lat) < 30:
+        yy = np.ones_like(this_lat_clim, dtype=np.bool_)
+    elif obs_lat > 0:
+        yy = this_lat_clim >= 0.0
+    else:
+        yy = this_lat_clim <= 0.0
+
+    this_lat_clim = this_lat_clim[yy]
+    this_theta_clim = this_theta_clim[yy]
+
+    return find_closest_theta(this_theta_clim, this_lat_clim, midtrop_theta)
+
+
+def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, theta_grid=None, pres_grid=None,
+                       ref_lat=45.0, use_theta_eqlat=True, profs_latency=None, prof_aoa=None, prof_world_flag=None,
+                       prof_co2_date=None, prof_co2_date_width=None):
     """
     Add troposphere CO2 to the prior profile.
 
@@ -669,6 +763,11 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     # make it age relative to MLO/SMO, we subtract the age at the surface at the equator. This gives us negative age in
     # the NH, which is right, b/c the NH CO2 concentration should precede MLO/SMO.  The reference latitude in this
     # context should specify where CO2 is emitted from, hence the 45 N (middle of NH) default.
+    if use_theta_eqlat:
+        if theta_grid is None or pres_grid is None:
+            raise TypeError('theta_grid and pres_grid must be given if use_theta_eqlat is True')
+        obs_lat = get_trop_eq_lat(theta_grid, pres_grid, obs_lat, obs_date)
+
     xx_trop = z_grid <= z_trop
     obs_air_age = mod_utils.age_of_air(obs_lat, z_grid[xx_trop], z_trop, ref_lat=ref_lat)
     mlo_smo_air_age = mod_utils.age_of_air(0.0, np.array([0.01]), z_trop, ref_lat=ref_lat).item()
@@ -694,7 +793,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
                                                          ref_lat=ref_lat)
 
     return prof_co2, {'co2_latency': profs_latency, 'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width,
-                      'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat}
+                      'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}
 
 
 def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True,
@@ -770,36 +869,39 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     # seasonal cycle added on top of it.
 
     if use_geos_grid:
-        z_grid = z_met
+        z_prof = z_met
         theta_prof = theta_met
         eq_lat_prof = eq_lat_met
         t_prof = mod_file_data['profile']['Temperature']
         p_prof = mod_file_data['profile']['Pressure']
     else:
-        # z_grid = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
-        z_grid = np.arange(0., 65.)
-        theta_prof = mod_utils.mod_interpolation_new(z_grid, z_met, theta_met, interp_mode='linear')
+        # z_prof = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
+        z_prof = np.arange(0., 65.)
+        theta_prof = mod_utils.mod_interpolation_new(z_prof, z_met, theta_met, interp_mode='linear')
         # Not sure what the theoretical relationship between equivalent latitude and altitude is, and plotting it is too
         # bouncy to tell, so just going to assume linear for now.
-        eq_lat_prof = mod_utils.mod_interpolation_new(z_grid, z_met, eq_lat_met, interp_mode='linear')
+        eq_lat_prof = mod_utils.mod_interpolation_new(z_prof, z_met, eq_lat_met, interp_mode='linear')
         # For the map file we'll also want regular temperature and pressure on the grid
-        t_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Temperature'],
+        t_prof = mod_utils.mod_interpolation_new(z_prof, z_met, mod_file_data['profile']['Temperature'],
                                                  interp_mode='linear')
-        p_prof = mod_utils.mod_interpolation_new(z_grid, z_met, mod_file_data['profile']['Pressure'],
+        p_prof = mod_utils.mod_interpolation_new(z_prof, z_met, mod_file_data['profile']['Pressure'],
                                                  interp_mode='lin-log')
 
-    n_lev = np.size(z_grid)
-    co2_prof = np.full_like(z_grid, np.nan)
-    co2_date_prof = np.full_like(z_grid, np.nan)
-    co2_date_width_prof = np.full_like(z_grid, np.nan)
+    n_lev = np.size(z_prof)
+    co2_prof = np.full_like(z_prof, np.nan)
+    co2_date_prof = np.full_like(z_prof, np.nan)
+    co2_date_width_prof = np.full_like(z_prof, np.nan)
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_grid, z_trop_met, concentration_record,
+    import pdb; pdb.set_trace()
+    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_prof, z_trop_met,  concentration_record,
+                                           pres_grid=p_prof, theta_grid=theta_prof,
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag,
                                            prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
     trop_ref_lat = ancillary_trop['ref_lat']
+    trop_eqlat = ancillary_trop['trop_lat']
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
@@ -809,7 +911,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
                                              prof_co2_date_width=co2_date_width_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
 
-    map_dict = {'Height': z_grid, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EL': eq_lat_prof,
+    map_dict = {'Height': z_prof, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EL': eq_lat_prof,
                 'co2': co2_prof, 'mean_co2_latency': latency_profs[:, 0], 'min_co2_latency': latency_profs[:, 1],
                 'max_co2_latency': latency_profs[:, 2], 'trop_age_of_air': aoa_prof_trop,
                 'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'co2_date': co2_date_prof,
@@ -822,7 +924,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
         map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M')))
-        mod_utils.write_map_file(map_name, obs_lat, trop_ref_lat, z_trop_met, use_eqlat_strat, map_dict, units_dict, var_order=var_order)
+        mod_utils.write_map_file(map_name, obs_lat, trop_eqlat, trop_ref_lat, z_trop_met, use_eqlat_strat, map_dict, units_dict, var_order=var_order)
 
     return map_dict, units_dict
 
