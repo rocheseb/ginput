@@ -113,7 +113,7 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     return out_dict
 
 
-def write_map_file(map_file, site_lat, prof_ref_lat, tropopause_alt, strat_used_eqlat, variables, units, var_order=None):
+def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, tropopause_alt, strat_used_eqlat, variables, units, var_order=None):
     # variables and units must have the same keys
     if var_order is None:
         var_order = list(variables.keys())
@@ -145,6 +145,7 @@ def write_map_file(map_file, site_lat, prof_ref_lat, tropopause_alt, strat_used_
     header_lines.append('Mass_Dry_Air (kg/mole): {}'.format(const.mass_dry_air))
     header_lines.append('Mass_H2O (kg/mole): {}'.format(const.mass_h2o))
     header_lines.append('Latitude (degrees): {}'.format(site_lat))
+    header_lines.append('Trop. eqlat (degrees): {:.2f}'.format(trop_eqlat))
     header_lines.append('Ref. lat (degrees): {}'.format(prof_ref_lat))
     header_lines.append('Tropopause (km): {}'.format(tropopause_alt))
     header_lines.append('Stratosphere used eq lat: {}'.format(int(strat_used_eqlat)))
