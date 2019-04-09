@@ -7,8 +7,9 @@ import sys
 
 _mydir = os.path.dirname(__file__)
 sys.path.append(os.path.join(_mydir, '..'))
+from ioutils import make_ncdim_helper, make_ncvar_helper
 import mod_utils
-
+from mod_utils import ProgressBar
 
 _theta_bin_edges = np.arange(220.0, 350.0, 2.0)
 _theta_bin_centers = (_theta_bin_edges[:-1] + _theta_bin_edges[1:])/2.0
@@ -24,35 +25,6 @@ class GEOSDimensionError(GEOSError):
 
 class GEOSCoordinateError(GEOSError):
     pass
-
-
-class ProgressBar(object):
-    def __init__(self, num_symbols, prefix='', suffix='', add_one=True, style='*'):
-        if len(prefix) > 0 and not prefix.endswith(' '):
-            prefix += ' '
-        if len(suffix) > 0 and not suffix.startswith(' '):
-            suffix = ' ' + suffix
-
-        if style == '*':
-            self._fmt_str = '{pre}[{{pstr:<{n}}}]{suf}'.format(pre=prefix, n=num_symbols, suf=suffix)
-        elif style == 'counter':
-            self._fmt_str = '{pre}{{i:>{l}}}/{n}{suf}'.format(pre=prefix, n=num_symbols, suf=suffix, l=len(str(num_symbols)))
-        else:
-            raise ValueError('style "{}" not recognized'.format(style))
-        self._add_one = add_one
-
-    def print_bar(self, i):
-        if self._add_one:
-            i += 1
-
-        pstr = '*' * i
-        pbar = self._fmt_str.format(pstr=pstr, i=i)
-        sys.stdout.write('\r' + pbar)
-        sys.stdout.flush()
-
-    def finish(self):
-        sys.stdout.write('\n')
-        sys.stdout.flush()
 
 
 def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arange(10.0, 100.0, 10.0), bin_var='theta'):
@@ -239,19 +211,6 @@ def _convert_dates(dates, base_date, calendar='gregorian'):
 
 
 def save_bin_ncdf_file(save_name, dates, hours, bin_var, bin_centers, theta_stats, lat_stats, percentiles, target_pres):
-    def make_dim_helper(nc_handle, dim_name, dim_var, attrs=dict()):
-        dim = nc_handle.createDimension(dim_name, np.size(dim_var))
-        var = nc_handle.createVariable(dim_name, dim_var.dtype, dimensions=(dim_name,))
-        var[:] = dim_var
-        var.setncatts(attrs)
-        return dim
-
-    def make_var_helper(nc_handle, var_name, var_data, dims, attrs=dict()):
-        dim_names = tuple([d.name for d in dims])
-        var = nc_handle.createVariable(var_name, var_data.dtype, dimensions=dim_names)
-        var[:] = var_data
-        var.setncatts(attrs)
-
     def make_stat_dims(stat, std_dims, avail_dims):
         dim_size_map = {d.size: d for d in avail_dims}
         if len(dim_size_map) < len(avail_dims):
@@ -286,22 +245,22 @@ def save_bin_ncdf_file(save_name, dates, hours, bin_var, bin_centers, theta_stat
         # First create the dimensions. Some don't have corresponding variables, so we don't use the helper function
         # for those
         times_attr = dict(description='Datetime at the middle of the binning period', **common_date_attrs)
-        times_dim = make_dim_helper(nch, 'times', mid_dates, attrs=times_attr)
+        times_dim = make_ncdim_helper(nch, 'times', mid_dates, **times_attr)
 
-        hours_dim = make_dim_helper(nch, 'hours', hours, attrs={'units': 'UTC hour', 'description': 'UTC hour of the GEOS files used'})
+        hours_dim = make_ncdim_helper(nch, 'hours', hours, units='UTC hour', description='UTC hour of the GEOS files used')
         bins_dim = nch.createDimension('bins', bin_centers.shape[2])
-        percentiles_dim = make_dim_helper(nch, 'percentiles', percentiles)
+        percentiles_dim = make_ncdim_helper(nch, 'percentiles', percentiles)
         values_dim = nch.createDimension('stat_values', 1)
 
         std_3d_dims = (times_dim, hours_dim, bins_dim)
         available_dims = [values_dim, percentiles_dim]
 
         # Start writing the variables
-        make_var_helper(nch, 'start_date', start_dates, (times_dim,), attrs=common_date_attrs)
-        make_var_helper(nch, 'end_date', end_dates, (times_dim,), attrs=common_date_attrs)
+        make_ncvar_helper(nch, 'start_date', start_dates, (times_dim,), **common_date_attrs)
+        make_ncvar_helper(nch, 'end_date', end_dates, (times_dim,), **common_date_attrs)
         bin_center_var_name = 'theta_bin_centers' if bin_var == 'theta' else 'latitude_bin_centers'
-        make_var_helper(nch, bin_center_var_name, bin_centers, std_3d_dims,
-                        attrs={'units': 'K', 'description': 'Potential temperature at the center of the bin'})
+        make_ncvar_helper(nch, bin_center_var_name, bin_centers, std_3d_dims,
+                          units='K', description='Potential temperature at the center of the bin')
 
         for var_name, var_unit, var in [('theta', 'K', theta_stats), ('latitude', 'degrees (south is negative)', lat_stats)]:
             for stat_name, stat in var.items():
@@ -311,7 +270,7 @@ def save_bin_ncdf_file(save_name, dates, hours, bin_var, bin_centers, theta_stat
                 stat_nc_name = '{var}_{stat}'.format(var=var_name, stat=stat_name)
                 description = '{stat} of {var} in the bin'.format(stat=stat_name, var=var_name)
                 stat_attrs = {'units': var_unit, 'description': description}
-                make_var_helper(nch, stat_nc_name, stat, stat_dims, attrs=stat_attrs)
+                make_ncvar_helper(nch, stat_nc_name, stat, stat_dims, **stat_attrs)
 
 
 def iter_time_periods(year, freq):
