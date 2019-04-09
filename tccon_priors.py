@@ -694,9 +694,7 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
     # careful because we will have the same theta in both the NH and SH. The way we'll handle this is to require that we
     # stay in the same hemisphere if we're in the extra tropics (|lat| > 30) and just find the closest latitude with the
     # same theta in the climatology in the tropics
-    if np.abs(obs_lat) < 30:
-        yy = np.ones_like(this_lat_clim, dtype=np.bool_)
-    elif obs_lat > 0:
+    if obs_lat > 0:
         yy = this_lat_clim >= 0.0
     else:
         yy = this_lat_clim <= 0.0
@@ -894,7 +892,6 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    import pdb; pdb.set_trace()
     _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_prof, z_trop_met,  concentration_record,
                                            pres_grid=p_prof, theta_grid=theta_prof,
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag,
