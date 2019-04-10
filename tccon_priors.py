@@ -1,5 +1,26 @@
 """
 Main module for generating TCCON trace gas priors.
+
+This module is the main driver to construct priors for CO2, CO, CH4, N2O, and HF for the TCCON retrieval. Broadly, each
+gas follows a similar scheme:
+
+* In the troposphere, the historical record for the gas is obtained from NOAA flask observations at Mauna Loa and Samoa
+  (MLO/SMO). This record is deseasonalized by taking a 12 month running mean of the data. The age-of-air in the
+  observation profile is calculated using a parameterization developed empirically from various in situ measurements for
+  previous versions of the GGG package. That age is then used to determine what date in the MLO/SMO should be looked up.
+  A parameterized seasonal cycle (again, developed for previous versions of GGG from in situ observations) is applied.
+  We use the parameterized seasonal cycle, rather than the real seasonal cycle in the MLO/SMO record, because the latter
+  will not capture any latitudinal dependence.
+* In the stratospheric overworld (potential temperature > 380 K), an age of air from CLAMS (Chemical Lagrangian Model of
+  the Stratosphere), looked up based on a potential vorticity-based equivalent latitude and potential temperature, is
+  used to determine what date to look up concentration from the MLO/SMO record. In this case, the MLO/SMO record with
+  seasonality is used, as we assume that all air enters the stratosphere in the tropics, and will include the tropical
+  seasonal cycle. This age is convolved with an age spectrum to account for mixing over time.
+* In the middle world (above the tropopause & theta < 380 K), the profiles are interpolate with respect to theta between
+  the tropopause and the first overworld level.
+
+The stratospheric approach was developed by Arlyn Andrews, based on her research in Andrews et al. 2001 (JGR, 106 [D23],
+pp. 32295-32314).
 """
 
 from __future__ import print_function, division
@@ -836,7 +857,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
 
 
 def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True,
-                         use_eqlat_strat=True, write_map=False):
+                         use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
 
@@ -861,6 +882,11 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     :param use_geos_grid: when ``True``, the native 42-level GEOS-FP pressure grid is used as the vertical grid for the
      CO2 profiles. Set to ``False`` to use a grid with 1 km altitude spacing
     :type use_geos_grid: bool
+
+    :param use_eqlat_trop: when ``True``, the latitude used for age-of-air and seasonal cycle calculations is calculate
+     based on the climatology of latitude vs. mid-tropospheric potential temperature. When ``False``, the geographic
+     latitude of the observation is used.
+    :type use_eqlat_trop: bool
 
     :param use_eqlat_strat: when ``True``, the stratosphere profiles use equivalent latitude that must be given in the
      mod data (requires the variable "EL" in the dictionary/mod file). Setting this to ``False`` uses the geographic
@@ -947,7 +973,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     stratum_flag = np.full((n_lev,), -1)
 
     _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_prof, z_trop_met,  concentration_record,
-                                           pres_grid=p_prof, theta_grid=theta_prof,
+                                           pres_grid=p_prof, theta_grid=theta_prof, use_theta_eqlat=use_eqlat_trop,
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag,
                                            prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
