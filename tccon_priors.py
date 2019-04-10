@@ -1,3 +1,7 @@
+"""
+Main module for generating TCCON trace gas priors.
+"""
+
 from __future__ import print_function, division
 
 from contextlib import closing
@@ -9,29 +13,27 @@ import netCDF4 as ncdf
 import numpy as np
 import os
 import pandas as pd
-from scipy.interpolate import interp2d, LinearNDInterpolator
-import sys
+from scipy.interpolate import LinearNDInterpolator
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
 import ioutils
 import mod_constants as const
 
-import line_profiler
 
-earth_radius = 6371e3  # meters
+_data_dir = const.data_dir
+_clams_file = os.path.join(_data_dir, 'clams_age_clim_scaled.nc')
 
 
-data_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'data')
-clams_file = os.path.join(data_dir, 'clams_age_clim_scaled.nc')
-
+###########################################
+# FUNCTIONS SUPPORTING PRIORS CALCUALTION #
+###########################################
 
 class CO2RecordError(Exception):
+    """
+    Base error for problems in the CO2 record
+    """
     pass
-
-
-def _is_pole(lat):
-    return np.abs(np.abs(lat) - 90.0) < 1e-4
 
 
 def _init_prof(profs, n_lev, n_profs=0):
@@ -63,256 +65,6 @@ def _init_prof(profs, n_lev, n_profs=0):
                 target_shape, profs.shape
             ))
         return profs
-
-
-def equirect_grid_area(latitudes, longitudes):
-    if np.ndim(longitudes) != 1 or np.ndim(latitudes) != 1:
-        raise ValueError('longitudes and latitudes are expected to be vectors')
-
-    n_lon = longitudes.size
-    n_lat = latitudes.size
-
-    delta_lon = np.unique(np.abs(np.diff(longitudes)))
-    delta_lat = np.unique(np.abs(np.diff(latitudes)))
-    if delta_lon.size != 1 or delta_lat.size != 1:
-        raise NotImplementedError('longitudes and/or latitudes do not have consistent spacing. This has not been '
-                                  'implemented yet.')
-    else:
-        # convert from 1-element arrays to true scalar values and to radians
-        delta_lon = np.deg2rad(delta_lon.item())/2.0
-        delta_lat = np.deg2rad(delta_lat.item())/2.0
-
-    # not right!
-    # For a sufficiently small area on the surface of a sphere the solid angle subtended by a given dlat and dlon is:
-    #
-    #   d\Omega = sin(\theta) d\theta d\phi
-    #
-    # where d\Omega is the solid angle, \theta = latitude and \phi = longitude
-    # Since the definition of solid angle is:
-    #
-    #   \Omega = A / r^2
-    #
-    # where A is the surface area subtended and r is the sphere's radius, then for grid boxes with lon/lat spacing
-    # d\phi and d\theta, the area of the grid box is:
-    #
-    # dA = r^2 * sin(\theta) * d\theta d\phi
-    areas_one_lon = 4.0 * earth_radius**2.0 * delta_lon * np.sin(delta_lat) * np.cos(np.deg2rad(latitudes))
-    xx_poles = _is_pole(latitudes)
-    if np.sum(xx_poles) > 0:
-        areas_one_lon[xx_poles] = earth_radius**2.0 * delta_lon * delta_lat**2.0
-
-    areas = np.tile(areas_one_lon.reshape(-1, 1), (1, n_lon))
-    return areas
-
-
-def calculate_equiv_lat_from_pot_vort(pv, lon, lat):
-
-    if np.ndim(lon) != 1 or np.ndim(lat) != 1:
-        raise ValueError('lon and lat are expected to be vectors')
-
-    nlon = np.size(lon)
-    nlat = np.size(lat)
-    if np.ndim(pv) < 3 or np.ndim(pv) > 4:
-        raise ValueError('pv expected to be 3 or 4 dimensions')
-    elif np.shape(pv)[-1] != nlon or np.shape(pv)[-2] != nlat:
-        raise ValueError('pv is expected to be ntimes x nlev x nlat x nlon. One or both of the last two dimensions of '
-                         'the given pv are not the same length as lat or lon.')
-    elif np.ndim(pv) == 3:
-        # assume pv was given without a time dimension, add one
-        pv = pv[np.newaxis, :, :, :]
-
-    box_area = equirect_grid_area(lat, lon).flatten()
-
-    eq_lat = np.full_like(pv, np.nan, dtype=np.float)
-    for i_time in range(pv.shape[0]):
-        for i_lev in range(pv.shape[1]):
-            pv_slice = np.squeeze(pv[i_time, i_lev, :, :]).flatten()
-            pv_sort = np.argsort(pv_slice)
-
-            cum_pv_area = np.cumsum(box_area[pv_sort])
-            rel_area = cum_pv_area/(0.5 * cum_pv_area[-1] - 1)
-            eq_lat_slice = np.full((nlon*nlat,), np.nan, dtype=np.float)
-            eq_lat_slice[pv_sort] = np.rad2deg(np.arcsin(rel_area))
-            eq_lat[i_time, i_lev, :, :] = np.reshape(eq_lat_slice, (nlat, nlon))
-
-    return eq_lat
-
-
-def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
-                        co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None,
-                        prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
-    """
-    Add the stratospheric CO2 to a TCCON prior profile
-
-    :param prof_co2: the profile CO2 mixing ratios, in ppm. Will be modified in-place to add the stratospheric
-     component.
-    :type prof_co2: :class:`numpy.ndarray` (in ppm)
-
-    :param retrieval_date: the UTC date of the retrieval.
-    :type retrieval_date: :class:`datetime.datetime`
-
-    :param prof_theta: the theta (potential temperature) coordinates for the TCCON profile.
-    :type prof_theta: :class:`numpy.ndarray` (in K)
-
-    :param prof_eqlat: the equivalent latitude coordinates for the TCCON profile.
-    :type prof_eqlat: :class:`numpy.ndarray` (in degrees)
-
-    :param tropopause_theta: the potential temperature at the tropopause, according to the input meteorology.
-    :type tropopause_theta: float (in K)
-
-    :param co2_record: the Mauna Loa-Samoa CO2 record.
-    :type co2_record: :class:`CO2TropicsRecord`
-
-    :param co2_lag: the lag between the MLO/SAM record and the CO2 concentration at the tropopause.
-    :type co2_lag: :class:`~dateutil.relativedelta.relativedelta` or :class:`datetime.timedelta`
-
-    :param age_window_spread: a decimal value setting how wide a window the simplified "age spectrum" would cover. For
-     s = ``age_window_spread`` and a = the age of air from CLAMS, then the CO2 age window will be :math:`a*(1-s)` to
-     :math:`a*(1+s)`
-    :type age_window_spread: float
-
-    The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
-    stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
-    NaNs. "nlev" below means the number of levels in the CO2 profile.
-
-    :param profs_latency: nlev-by-3 array that will store how far forward in time the Mauna Loa/Samoa CO2 record had to
-     be extrapolated, in years. The three columns will respectively contain the mean, min, and max latency.
-    :param prof_aoa: nlev-element vector of ages of air, in years.
-    :param prof_world_flag: nlev-element vector of ints which will indicate which levels are considered overworld and
-     which middleworld. The values used for each are defined in :mod:`mod_constants`
-    :param prof_co2_date: nlev-element vector that stores the date in the MLO/SMO record that the CO2 was taken from.
-     Since most levels will have a window of dates, this is the middle of those windows. The dates are stored as a
-     decimal year, e.g. 2016.5.
-    :param prof_co2_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
-     the CO2 concentrations.
-
-    :return: the updated CO2 profile and a dictionary of the ancillary profiles.
-    """
-    latency_keys = ('mean', 'min', 'max')
-    n_lev = np.size(prof_co2)
-    profs_latency = _init_prof(profs_latency, n_lev, 3)
-    prof_aoa = _init_prof(prof_aoa, n_lev)
-    prof_world_flag = _init_prof(prof_world_flag, n_lev)
-    prof_co2_date = _init_prof(prof_co2_date, n_lev)
-    prof_co2_date_width = _init_prof(prof_co2_date_width, n_lev)
-
-    # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
-    # restrict to >= 380 K later.
-    xx_overworld = prof_theta >= 380
-    prof_world_flag[xx_overworld] = const.overworld_flag
-    retrieval_doy = int(np.round(mod_utils.date_to_frac_year(retrieval_date) * 365.25))
-    age_of_air_years = get_clams_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
-    prof_aoa[xx_overworld] = age_of_air_years[xx_overworld]
-    age_of_air = np.array(mod_utils.frac_years_to_reldelta(age_of_air_years))
-
-    # Now, assuming that the CLAMS age is the mean age of the stratospheric air and that we can assume the CO2 has
-    # not changed since it entered the stratosphere, we look up the CO2 at the boundary condition. Assume that the
-    # CO2 record has daily points, so we just want the date (not datetime). Lastly, we add the lag to the record dates
-    # so that, e.g. if we want a lag of 2 months and we're querying for June 1, then the Mar 1 record will have a lagged
-    # date of June 1
-    #
-    # We do a poor man's age spectrum by averaging between, by default +/- 30% of the age of the air. This creates and
-    # averaging window that gets broader as the air gets older, which should average out the seasonal cycle by ~2 years
-    # Andrews et al. 2001 (JGR Atmos, p. 32,295, see pg. 32,300) found that the seasonal cycle was largely gone for
-    # air older than that.
-
-    for i in np.argwhere(xx_overworld).flat:
-        avg_mid_date = retrieval_date - co2_lag - age_of_air[i]
-        avg_start_date = avg_mid_date - age_window_spread * age_of_air[i]
-        avg_end_date = avg_mid_date + age_window_spread * age_of_air[i]
-
-        if avg_end_date > retrieval_date:
-            raise RuntimeError('CO2 averaging window has an end date after the retrieval data. This physically should '
-                               'not happen, since that would imply part of the stratosphere came from the future.')
-
-        prof_co2[i], latency_i = co2_record.avg_co2_in_date_range(avg_start_date, avg_end_date, deseasonalize=False)
-        for j, k in enumerate(latency_keys):
-            profs_latency[i, j] = latency_i[k]
-        prof_co2_date[i] = mod_utils.date_to_decimal_year(avg_mid_date)
-        prof_co2_date_width[i] = 2 * age_window_spread * age_of_air_years[i]
-
-    # Last we need to fill in the "middleworld" between the tropopause and 380 K. The simplest way to do it is to
-    # assume that at the tropopause the CO2 is equal to the lagged MLO/SAM record and interpolate linearly in theta
-    # space between that and the first > 380 level.
-    ow1 = np.argwhere(xx_overworld)[0]
-    co2_entry_conc = co2_record.get_co2_for_dates(retrieval_date - co2_lag)
-
-    co2_endpoints = np.array([co2_entry_conc.item(), prof_co2[ow1].item()])
-    theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
-    xx_middleworld = (tropopause_theta < prof_theta) & (prof_theta < 380.0)
-    prof_co2[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, co2_endpoints)
-    prof_world_flag[xx_middleworld] = const.middleworld_flag
-
-    # TODO: add latency profile
-
-    return prof_co2, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag,
-                      'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width}
-
-
-def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
-    """
-    Get the age of air predicted by the CLAMS model for points defined by potential temperature and equivalent latitude.
-
-    :param theta: a vector of potential temperatures, must be the same length as ``eq_lat``
-    :type theta: :class:`numpy.ndarray`
-
-    :param eq_lat: a vector of equivalent latitudes, must be the same length as ``theta``
-    :type eq_lat: :class:`numpy.ndarray`
-
-    :param day_of_year: which day of the year (e.g. Feb 1 = 32) to look up the age for
-    :type day_of_year: int
-
-    :param as_timedelta: set this to ``True`` to return the ages as :class:`relativedelta` instances. When ``False``
-     (default) just returned in fractional years.
-    :type as_timedelta: bool
-
-    :param clams_dat: a dictionary containing the CLAMS data with keys 'eqlat' (l-element vector), 'theta' (m-element
-     vector), 'doy' (n-element vector), and 'age' (l-by-m-by-n array). This can be passed manually if you want to use a
-     custom map of age of air vs. equivalent latitude and theta, but by default will be read in from the CLAMS file
-     provided by Arlyn Andrews and cached.
-    :type clams_dat: dict
-
-    :return: a vector of ages the same length as ``theta`` and ``eq_lat``. The contents of the vector depend on the
-     value of ``as_timedelta``.
-    :rtype: :class:`numpy.ndarray`
-    """
-    if len(clams_dat) == 0:
-        # Take advantage of mutable default arguments to cache the CLAMS data. The first time this function is called,
-        # the dict will be empty, so the data will be loaded. The second time, since the dict will have been modified,
-        # with all the data, we don't need to load it. This should hopefully speed up this part of the code.
-        clams = ncdf.Dataset(clams_file, 'r')
-        clams_dat['eqlat'] = clams.variables['lat'][:]
-        clams_dat['theta'] = clams.variables['theta'][:]
-        clams_dat['doy'] = clams.variables['doy'][:]
-        clams_dat['age'] = clams.variables['age'][:]
-
-        clams_dat['eqlat_grid'], clams_dat['theta_grid'] = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
-        if clams_dat['eqlat_grid'].shape != clams_dat['age'].shape[1:] or clams_dat['theta_grid'].shape != clams_dat['age'].shape[1:]:
-            raise RuntimeError('Failed to create equivalent lat/theta grids the same shape as CLAMS age')
-
-    idoy = np.argwhere(clams_dat['doy'] == day_of_year).item()
-
-    el_grid, th_grid = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
-    clams_points = np.array([[el, th] for el, th in zip(el_grid.flat, th_grid.flat)])
-
-    # interp2d does not behave well here; it interpolates to points outside the range of eqlat/theta and gives a much
-    # noiser result.
-    age_interp = LinearNDInterpolator(clams_points, clams_dat['age'][idoy, :, :].flatten())
-    prof_ages = np.array([age_interp(el, th).item() for el, th in zip(eq_lat, theta)])
-
-    # For simplicity, we're just going to clamp ages for theta > max theta in CLAMS to the age given at the top of the
-    # profile. In theory, this shouldn't matter too much since (a) CLAMS seems to approach an asymptote at the top of
-    # the stratosphere and (b) there's just not that much mass up there.
-    last_age = np.max(np.argwhere(~np.isnan(prof_ages)))
-    if last_age < prof_ages.size:
-        prof_ages[last_age+1:] = prof_ages[last_age]
-
-    if as_timedelta:
-        # The CLAMS ages are in years, but relativedeltas don't accept fractional years. Instead, separate the whole
-        # years and the fractional years.
-        prof_ages = np.array(mod_utils.frac_years_to_reldelta(prof_ages))
-
-    return prof_ages
 
 
 class CO2TropicsRecord(object):
@@ -369,8 +121,8 @@ class CO2TropicsRecord(object):
          that had to be interpolated. Index by timestamp.
         :rtype: :class:`pandas.DataFrame`
         """
-        df_mlo = cls.read_insitu_co2(data_dir, 'ML_monthly_obs.txt')
-        df_smo = cls.read_insitu_co2(data_dir, 'SMO_monthly_obs.txt')
+        df_mlo = cls.read_insitu_co2(_data_dir, 'ML_monthly_obs.txt')
+        df_smo = cls.read_insitu_co2(_data_dir, 'SMO_monthly_obs.txt')
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
         df_combined['co2_mean'] = df_combined['co2'].mean(axis=1)
         df_combined.drop(['site', 'co2', 'year', 'month', 'day'], axis=1, inplace=True)
@@ -621,7 +373,154 @@ class CO2TropicsRecord(object):
                                       as_dataframe=as_dataframe)
 
 
-def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_wt=1.0, dtheta_cutoff=0.25, theta_v_lat=dict()):
+def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
+    """
+    Get the age of air predicted by the CLAMS model for points defined by potential temperature and equivalent latitude.
+
+    :param theta: a vector of potential temperatures, must be the same length as ``eq_lat``
+    :type theta: :class:`numpy.ndarray`
+
+    :param eq_lat: a vector of equivalent latitudes, must be the same length as ``theta``
+    :type eq_lat: :class:`numpy.ndarray`
+
+    :param day_of_year: which day of the year (e.g. Feb 1 = 32) to look up the age for
+    :type day_of_year: int
+
+    :param as_timedelta: set this to ``True`` to return the ages as :class:`relativedelta` instances. When ``False``
+     (default) just returned in fractional years.
+    :type as_timedelta: bool
+
+    :param clams_dat: a dictionary containing the CLAMS data with keys 'eqlat' (l-element vector), 'theta' (m-element
+     vector), 'doy' (n-element vector), and 'age' (l-by-m-by-n array). This can be passed manually if you want to use a
+     custom map of age of air vs. equivalent latitude and theta, but by default will be read in from the CLAMS file
+     provided by Arlyn Andrews and cached.
+    :type clams_dat: dict
+
+    :return: a vector of ages the same length as ``theta`` and ``eq_lat``. The contents of the vector depend on the
+     value of ``as_timedelta``.
+    :rtype: :class:`numpy.ndarray`
+    """
+    if len(clams_dat) == 0:
+        # Take advantage of mutable default arguments to cache the CLAMS data. The first time this function is called,
+        # the dict will be empty, so the data will be loaded. The second time, since the dict will have been modified,
+        # with all the data, we don't need to load it. This should hopefully speed up this part of the code.
+        clams = ncdf.Dataset(_clams_file, 'r')
+        clams_dat['eqlat'] = clams.variables['lat'][:]
+        clams_dat['theta'] = clams.variables['theta'][:]
+        clams_dat['doy'] = clams.variables['doy'][:]
+        clams_dat['age'] = clams.variables['age'][:]
+
+        clams_dat['eqlat_grid'], clams_dat['theta_grid'] = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
+        if clams_dat['eqlat_grid'].shape != clams_dat['age'].shape[1:] or clams_dat['theta_grid'].shape != clams_dat['age'].shape[1:]:
+            raise RuntimeError('Failed to create equivalent lat/theta grids the same shape as CLAMS age')
+
+    idoy = np.argwhere(clams_dat['doy'] == day_of_year).item()
+
+    el_grid, th_grid = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
+    clams_points = np.array([[el, th] for el, th in zip(el_grid.flat, th_grid.flat)])
+
+    # interp2d does not behave well here; it interpolates to points outside the range of eqlat/theta and gives a much
+    # noiser result.
+    age_interp = LinearNDInterpolator(clams_points, clams_dat['age'][idoy, :, :].flatten())
+    prof_ages = np.array([age_interp(el, th).item() for el, th in zip(eq_lat, theta)])
+
+    # For simplicity, we're just going to clamp ages for theta > max theta in CLAMS to the age given at the top of the
+    # profile. In theory, this shouldn't matter too much since (a) CLAMS seems to approach an asymptote at the top of
+    # the stratosphere and (b) there's just not that much mass up there.
+    last_age = np.max(np.argwhere(~np.isnan(prof_ages)))
+    if last_age < prof_ages.size:
+        prof_ages[last_age+1:] = prof_ages[last_age]
+
+    if as_timedelta:
+        # The CLAMS ages are in years, but relativedeltas don't accept fractional years. Instead, separate the whole
+        # years and the fractional years.
+        prof_ages = np.array(mod_utils.frac_years_to_reldelta(prof_ages))
+
+    return prof_ages
+
+
+def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_wt=1.0, dtheta_cutoff=0.25,
+                    _theta_v_lat=dict()):
+    """
+    Compute the tropospheric equivalent latitude for an observation based on its mid-tropospheric potential temperature
+
+    The rationale for using this approach is described in the module help for backend_analysis/geos_theta_lat.py. This
+    function relies on a climatology created by that module, which should contain the zonal mean relationship between
+    mid-tropospheric potential temperature and latitude at 2 week intervals.
+
+    This function finds the equivalent latitude for an observation by looking for the point in the same hemisphere that
+    has the closest mid-tropospheric potential temperature in the climatology as does the profile given as input.
+    Exactly what is defined as mid-troposphere is set by the pressure range in the climatology file, currently it is
+    700-500 hPa.
+
+    This function checks both north and south of the observation latitude for the climatology latitude with the closest
+    potential temperature. As long as one is sufficiently closer to the observation's potential temperature, that one
+    is chosen directly. If the two are within the limit set by ``dtheta_cutoff``, then a more careful check is
+    necessary. The limit is defined as:
+
+    .. math::
+
+       |(el_s - l) - (el_n - l)| < d\theta
+
+    where :math:`el_s` and :math:`el_n` are the southern and northern latitudes in the climatology with the closest
+    potential temperature to the observations, :math:`l` is the observation latitude, and :math:`d\theta` is
+    ``dtheta_cutoff``.  If this condition is met, then rather than just choosing whichever one has the closer
+    potential temperature, the algorithm uses a cost function:
+
+    .. math:
+
+       |w_t * d\theta| + |w_l * dl|
+
+    where :math:`w_t` and :math:`w_l` are the weights for potential temperature (``theta_wt``) and latitude (``lat_wt``)
+    respectively, and :math:`d\theta` and :math:`dl` are the difference in potential temperature and latitude,
+    respectively, between the observation and the point chosen on the climatology curve.
+
+    The goal of this approach is to deal with two cases:
+
+    1. when the theta vs. lat curve from the climatology is monotonically increasing or decreasing
+    2. when the curve has a minimum or maximum
+
+    For #1, consider a case where theta decreases with latitude, and the observation's theta is greater than the
+    climatological theta for that latitude. Then going south will match the theta much better, so the cutoff condition
+    is not met, and we automatically choose the southern point.
+
+    For #2, consider again a case where the observation's theta is greater that climatological theta for that latitude,
+    but now the climatological curve has a minimum just north of the observation. In that case, we may find two equally
+    good matches for the observation's theta, so, in the absence of other information, we choose the nearer one. This is
+    admittedly a simplification - it is entirely possible that the actual synoptic transport carried air from the
+    further position, but without a second tracer to differentiate that in the meteorology data, or information on
+    prevailing north/south transport for a given lat/lon, the best assumption is to favor shorter transport.
+
+    :param prof_theta: the profile of potential temperature values associated with this observation
+    :type prof_theta: :class:`numpy.ndarray`
+
+    :param p_levels: the profile of pressure levels that ``prof_theta`` is defined on
+    :type p_levels: :class:`numpy.ndarray`
+
+    :param obs_lat: the geographic latitude of the observation
+    :type obs_lat: float
+
+    :param obs_date: the date of the observation
+    :type obs_date: datetime-lik
+
+    :param theta_wt: a weight to use when deciding between two different latitudes with similar theta values. Increasing
+     this relative to ``lat_wt`` will increase the cost for choosing the point with a greater difference in potential
+     temperature.
+    :type theta_wt: float
+
+    :param lat_wt: similar to ``theta_wt``, but increasing this prefers the point closer in latitude.
+    :type lat_wt: float
+
+    :param dtheta_cutoff: how close the two (north and south) differences between the climatology and observed
+     mid-troposphere potential temperature have to be to take into account which one is closer. See above.
+    :type dtheta_cutoff: float
+
+    :param _theta_v_lat: not intended to pass in; this is a dictionary that will be given the values read in from the
+     climatology file to cache them for future function calls.
+
+    :return: the equivalent latitude derived from mid-tropospheric potential temperature
+    :rtype: float
+    """
     def read_pres_range(nc_handle):
         range_str = nc_handle.theta_range  # it says theta range, its really the pressures theta is averaged over
         range_values = [float(s) for s in range_str.split('-')]
@@ -662,39 +561,39 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
             else:
                 return lat[north_min_ind]
 
-    if len(theta_v_lat) == 0:
+    if len(_theta_v_lat) == 0:
         theta_v_lat_file = os.path.join(const.data_dir, 'GEOS_FPIT_lat_vs_theta_2018_500-700hPa.nc')
         with ncdf.Dataset(theta_v_lat_file, 'r') as nch:
-            theta_v_lat['theta'] = nch.variables['theta_mean'][:].squeeze()
-            theta_v_lat['lat'] = nch.variables['latitude_mean'][:].squeeze()
-            theta_v_lat['times'] = nch.variables['times'][:]
-            theta_v_lat['times_units'] = nch.variables['times'].units
-            theta_v_lat['times_calendar'] = nch.variables['times'].calendar
+            _theta_v_lat['theta'] = nch.variables['theta_mean'][:].squeeze()
+            _theta_v_lat['lat'] = nch.variables['latitude_mean'][:].squeeze()
+            _theta_v_lat['times'] = nch.variables['times'][:]
+            _theta_v_lat['times_units'] = nch.variables['times'].units
+            _theta_v_lat['times_calendar'] = nch.variables['times'].calendar
 
             # Read the pressure range that we're using
-            theta_v_lat['pres_range'] = read_pres_range(nch)
+            _theta_v_lat['pres_range'] = read_pres_range(nch)
 
             # Append the first time slice (which will be the first two weeks of the year) to the end so that we can
             # intepolate past the last date, assuming that the changes are cyclical. At the same time, let's record the
             # year used in the dates
-            new_time = ncdf.num2date(theta_v_lat['times'][0], theta_v_lat['times_units'], theta_v_lat['times_calendar'])
-            theta_v_lat['year'] = year = new_time.year
-            new_time = ncdf.date2num(new_time.replace(year=year+1), theta_v_lat['times_units'], theta_v_lat['times_calendar'])
-            theta_v_lat['times'] = np.concatenate([theta_v_lat['times'], [new_time]], axis=0)
+            new_time = ncdf.num2date(_theta_v_lat['times'][0], _theta_v_lat['times_units'], _theta_v_lat['times_calendar'])
+            _theta_v_lat['year'] = year = new_time.year
+            new_time = ncdf.date2num(new_time.replace(year=year+1), _theta_v_lat['times_units'], _theta_v_lat['times_calendar'])
+            _theta_v_lat['times'] = np.concatenate([_theta_v_lat['times'], [new_time]], axis=0)
             for k in ('theta', 'lat'):
-                theta_v_lat[k] = np.concatenate([theta_v_lat[k], theta_v_lat[k][0:1, :]], axis=0)
+                _theta_v_lat[k] = np.concatenate([_theta_v_lat[k], _theta_v_lat[k][0:1, :]], axis=0)
 
     # First we need to get the lat vs. theta curve for this particular date
-    ntimes, nbins = theta_v_lat['theta'].shape
-    this_datenum = ncdf.date2num(obs_date.replace(year=theta_v_lat['year']), theta_v_lat['times_units'], theta_v_lat['times_calendar'])
+    ntimes, nbins = _theta_v_lat['theta'].shape
+    this_datenum = ncdf.date2num(obs_date.replace(year=_theta_v_lat['year']), _theta_v_lat['times_units'], _theta_v_lat['times_calendar'])
     this_theta_clim = np.full((nbins,), np.nan)
     this_lat_clim = np.full((nbins,), np.nan)
     for i in range(nbins):
-        this_theta_clim[i] = np.interp(this_datenum, theta_v_lat['times'], theta_v_lat['theta'][:, i])
-        this_lat_clim[i] = np.interp(this_datenum, theta_v_lat['times'], theta_v_lat['lat'][:, i])
+        this_theta_clim[i] = np.interp(this_datenum, _theta_v_lat['times'], _theta_v_lat['theta'][:, i])
+        this_lat_clim[i] = np.interp(this_datenum, _theta_v_lat['times'], _theta_v_lat['lat'][:, i])
 
     # Then we find the theta for this profile
-    zz = (p_levels >= theta_v_lat['pres_range'][0]) & (p_levels <= theta_v_lat['pres_range'][1])
+    zz = (p_levels >= _theta_v_lat['pres_range'][0]) & (p_levels <= _theta_v_lat['pres_range'][1])
     midtrop_theta = np.mean(prof_theta[zz])
 
     # Last we find the part on the lookup curve that has the same mid-tropospheric theta as our profile. We have to be
@@ -711,6 +610,10 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
 
     return find_closest_theta(this_theta_clim, this_lat_clim, midtrop_theta)
 
+
+#########################
+# MAIN PRIORS FUNCTIONS #
+#########################
 
 def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, theta_grid=None, pres_grid=None,
                        ref_lat=45.0, use_theta_eqlat=True, profs_latency=None, prof_aoa=None, prof_world_flag=None,
@@ -737,18 +640,40 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     :param co2_record: the Mauna Loa-Samoa CO2 record.
     :type co2_record: :class:`CO2TropicsRecord`
 
+    :param theta_grid: potential temperature on the same levels as ``z_grid``. Only needed is ``use_theta_eqlat`` is set
+     to ``True``.
+    :type theta_grid: :class:`numpy.ndarray`
+
+    :param pres_grid: pressure levels for the same levels as ``z_grid``. Only needed is ``use_theta_eqlat`` is set
+     to ``True``.
+    :type theta_grid: :class:`numpy.ndarray`
+
+    :param ref_lat: the reference latitude for age of air. Effectively sets where the age begins, i.e where the
+     emissions are.
+    :type ref_lat: float.
+
+    :param use_theta_eqlat: set to ``True`` to use an equivalent latitude derive from the mid-tropospheric potential
+     temperature as the latitude in the age of air and seasonal cycle calculations. This helps correct overly curved
+     profiles at sites near the tropics that sometimes have more tropical-like profiles depending on synoptic scale
+     transport. If this is ``False``, then ``obs_lat`` is used directly.
+    :type use_theta_eqlat: bool
+
     The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
     stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
     NaNs. "nlev" below means the number of levels in the CO2 profile.
 
     :param profs_latency: nlev-by-3 array that will store how far forward in time the Mauna Loa/Samoa CO2 record had to
      be extrapolated, in years. The three columns will respectively contain the mean, min, and max latency.
+
     :param prof_aoa: nlev-element vector of ages of air, in years.
+
     :param prof_world_flag: nlev-element vector of ints which will indicate which levels are considered overworld and
      which middleworld. The values used for each are defined in :mod:`mod_constants`
+
     :param prof_co2_date: nlev-element vector that stores the date in the MLO/SMO record that the CO2 was taken from.
      Since most levels will have a window of dates, this is the middle of those windows. The dates are stored as a
      decimal year, e.g. 2016.5.
+
     :param prof_co2_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
      the CO2 concentrations.
 
@@ -801,6 +726,115 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
                       'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}
 
 
+def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
+                        co2_lag=relativedelta(months=2), age_window_spread=0.3, profs_latency=None,
+                        prof_aoa=None, prof_world_flag=None, prof_co2_date=None, prof_co2_date_width=None):
+    """
+    Add the stratospheric CO2 to a TCCON prior profile
+
+    :param prof_co2: the profile CO2 mixing ratios, in ppm. Will be modified in-place to add the stratospheric
+     component.
+    :type prof_co2: :class:`numpy.ndarray` (in ppm)
+
+    :param retrieval_date: the UTC date of the retrieval.
+    :type retrieval_date: :class:`datetime.datetime`
+
+    :param prof_theta: the theta (potential temperature) coordinates for the TCCON profile.
+    :type prof_theta: :class:`numpy.ndarray` (in K)
+
+    :param prof_eqlat: the equivalent latitude coordinates for the TCCON profile.
+    :type prof_eqlat: :class:`numpy.ndarray` (in degrees)
+
+    :param tropopause_theta: the potential temperature at the tropopause, according to the input meteorology.
+    :type tropopause_theta: float (in K)
+
+    :param co2_record: the Mauna Loa-Samoa CO2 record.
+    :type co2_record: :class:`CO2TropicsRecord`
+
+    :param co2_lag: the lag between the MLO/SAM record and the CO2 concentration at the tropopause.
+    :type co2_lag: :class:`~dateutil.relativedelta.relativedelta` or :class:`datetime.timedelta`
+
+    :param age_window_spread: a decimal value setting how wide a window the simplified "age spectrum" would cover. For
+     s = ``age_window_spread`` and a = the age of air from CLAMS, then the CO2 age window will be :math:`a*(1-s)` to
+     :math:`a*(1+s)`
+    :type age_window_spread: float
+
+    The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
+    stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
+    NaNs. "nlev" below means the number of levels in the CO2 profile.
+
+    :param profs_latency: nlev-by-3 array that will store how far forward in time the Mauna Loa/Samoa CO2 record had to
+     be extrapolated, in years. The three columns will respectively contain the mean, min, and max latency.
+    :param prof_aoa: nlev-element vector of ages of air, in years.
+    :param prof_world_flag: nlev-element vector of ints which will indicate which levels are considered overworld and
+     which middleworld. The values used for each are defined in :mod:`mod_constants`
+    :param prof_co2_date: nlev-element vector that stores the date in the MLO/SMO record that the CO2 was taken from.
+     Since most levels will have a window of dates, this is the middle of those windows. The dates are stored as a
+     decimal year, e.g. 2016.5.
+    :param prof_co2_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
+     the CO2 concentrations.
+
+    :return: the updated CO2 profile and a dictionary of the ancillary profiles.
+    """
+    latency_keys = ('mean', 'min', 'max')
+    n_lev = np.size(prof_co2)
+    profs_latency = _init_prof(profs_latency, n_lev, 3)
+    prof_aoa = _init_prof(prof_aoa, n_lev)
+    prof_world_flag = _init_prof(prof_world_flag, n_lev)
+    prof_co2_date = _init_prof(prof_co2_date, n_lev)
+    prof_co2_date_width = _init_prof(prof_co2_date_width, n_lev)
+
+    # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
+    # restrict to >= 380 K later.
+    xx_overworld = prof_theta >= 380
+    prof_world_flag[xx_overworld] = const.overworld_flag
+    retrieval_doy = int(np.round(mod_utils.date_to_frac_year(retrieval_date) * 365.25))
+    age_of_air_years = get_clams_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
+    prof_aoa[xx_overworld] = age_of_air_years[xx_overworld]
+    age_of_air = np.array(mod_utils.frac_years_to_reldelta(age_of_air_years))
+
+    # Now, assuming that the CLAMS age is the mean age of the stratospheric air and that we can assume the CO2 has
+    # not changed since it entered the stratosphere, we look up the CO2 at the boundary condition. Assume that the
+    # CO2 record has daily points, so we just want the date (not datetime). Lastly, we add the lag to the record dates
+    # so that, e.g. if we want a lag of 2 months and we're querying for June 1, then the Mar 1 record will have a lagged
+    # date of June 1
+    #
+    # We do a poor man's age spectrum by averaging between, by default +/- 30% of the age of the air. This creates and
+    # averaging window that gets broader as the air gets older, which should average out the seasonal cycle by ~2 years
+    # Andrews et al. 2001 (JGR Atmos, p. 32,295, see pg. 32,300) found that the seasonal cycle was largely gone for
+    # air older than that.
+
+    for i in np.argwhere(xx_overworld).flat:
+        avg_mid_date = retrieval_date - co2_lag - age_of_air[i]
+        avg_start_date = avg_mid_date - age_window_spread * age_of_air[i]
+        avg_end_date = avg_mid_date + age_window_spread * age_of_air[i]
+
+        if avg_end_date > retrieval_date:
+            raise RuntimeError('CO2 averaging window has an end date after the retrieval data. This physically should '
+                               'not happen, since that would imply part of the stratosphere came from the future.')
+
+        prof_co2[i], latency_i = co2_record.avg_co2_in_date_range(avg_start_date, avg_end_date, deseasonalize=False)
+        for j, k in enumerate(latency_keys):
+            profs_latency[i, j] = latency_i[k]
+        prof_co2_date[i] = mod_utils.date_to_decimal_year(avg_mid_date)
+        prof_co2_date_width[i] = 2 * age_window_spread * age_of_air_years[i]
+
+    # Last we need to fill in the "middleworld" between the tropopause and 380 K. The simplest way to do it is to
+    # assume that at the tropopause the CO2 is equal to the lagged MLO/SAM record and interpolate linearly in theta
+    # space between that and the first > 380 level.
+    ow1 = np.argwhere(xx_overworld)[0]
+    co2_entry_conc = co2_record.get_co2_for_dates(retrieval_date - co2_lag)
+
+    co2_endpoints = np.array([co2_entry_conc.item(), prof_co2[ow1].item()])
+    theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
+    xx_middleworld = (tropopause_theta < prof_theta) & (prof_theta < 380.0)
+    prof_co2[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, co2_endpoints)
+    prof_world_flag[xx_middleworld] = const.middleworld_flag
+
+    return prof_co2, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag,
+                      'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width}
+
+
 def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', site_abbrev='xx', use_geos_grid=True,
                          use_eqlat_strat=True, write_map=False):
     """
@@ -813,6 +847,10 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     :param obs_date: the date of the observation
     :type obs_date: datetime-like object
 
+    :param utc_offset: a timedelta giving the difference between the ``obs_date`` and UTC time. For example, if the
+     ``obs_date`` was given in US Pacific Standard Time, this should be ``timedelta(hours=-8). This is used to correct
+     the date to UTC to ensure the CO2 from the right time is used.
+
     :param species: which species to generate the prior profile for. Currently only CO2 is implemented (case
      insensitive).
     :type species: str
@@ -823,6 +861,12 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     :param use_geos_grid: when ``True``, the native 42-level GEOS-FP pressure grid is used as the vertical grid for the
      CO2 profiles. Set to ``False`` to use a grid with 1 km altitude spacing
     :type use_geos_grid: bool
+
+    :param use_eqlat_strat: when ``True``, the stratosphere profiles use equivalent latitude that must be given in the
+     mod data (requires the variable "EL" in the dictionary/mod file). Setting this to ``False`` uses the geographic
+     latitude of the observation instead. This allows you to skip the (fairly processor intensive) equivalent latitude
+     calculation when preparing the .mod files, but can lead to ~2% differences in CO2 near the tropopause (in March).
+    :type use_eqlat_strat: bool
 
     :param write_map: set to ``False`` to disable writing the output pseudo .map file and just return the dictionary of
      profiles. Set to a path where to save the .map file in order to save it, e.g. set ``write_map='.'`` to save to the
@@ -935,6 +979,10 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
 
     return map_dict, units_dict
 
+
+###########################################
+# FUNCTIONS FOR GENERATING GRIDDED PRIORS #
+###########################################
 
 def _tonumpyarray(mparr, shape):
     return np.frombuffer(mparr).reshape(shape)

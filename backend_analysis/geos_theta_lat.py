@@ -1,3 +1,36 @@
+"""
+This module contains the code necessary to regenerate the GEOS_FPIT_lat_vs_theta_2018_500-700hPa.nc file.
+
+For the tropospheric prior profiles, we need to know the latitude of the observation in order to determine the age of
+the air (to know how far forward or back to look in the MLO/SMO record) and the seasonal cycle (which is strongest in
+the northern midlatitudes). During testing, we found that some sites should have more tropical CO2 profiles that their
+geographic latitude suggests. That is, the aircraft or aircore CO2 profiles were relatively flat throughout the
+troposphere (which is hallmark of the tropics due to rapid vertical mixing) but the priors were assigning them a more
+midlatitude-like seasonal cycle.
+
+The correction for this was to use an "equivalent latitude" based on the mid-tropospheric potential temperature. This
+originates from work by Gretchen Keppel-Aleks (Keppel-Aleks et al., Biogeosciences, 9, 875-891,
+https://doi.org/10.5194/bg-9-875-2012, 2012) that showed that CO2 in the free troposphere correlates much better with
+potential temperature at 700 hPa than it does simple geographic latitude (c.f. especially figures 9-11).
+
+In order to use this equivalent latitude based on potential temperature, we need a dataset that allows us to map the
+typical mid-tropospheric potential temperature to the equivalent latitude it represents. To get that, we make biweekly
+zonal bins of mid-tropospheric potential temperature vs. latitude in this module. The main driver function is
+`make_geos_lat_v_theta_climatology`. To reproduce the standard 2018 file mentioned above, it would be called as::
+
+    make_geos_lat_v_theta_climatology(2018, geos_path, '.', target_pres=(500,700))
+
+This would produce GEOS_FPIT_lat_vs_theta_2018_500-700hPa.nc in the current directory, which should then be placed
+in the package :file:`data` directory.  2018 was chosen as the year for this climatology because it was the most recent
+full year at the time of production, therefore it should be most representative looking backwards to the beginning of
+the TCCON record and forward to the future TCCON record.
+
+This method is necessary, rather than using potential vorticity based equivalent latitude, because Pan et al. 2012
+(ACP, 12, p. 9187, doi: 10.5194/acp-12-9187-2012) note that when potential temperature surfaces intersect the surface,
+potential temperature becomes a poor vertical coordinate. In general, they note that PV/EqLat can conceal tropospheric
+chemical patterns.
+"""
+
 from __future__ import print_function, division
 import netCDF4 as ncdf
 import numpy as np
@@ -16,18 +49,66 @@ _theta_bin_centers = (_theta_bin_edges[:-1] + _theta_bin_edges[1:])/2.0
 
 
 class GEOSError(Exception):
+    """
+    Base error for problems with the GEOS met data
+    """
     pass
 
 
 class GEOSDimensionError(GEOSError):
+    """
+    Error for cases where the dimension of a GEOS variable is not as expected
+    """
     pass
 
 
 class GEOSCoordinateError(GEOSError):
+    """
+    Error for any problem with the coordinates in the GEOS met file
+    """
     pass
 
 
-def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arange(10.0, 100.0, 10.0), bin_var='theta'):
+def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arange(10.0, 100.0, 10.0), bin_var='latitude'):
+    """
+    Create zonal bins of latitude and theta and calculate statistics on them.
+
+    This is the main function that handles the calculation of the climatological latitude and potential temperature. It
+    can use either latitude or theta as the variable that defines the bins; by default latitude is used.
+
+    :param lat: a vector defining the latitude coordinates for the GEOS potential temperature fields. It will
+     automatically be expanded to the proper size to match ``theta``, and is expected to be the same length as the
+     second-to-last dimension of ``theta``.
+    :type lat: :class:`numpy.ndarray`
+
+    :param theta: an array defining the potential temperature from the GEOS met data.
+    :type theta: :class:`numpy.ndarray`
+
+    :param pres_lev: a vector defining the pressure levels as the vertical coordinate for ``theta``. It is expected to
+     be the same length as the third-from last dimension of ``theta``.
+    :type pres_lev: :class:`numpy.ndarray`
+
+    :param target_pres: the pressure or pressures to calculate theta on. If given as a single number, the level of
+     ``theta`` use for the theta bins will be the level closest to it. If given as a two-element collection (e.g.
+     ``[500, 700]``), then all layers in theta between those values (inclusive) will be averaged along the vertical
+     dimension before calculating the bins. In the second form, order does not matter (the lesser or greater number
+     may come first).
+    :type target_pres: int, float, or list(int or float)
+
+    :param percentiles: a vector defining the percentiles to calculate for each bin. Note that these are true
+     percentiles, i.e. `10` should be used, not `0.1`.
+    :type percentiles: array-like
+
+    :param bin_var: which variable to use to define the bins. May be ``'latitude'`` or ``'theta'``.
+    :type bin_var: str
+
+    :return: the bin centers, dictionaries for theta and lat containing the results of the binning as an array for each
+     statistic (mean, median, std, percentiles, and count), and the vector of percentiles used. This last value is
+     returned so that they can be written to the output file even if the default value was used. The statistics arrays
+     will be nbins-by-nvalues. For all stats except "percentiles", nvalues is 1 (there is only 1 value per bin). For
+     "percentiles", it will be equal to the number of percentiles requested.
+    :rtype: :class:`numpy.ndarray`, dict, dict, array-like
+    """
     if np.ndim(theta) < 3 or np.ndim(theta) > 4:
         raise ValueError('theta expected to be a 3- or 4- D array')
     elif np.ndim(lat) != 1:
@@ -56,6 +137,8 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
 
     n_times, n_lev, n_lat, n_lon = theta.shape
 
+    # Average theta over the levels requested. Make lat into an array the same shape as the post-averaging theta. Then
+    # flatten these arrays into vectors so that we can deal with them as a linear sequence of values.
     lat_vec = np.zeros((n_times, n_lat, n_lon))
     lat_vec[:] = lat.reshape((1, n_lat, 1))
     theta_vec = np.mean(theta[:, levels, :, :], axis=1)
@@ -63,7 +146,7 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
     theta_vec = theta_vec.flatten()
     lat_vec = lat_vec.flatten()
 
-    # Now bin the latitude and theta and calculate the statistics on each bin
+    # Prepare for the binning
     bin_ops = {'mean': np.nanmean, 'median': np.nanmedian, 'std': np.nanstd, 'count': np.size,
                'percentiles': lambda x: np.percentile(x, percentiles)}
     # Figure out how large an array each operation returns - necessary to create the fill arrays if there's no data
@@ -71,8 +154,9 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
     dummy_arr = np.arange(100)
     bin_ops_size = {name: np.size(op(dummy_arr)) for name, op in bin_ops.items()}
 
+    # Depending on which variables was told to be used for binning, get the correct bin centers and edges.
     # digitize gives the indices of the upper edge of the bind, we want the bottom because that will work with the bin
-    # centers
+    # centers, hence the -1.
     if bin_var == 'theta':
         bin_centers = _theta_bin_centers
         bin_edges = _theta_bin_edges
@@ -86,6 +170,9 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
     else:
         raise ValueError('bin_var "{}" is not recognized'.format(bin_var))
 
+    # Actually do the binning. It was easier conceptually to store the calculation of the stats for each bin as a list
+    # of dictionaries; later we rearrange these into one array per stat. This could probably be streamlined, but likely
+    # isn't worth doing so unless this part is unnecessarily slow.
     lat_bin_stats = []
     theta_bin_stats = []
     for bin in range(np.size(bin_edges) - 1):
@@ -130,9 +217,40 @@ def bin_lat_vs_theta(lat, theta, pres_lev, target_pres=700, percentiles=np.arang
 
 
 def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', skip_if_missing=False):
+    """
+    Custom function for loading GEOS data specifically for the binning procedure.
+
+    :param geos_path: the path to where the GEOS FP-IT Np files are stored
+    :type geos_path: str
+
+    :param start_date: the first date to load GEOS data from
+    :type start_date: datetime-like
+
+    :param end_date: the last date (inclusive) to load GEOS data from
+    :type end_date: datetime-like
+
+    :param hours: which hours of the day (in UTC) to load GEOS data for. GEOS data is currently available at 0, 3, 6, 9,
+     12, 15, 18, and 21 UTC. If this is ``None``, then all hours are loaded.
+    :type hours: None or list(int)
+
+    :param product: which GEOS product to load ('fp' or 'fpit')
+    :type product: str
+
+    :param skip_if_missing: set to ``True`` to allow there to be missing GEOS files in the date range. If there are,
+     then this will simply return three ``None`` values rather than raising an error (which is the default behavior).
+     Usually this is only set to ``True`` for testing this module with a subset of GEOS data.
+    :type skip_if_missing: bool
+
+    :return: latitude and pressure levels as vectors, theta as an array (ntimes by nlevels by nlat by nlon).
+    :rtype: :class:`numpy.ndarray` x 3 or None x 3
+    :raises GEOSError: if ``skip_if_missing`` is ``False`` and any expected GEOS files could not be found.
+
+    Note that this function should *only* be used to load data for this module. :func:`mod_utils.read_geos_files` should
+    be used elsewhere.
+    """
     if hours is None:
-        # We always want hour to be iterable, so if it is a tuple with None in it, then when we pass None to
-        # geosfp_file_names, we'll get files between the start and end dates for all hours.
+        # We always want hour to be iterable, so if it is a tuple with None in it, then we can iterate over it and
+        # when we pass None to geosfp_file_names, we'll get files between the start and end dates for all hours.
         hours = (hours,)
 
     print('Loading GEOS files for {} to {}'.format(start_date, end_date))
@@ -168,6 +286,8 @@ def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', 
                 if idx == 0:
                     lat = this_lat
                     plevs = this_plevs
+                    # initialize theta as ntimes by nlevels by nlat by nlon. The last three come from the shape of the
+                    # currently read in theta - its first dimension is always 1 because there's 1 time per GEOS file.
                     theta = np.full((len(geos_names),) + this_theta.shape[1:], np.nan)
                     chk_file = full_name
                 else:
@@ -186,6 +306,13 @@ def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', 
 
 
 def _cat_stats(stats):
+    """
+    Helper function to concatenate lists of statistics along a new first dimension.
+
+    :param stats: a list of arrays or list of dictionaries of arrays.
+    :return: a single array or dict of arrays with the original arrays from each list element concatenated along a new
+     first dimension.
+    """
     def cat_stat_dict():
         out_dict = dict()
         stat_keys = stats[0].keys()
@@ -205,12 +332,58 @@ def _cat_stats(stats):
 
 
 def _convert_dates(dates, base_date, calendar='gregorian'):
+    """
+    Helper function to convert dates into CF format.
+
+    :param dates: a collection of dates acceptable to :func:`netCDF4.date2num`
+    :param base_date: the date to use in the 'seconds since XX' unit
+    :param calendar: which CF calendar to use
+    :return: the array of dates as seconds since base_date, the units string, and the calendar name
+    """
     units_str = 'seconds since {}'.format(base_date.strftime('%Y-%m-%d %H:%M:%S'))
     date_arr = ncdf.date2num(dates, units_str, calendar=calendar)
     return date_arr, units_str, calendar
 
 
 def save_bin_ncdf_file(save_name, dates, hours, bin_var, bin_centers, theta_stats, lat_stats, percentiles, target_pres):
+    """
+    Save the netCDF file containing the theta and latitude bins.
+
+    :param save_name: the name to give the file. If exists, will be overwritten without warning
+    :type save_name: str
+
+    :param dates: a list of tuples, which each tuple is the start, midpoint, and end date for each averaging period. The
+     list must be the same length as the number of times in ``theta_stats`` and ``lat_stats``
+    :type dates: list(tuple(datetime, datetime, datetime))
+
+    :param hours: the vector of hours that corresponds to the second dimension of ``theta_stats`` and ``lat_stats``
+     arrays. If ``None``, then this dimension will be given a length of 1 and a value of NaN in the netCDF file.
+    :type hours: None or array-like
+
+    :param bin_var: which variable was used to set the bins. Will affect the name of the bin center variable in the
+     netCDF file.
+    :type bin_var: str
+
+    :param bin_centers: the vector of center points for the bins.
+    :type bin_centers: :class:`numpy.ndarray`
+
+    :param theta_stats: the dictionary of stats of theta. Each stat should be a key in the dictionary (e.g. 'mean',
+     'std', etc.) and the value should be a ntimes x nhours x nbins x nvalues array. ntimes means the number of time
+     periods the year is separated into; nhours will be 1 unless the data were separated into different UTC hours.
+    :type theta_stats: dict
+
+    :param lat_stats: the dictionary of bin-by-bin stats for latitude. Same format as ``theta_stats``.
+    :type lat_stats: dict
+
+    :param percentiles: the array of percentiles use in the statistics.
+    :type percentiles: array-like
+
+    :param target_pres: the pressure or pressures theta was averaged on or between. Will be stored as an attribute in
+     the netCDF file.
+    :type target_pres: int, float, or list(int or float)
+
+    :return: None
+    """
     def make_stat_dims(stat, std_dims, avail_dims):
         dim_size_map = {d.size: d for d in avail_dims}
         if len(dim_size_map) < len(avail_dims):
@@ -258,22 +431,46 @@ def save_bin_ncdf_file(save_name, dates, hours, bin_var, bin_centers, theta_stat
         # Start writing the variables
         make_ncvar_helper(nch, 'start_date', start_dates, (times_dim,), **common_date_attrs)
         make_ncvar_helper(nch, 'end_date', end_dates, (times_dim,), **common_date_attrs)
-        bin_center_var_name = 'theta_bin_centers' if bin_var == 'theta' else 'latitude_bin_centers'
-        make_ncvar_helper(nch, bin_center_var_name, bin_centers, std_3d_dims,
-                          units='K', description='Potential temperature at the center of the bin')
+        if bin_var == 'theta':
+            bin_center_var_name = 'theta_bin_centers'
+            bin_center_description = 'Potential temperature at the center of the bin'
+            bin_center_units = 'K'
+        elif bin_var == 'latitude':
+            bin_center_var_name = 'latitude_bin_centers'
+            bin_center_description = 'Latitude at the center of the bin'
+            bin_center_units = 'degrees_north'
 
-        for var_name, var_unit, var in [('theta', 'K', theta_stats), ('latitude', 'degrees (south is negative)', lat_stats)]:
+        make_ncvar_helper(nch, bin_center_var_name, bin_centers, std_3d_dims,
+                          units=bin_center_units, description=bin_center_description)
+
+        for var_name, var_unit, var in [('theta', 'K', theta_stats), ('latitude', 'degrees_north', lat_stats)]:
             for stat_name, stat in var.items():
                 # For each of the stats variables, we need to add Nones to the dimension list to represent extra
                 # dimensions that need to be created by make_var_helper
                 stat_dims = make_stat_dims(stat, std_3d_dims, available_dims)
                 stat_nc_name = '{var}_{stat}'.format(var=var_name, stat=stat_name)
                 description = '{stat} of {var} in the bin'.format(stat=stat_name, var=var_name)
+
                 stat_attrs = {'units': var_unit, 'description': description}
+                if stat_name == 'count':
+                    # Every stat should have the same units as the underlying quantity, except for count, which is just
+                    # a number.
+                    stat_attrs['units'] = 'number of data points'
+
                 make_ncvar_helper(nch, stat_nc_name, stat, stat_dims, **stat_attrs)
 
 
 def iter_time_periods(year, freq):
+    """
+    Iterate over the averaging time periods
+    :param year: the year to use
+    :type year: datetime-like
+
+    :param freq: how long each time period is
+    :type freq: timedelta-like
+
+    :return: iterable over the time periods, yields the start, middle, and end dates of each time period.
+    """
     def calc_end_date(sdate):
         return sdate + freq
 
@@ -283,6 +480,9 @@ def iter_time_periods(year, freq):
     start_date = pd.Timestamp(year, 1, 1)
     end_date = calc_end_date(start_date)
     mid_date = calc_mid_date(start_date)
+    # Yes, this will omit a day or two at the end of the year. But since 365 % 14 == 1, that means only Dec 31st won't
+    # get included in the climatology (or Dec 30-31st in a leap year). That is fine, because we're going to interpolate
+    # between the time periods anyway in the main code.
     while end_date.year == year:
         yield start_date, mid_date, end_date
         start_date = end_date
@@ -291,7 +491,45 @@ def iter_time_periods(year, freq):
 
 
 def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timedelta(days=14), by_hour=False,
-                                      skip_if_missing=False, save_separate_files=False, bin_var='latitude', target_pres=700):
+                                      skip_if_missing=False, bin_var='latitude', target_pres=700):
+    """
+    The main driver function to product the latitude vs. mid-tropospheric potential temperature climatology.
+
+    :param year: which year to use to generate the climatology
+    :type year: int
+
+    :param geos_path: where the GEOS FP or FP-IT Np (i.e. 3D pressure level files) are stored.
+    :type geos_path: str
+
+    :param save_path: where to save the resulting netCDF file
+    :type save_path: str
+
+    :param freq: how long each averaging time period should be
+    :type freq: timedelta-lik
+
+    :param by_hour: set to True to bin different UTC hours' GEOS files separately. This will make the "hours" dimension
+     in the netCDF file be > 1. This was an experimental feature and isn't used in the production climatology.
+    :type by_hour: bool
+
+    :param skip_if_missing: set to ``True`` to simply omit time periods missing one or more GEOS files from the
+     climatology rather than raising an error. This is intended for testing this code with a subset of GEOS data and
+     definitely should not be used in production.
+    :type skip_if_missing: bool
+
+    :param bin_var: which variable to use to define the bins. May be 'latitude' or 'theta'. Change this to 'theta' at
+     your own risk, as it will cause northern and southern latitudes to get binned together, which makes no sense.
+     Further, the main prior generating code expects the data to have been binned by latitude.
+    :type bin_var: str
+
+    :param target_pres: the pressure or pressures to calculate theta on. If given as a single number, the level of
+     ``theta`` use for the theta bins will be the level closest to it. If given as a two-element collection (e.g.
+     ``[500, 700]``), then all layers in theta between those values (inclusive) will be averaged along the vertical
+     dimension before calculating the bins. In the second form, order does not matter (the lesser or greater number
+     may come first).
+    :type target_pres: int, float, or list(int or float)
+
+    :return: None, saves netCDF file
+    """
     if not by_hour:
         hours = (None,)
     else:
@@ -299,6 +537,8 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
         # over it again
         hours = range(0, 24, 3)
 
+    # The stats will be generated in several loops, one over time periods, and one over hours. As we finish each loop,
+    # the lists from that loop will get concatenated into single arrays with a new first dimension.
     all_bin_centers = []
     all_theta_stats = []
     all_lat_stats = []
@@ -310,6 +550,8 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
         lat_stats = []
         do_save = True
         for hr in hours:
+            # Usually this will just loop once, but it's in here as an experimental option to treat each UTC time
+            # separately. This never ended up being used, even in testing.
             lat, plevs, theta = load_geos_data(geos_path, start, end, hours=(hr,), skip_if_missing=skip_if_missing)
             if lat is None:
                 do_save = False
@@ -323,41 +565,29 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
         if do_save:
             # Concatenate the individual hours in the theta_stats, lat_stats, and bin_centers lists into single arrays
             # that are (nhours)x(nbins)x(nvalues)
-            if save_separate_files:
-                bin_centers = _cat_stats(bin_centers)[np.newaxis]
-                theta_stats = _cat_stats(theta_stats)
-                for k, v in theta_stats.items():
-                    theta_stats[k] = v[np.newaxis]
-                lat_stats = _cat_stats(lat_stats)
-                for k, v in lat_stats.items():
-                    lat_stats[k] = v[np.newaxis]
-                dates = [(start, midpoint, end)]
+            all_bin_centers.append(_cat_stats(bin_centers))
+            all_theta_stats.append(_cat_stats(theta_stats))
+            all_lat_stats.append(_cat_stats(lat_stats))
+            dates.append((start, midpoint, end))
 
-                if by_hour:
-                    nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}-{}_by_hour.nc'.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d'))
-                else:
-                    nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}-{}.nc'.format(start.strftime('%Y%m%d'), end.strftime('%Y%m%d'))
+    # Convert to (ndays)x(nhours)x(nbins)x(nvalues)
+    all_bin_centers = _cat_stats(all_bin_centers)
+    all_theta_stats = _cat_stats(all_theta_stats)
+    all_lat_stats = _cat_stats(all_lat_stats)
 
-                nc_file_name = os.path.join(save_path, nc_file_name)
-                save_bin_ncdf_file(nc_file_name, dates, hours, bin_centers, theta_stats, lat_stats,
-                                   percentiles=percentiles, target_pres=target_pres)
-            else:
-                all_bin_centers.append(_cat_stats(bin_centers))
-                all_theta_stats.append(_cat_stats(theta_stats))
-                all_lat_stats.append(_cat_stats(lat_stats))
-                dates.append((start, midpoint, end))
+    # Include the target pressure levels in the name to avoid accidentally overwriting files if we want to experiment
+    # with different pressure levels.
+    if isinstance(target_pres, (int, float)):
+        target_pres_name_str = '{}hPa'.format(target_pres)
+    else:
+        target_pres_name_str = '-'.join(str(p) for p in target_pres) + 'hPa'
 
-    if not save_separate_files:
-        # Convert to (ndays)x(nhours)x(nbins)x(nvalues)
-        all_bin_centers = _cat_stats(all_bin_centers)
-        all_theta_stats = _cat_stats(all_theta_stats)
-        all_lat_stats = _cat_stats(all_lat_stats)
-        if by_hour:
-            nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_by_hour.nc'.format(year)
-        else:
-            nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}.nc'.format(year)
+    if by_hour:
+        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_{}_by_hour.nc'.format(year, target_pres_name_str)
+    else:
+        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_{}.nc'.format(year, target_pres_name_str)
 
-        nc_file_name = os.path.join(save_path, nc_file_name)
-        save_bin_ncdf_file(nc_file_name, dates, hours, bin_var, all_bin_centers, all_theta_stats, all_lat_stats,
-                           percentiles=percentiles, target_pres=target_pres)
+    nc_file_name = os.path.join(save_path, nc_file_name)
+    save_bin_ncdf_file(nc_file_name, dates, hours, bin_var, all_bin_centers, all_theta_stats, all_lat_stats,
+                       percentiles=percentiles, target_pres=target_pres)
 

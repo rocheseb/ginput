@@ -1,3 +1,10 @@
+"""
+Utility functions shared among the mod maker and prior generation code.
+
+Compatibility notes:
+    * We have found that Pandas version 0.20 is incompatible with this module. Pandas >= 0.24 works.
+"""
+
 from __future__ import print_function, division
 
 import datetime as dt
@@ -27,12 +34,49 @@ geosfp_pres_levels = _std_model_pres_levels
 earth_radius = 6371  # kilometers
 
 
-class InsufficientMetLevelsError(Exception):
-    pass
-
-
 class ProgressBar(object):
+    """
+    Create a text-based progress bar
+
+    An instance of this class can be used to print a text progress bar that does not need a new line for each progress
+    step. It uses carriage returns to reset to the beginning of each line before printing the next. This therefore
+    does not work well if other print statements occur in between calls to :meth:`print_bar`, the progress bar will
+    either end up on a new line anyway or potentially overwrite previous print statements if they did not end with a
+    newline.
+
+    :param num_symbols: how many steps there should be in the progress bar. In other words, the progress bar will be
+     complete when :meth:`print_bar` is called with ``num_symbols-1``.
+    :type num_symbols: int
+
+    :param prefix: a string to include before the beginning of each progress bar. The class will ensure that at least
+     one space is present between the prefix and the progress bar, but will not add one if one is already present at
+     the end of the prefix.
+    :type prefix: str
+
+    :param suffix: a string to include at the end of each progress bar. The class will ensure that at least one space
+     is present between the progress bar and the suffix, but will not add one if one is already present at the beginning
+     of the suffix.
+    :type suffix: str
+
+    :param add_one: if ``True``, the number of symbols printed in the progress bar is equal to ``i+1`` where ``i`` is
+     the argument to :meth:`print_bar`. This works well with Python loops over ``i in range(n)``, since the last value
+     of ``i`` will be ``n-1``, setting ``add_one`` to ``True`` ensures that a full progress bar is printed at the end.
+    :type add_one: bool
+
+    :param style: can be either '*' or 'counter'. The former prints a symbolic progress bar of the form:
+
+        [*   ]
+        [**  ]
+        [*** ]
+        [****]
+
+     where the number of *'s is set by ``num_symbols``. The latter will instead print 'i/num_symbols' for each step.
+    :type style: str
+    """
     def __init__(self, num_symbols, prefix='', suffix='', add_one=True, style='*'):
+        """
+        See class help.
+        """
         if len(prefix) > 0 and not prefix.endswith(' '):
             prefix += ' '
         if len(suffix) > 0 and not suffix.startswith(' '):
@@ -47,6 +91,14 @@ class ProgressBar(object):
         self._add_one = add_one
 
     def print_bar(self, i):
+        """
+        Print the iteration of the progress bar corresponding to step ``i``.
+
+        :param i: defines the progress step, either the number of *'s to print with ``style='*'`` or the counter number
+         with ``style='counter'``.
+        :type i: int
+        :return: None, prints to screen.
+        """
         if self._add_one:
             i += 1
 
@@ -56,11 +108,27 @@ class ProgressBar(object):
         sys.stdout.flush()
 
     def finish(self):
+        """
+        Close the progress bar. By default, just prints a newline.
+        :return: None
+        """
         sys.stdout.write('\n')
         sys.stdout.flush()
 
 
 def _get_num_header_lines(filename):
+    """
+    Get the number of header lines in a standard GGG file
+
+    This assumes that the file specified begins with a line with two numbers: the number of header rows and the number
+    of data columns.
+
+    :param filename: the file to read
+    :type filename: str
+
+    :return: the number of header lines
+    :rtype: int
+    """
     with open(filename, 'r') as fobj:
         header_info = fobj.readline()
 
@@ -110,6 +178,24 @@ def read_mod_file(mod_file, as_dataframes=False):
 
 
 def read_map_file(map_file, as_dataframes=False, skip_header=False):
+    """
+    Read a .map file
+
+    :param map_file: the path to the .map file
+    :type map_file: str
+
+    :param as_dataframes: set to ``True`` to return the constants and profiles data as Pandas dataframes. By default,
+     (``False``) they are returned as dictionaries of numpy arrays.
+    :type as_dataframes: bool
+
+    :param skip_header: set to ``True` to avoid reading the header. This is helpful for reading older .map files that
+     have a slightly different header format.
+    :type skip_header: bool
+
+    :return: a dictionary with keys 'constants' and 'profile' that hold the header values and main profile data,
+     respectively. The form of these values depends on ``as_dataframes``.
+    :rtype: dict
+    """
     n_header_lines = _get_num_header_lines(map_file)
     constants = dict()
     if not skip_header:
@@ -145,7 +231,46 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     return out_dict
 
 
-def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, tropopause_alt, strat_used_eqlat, variables, units, var_order=None):
+def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, tropopause_alt, strat_used_eqlat, variables, units,
+                   var_order=None):
+    """
+    Create a .map file
+
+    :param map_file: the full name to save the map file as
+    :type map_file: str
+
+    :param site_lat: the geographic latitude of the site.
+    :type site_lat: float
+
+    :param trop_eqlat: the equivalent latitude, derived from the GEOS lat vs. theta climatology, used to create the
+     tropospheric part of the profiles.
+    :type trop_eqlat: float
+
+    :param prof_ref_lat: the constant reference latitude used for the tropospheric age of air and seasonal cycle
+     functions.
+    :type prof_ref_lat: float
+
+    :param tropopause_alt: the altitude of the tropopause for this profile (in kilometers).
+    :type tropopause_alt: float
+
+    :param strat_used_eqlat: whether or not the stratospheric part of the profile used PV-derived equivalent latitude.
+     ``False`` means that the geographic latitude of the site was used instead.
+    :type strat_used_eqlat: bool
+
+    :param variables: a dictionary where the keys will be used as the column names and the values should be 1D
+     array-like values to be written to the map file.
+    :type variables: dict(str: array-like)
+
+    :param units: a dictionary that must have the same keys as ``variables`` where the values define the units to print
+     in the line under the variable names in the .map file
+    :type units: dict(str: str)
+
+    :param var_order: optional, if given, a sequence of the keys in ``variables`` and ``units`` that defines what order
+     they are to be written to the .map file. If ``variables`` is an OrderedDict, then this is not necessary.
+    :type var_order: sequence(str)
+
+    :return: None
+    """
     # variables and units must have the same keys
     if var_order is None:
         var_order = list(variables.keys())
@@ -203,78 +328,6 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, tropopause_alt,
             mapf.write(','.join(formatted_values))
             if i < size_check - 1:
                 mapf.write('\n')
-
-
-def read_geos_files(start_date, end_date, geos_path, profile_variables, surface_variables, product='fpit',
-                    keep_time_dim=True, concatenate_arrays=False, set_mask_to_nan=False):
-    def read_var_helper(nchandle, varname, keep_time=keep_time_dim):
-        if keep_time:
-            data = nchandle.variables[varname][:]
-        else:
-            data = nchandle.variables[varname][0]
-
-        if set_mask_to_nan:
-            data = data.filled(np.nan)
-
-        return data
-
-    def read_files_helper(file_list, variables, is_profile):
-        var_data = {v: [] for v in variables}
-        for fidx, fname in enumerate(file_list):
-
-            with ncdf.Dataset(fname, 'r') as nchandle:
-                lon = read_var_helper(nchandle, 'lon', keep_time=True)
-                lat = read_var_helper(nchandle, 'lat', keep_time=True)
-                if is_profile:
-                    lev = read_var_helper(nchandle, 'lev', keep_time=True)
-                if fidx == 0:
-                    var_data['lon'] = lon
-                    var_data['lat'] = lat
-                    if is_profile:
-                        var_data['lev'] = lev
-                else:
-                    chk = not ma.allclose(var_data['lon'], lon) or not ma.allclose(var_data['lat'], lat)
-                    if is_profile:
-                        chk = chk or not ma.allclose(var_data['lev'], lev)
-
-                    if chk:
-                        # TODO: replace this with proper GEOS error from the backend analysis
-                        raise RuntimeError('lat, lon, and/or lev are inconsistent among the GEOS files')
-
-                for var in variables:
-                    var_data[var].append(read_var_helper(nchandle, var))
-
-        if concatenate_arrays:
-            for var, data in var_data.items():
-                if isinstance(data, list):
-                    # The lon/lat/lev variables don't need concatenated, we checked that they don't change with time
-                    # so there's only one array for them, not a list.
-                    var_data[var] = concatenate(data, axis=0)
-
-        return var_data
-
-    if concatenate_arrays and not keep_time_dim:
-        raise NotImplementedError('concatenate_arrays = True requires keep_time_dim = True')
-
-    if set_mask_to_nan:
-        concatenate = np.concatenate
-    else:
-        concatenate = ma.concatenate
-
-    geos_prof_files, file_dates = geosfp_file_names(product, 'Np', start_date, end_date)
-    geos_surf_files, surf_file_dates = geosfp_file_names(product, 'Nx', start_date, end_date)
-
-    # Check that the file lists have the same dates
-    if len(file_dates) != len(surf_file_dates) or any(file_dates[i] != surf_file_dates[i] for i in range(len(file_dates))):
-        raise RuntimeError('Somehow listed different profile and surface files')
-    elif concatenate_arrays:
-        file_dates = pd.DatetimeIndex(file_dates)
-
-    geos_prof_files = [os.path.join(geos_path, 'Np', f) for f in geos_prof_files]
-    geos_surf_files = [os.path.join(geos_path, 'Nx', f) for f in geos_surf_files]
-    prof_data = read_files_helper(geos_prof_files, profile_variables, is_profile=True)
-    surf_data = read_files_helper(geos_surf_files, surface_variables, is_profile=False)
-    return prof_data, surf_data, file_dates
 
 
 def hg_commit_info(hg_dir=None):
@@ -341,6 +394,12 @@ def calculate_potential_temperature(pres, temp):
 
 
 def _construct_grid(*part_defs):
+    """
+    Helper function to construct coordinates for a 1D grid
+    :param part_defs: a sequence of tuples (or lists) defining the start, stop, and step for each grid component. Each
+     tuple gets expanded as the arguments to :func:`numpy.arange`.
+    :return: the coordinates, sorted, and made sure to be unique
+    """
     grid_components = [np.arange(*part) for part in part_defs]
     # Keep only unique values and sort them
     return np.unique(np.concatenate(grid_components))
@@ -395,6 +454,21 @@ def calculate_area(lat, lon, lat_res=None, lon_res=None):
 
 
 def calculate_eq_lat_on_grid(EPV, PT, area):
+    """
+    Calculate equivalent latitude on a 4D grid.
+
+    :param EPV: the potential vorticity on the 4D grid.
+    :type EPV: :class:`numpy.ndarray`
+
+    :param PT: the potential temperature on the 4D grid.
+    :type PT: :class:`numpy.ndarray`
+
+    :param area: the 2D grid of surface area (in steradians) that corresponds to the 2D slices of the 4D grid.
+    :type area: :class:`numpy.ndarray`
+
+    :return: equivalent latitude
+    :rtype: :class:`numpy.ndarray`
+    """
     EL = np.full_like(PT, np.nan)
 
     for itime in range(PT.shape[0]):
@@ -414,6 +488,28 @@ def calculate_eq_lat_on_grid(EPV, PT, area):
 
 
 def calculate_eq_lat(EPV, PT, area):
+    """
+    Construct an interpolator for equivalent latitude.
+
+    :param EPV: a 3D grid of potential vorticity
+    :type EPV: :class:`numpy.ndarray`
+
+    :param PT: a 3D grid of potential temperature
+    :type PT:  :class:`numpy.ndarray`
+
+    :param area: the 2D grid of surface area (in steradians) that corresponds to the 2D slices of the 4D grid.
+    :type area: :class:`numpy.ndarray`
+
+    :return: a 2D interpolator for equivalent latitude, requires potential vorticity and potential temperature as inputs
+    :rtype: :class:`scipy.interpolate.interp2d`
+
+    Note: when querying the interpolator for equivalent latitude, it is often best to call it with scalar values, even
+    though that is slower than calling it with the full vector of PV and PT that you wish to get EL for. The problem is
+    that scipy 2D interpolators, when given vectors as input, return a grid. This would be fine, except that the values
+    corresponding to the vector of PV and PT are not always along the diagonal and so cannot be extracted with
+    :func:`numpy.diag`. (I suspect what is happening is that the interpolator sorts the input values when constructing
+    the grid, but I have not tested this. -JLL)
+    """
     nlev, nlat, nlon = PT.shape
     # Get rid of fill values, this fills the bottom of profiles with the first valid value
     PT[PT > 1e4] = np.nan
@@ -469,6 +565,19 @@ def calculate_eq_lat(EPV, PT, area):
 
 
 def _format_geosfp_name(product, file_type, date_time):
+    """
+    Create the file name for a GEOS FP or FP-IT file.
+
+    :param product: which GEOS product ('fp' or 'fpit') to use
+
+    :param file_type: which file type ('Np' for profiles, 'Nx' for surface) to use
+
+    :param date_time: the date and time of the desire file. The hour should be a multiple of 3.
+    :type date_time: datetime-like
+
+    :return: the file name
+    :rtype: str
+    """
     product_patterns = {'fp': 'GEOS.fp.asm.inst3_{dim}d_asm_{type}.{date_time}.V01.nc4',
                         'fpit': 'GEOS.fpit.asm.inst3_{dim}d_asm_{type}.GEOS5124.{date_time}.V01.nc4'}
     file_type_dims = {'Np': 3, 'Nx': 2}
@@ -488,8 +597,156 @@ def _format_geosfp_name(product, file_type, date_time):
     return pattern.format(dim=file_dims, type=file_type, date_time=date_time)
 
 
+def read_geos_files(start_date, end_date, geos_path, profile_variables, surface_variables, product='fpit',
+                    keep_time_dim=True, concatenate_arrays=False, set_mask_to_nan=False):
+    """
+    Read GEOS FP or FP-IT files between specified dates.
+
+    :param start_date: the first date to read GEOS files from
+    :type start_date: datetime-like
+
+    :param end_date: the last date to read GEOS file from (exclusive). Note that if this datetime is not exactly a time
+     that GEOS files are produced on, you will lose an extra file. For example, since GEOS files are produced every 3
+     hours, if you specify ``end_date = datetime.datetime(2012, 1, 1, 23)``, you will lose the file from
+     21:00 UTC 1 Jan 2012,
+    :type end_date: datetime-like
+
+    :param geos_path: the path where the GEOS files are stored. Must have subdirectories 'Np' and 'Nx' for the profile
+     and surface files, respectively. Currently, each of these subdirectories must be flat, meaning that all GEOS data
+     from all times is stored at the top level, not organized into further subdirectories by year/month etc.
+    :type geos_path: str
+
+    :param profile_variables: a list of variables to read from the profile (Np) files. 'lon', 'lat', and 'lev' are
+     always read.
+    :type profile_variables: list(str)
+
+    :param surface_variables: a list of variables to read from the surface (Nx) files. 'lon' and 'lat' are always read.
+    :type surface_variables: list(str)
+
+    :param product: one of the strings 'fp' or 'fpit', determine which GEOS product is being read.
+    :type product: str
+
+    :param keep_time_dim: Set to ``True`` to keep the time dimension of the variables. This means the profile and
+     surface variables will be 4D and 3D respectively. Set to ``False`` to remove it (so they will be 3D and 2D).
+    :type keep_time_dim: bool
+
+    :param concatenate_arrays: Set to ``True`` to concatenate the data from different files into a single array. This
+     requires ``keep_time_dim`` to be ``True`` since they are concatenated along the time dimension. If ``False``, then
+     the variables are left as lists of numpy arrays, where each array comes from a separate file.
+    :type concatenate_arrays: bool
+
+    :param set_mask_to_nan: Set to ``True`` turn the masked arrays read from netCDF files by default into regular numpy
+     arrays, where the masked values are replaced with NaNs.
+    :type set_mask_to_nan: bool
+
+    :return: dictionaries of profile and surface variables, and a Pandas DateTimeIndex of the file dates. The variable
+     dictionaries' values' format depends on the value of ``concatenate_arrays``.
+    :rtype: dict, dict, DatetimeIndex
+    """
+    def read_var_helper(nchandle, varname, keep_time=keep_time_dim):
+        if keep_time:
+            data = nchandle.variables[varname][:]
+        else:
+            # This is equivalent to doing nchandle.variables[varname][0,:,:,:] for a 4D variable; omitting the trailing
+            # colons makes it general for any size array.
+            data = nchandle.variables[varname][0]
+
+        if set_mask_to_nan:
+            data = data.filled(np.nan)
+
+        return data
+
+    def read_files_helper(file_list, variables, is_profile):
+        var_data = {v: [] for v in variables}
+        for fidx, fname in enumerate(file_list):
+
+            with ncdf.Dataset(fname, 'r') as nchandle:
+                # Always read lat/lon. If reading a profile file, get the levels too for the vertical coordinate.
+                lon = read_var_helper(nchandle, 'lon', keep_time=True)
+                lat = read_var_helper(nchandle, 'lat', keep_time=True)
+                if is_profile:
+                    lev = read_var_helper(nchandle, 'lev', keep_time=True)
+
+                # If on the first file, store the coordinate variables. If on a later file, double check that the
+                # coordinates are the same. They should be, and that assumption makes the data easier to work with
+                # since we don't have to recheck our indices for each file.
+                if fidx == 0:
+                    var_data['lon'] = lon
+                    var_data['lat'] = lat
+                    if is_profile:
+                        var_data['lev'] = lev
+                else:
+                    chk = not ma.allclose(var_data['lon'], lon) or not ma.allclose(var_data['lat'], lat)
+                    if is_profile:
+                        chk = chk or not ma.allclose(var_data['lev'], lev)
+
+                    if chk:
+                        # TODO: replace this with proper GEOS error from the backend analysis
+                        raise RuntimeError('lat, lon, and/or lev are inconsistent among the GEOS files')
+
+                for var in variables:
+                    var_data[var].append(read_var_helper(nchandle, var))
+
+        if concatenate_arrays:
+            for var, data in var_data.items():
+                if isinstance(data, list):
+                    # The lon/lat/lev variables don't need concatenated, we checked that they don't change with time
+                    # so there's only one array for them, not a list.
+                    var_data[var] = concatenate(data, axis=0)
+
+        return var_data
+
+    # input checking - we concatenate along the time dimension, so we better keep it
+    if concatenate_arrays and not keep_time_dim:
+        raise ValueError('concatenate_arrays = True requires keep_time_dim = True')
+
+    # If we're converting the default masked arrays to regular arrays, we have to use np.concatenate because
+    # ma.concatenate always returns a masked array. If we're not converting, then the reverse applied.
+    if set_mask_to_nan:
+        concatenate = np.concatenate
+    else:
+        concatenate = ma.concatenate
+
+    geos_prof_files, file_dates = geosfp_file_names(product, 'Np', start_date, end_date)
+    geos_surf_files, surf_file_dates = geosfp_file_names(product, 'Nx', start_date, end_date)
+
+    # Check that the file lists have the same dates
+    if len(file_dates) != len(surf_file_dates) or any(file_dates[i] != surf_file_dates[i] for i in range(len(file_dates))):
+        raise RuntimeError('Somehow listed different profile and surface files')
+    elif concatenate_arrays:
+        file_dates = pd.DatetimeIndex(file_dates)
+
+    geos_prof_files = [os.path.join(geos_path, 'Np', f) for f in geos_prof_files]
+    geos_surf_files = [os.path.join(geos_path, 'Nx', f) for f in geos_surf_files]
+    prof_data = read_files_helper(geos_prof_files, profile_variables, is_profile=True)
+    surf_data = read_files_helper(geos_surf_files, surface_variables, is_profile=False)
+    return prof_data, surf_data, file_dates
+
+
 def geosfp_file_names(product, file_type, start_date, end_date=None):
+    """
+    List all file names for GEOS FP or FP-IT files for the given date(s).
+
+    :param product: which GEOS product ('fp' or 'fpit') to use
+    :type product: str
+
+    :param file_type: which files ('Np' for profile, 'Nx' for surface) to list
+    :type file_type: str
+
+    :param start_date: what date to start listing files for. If ``end_date`` is omitted, only the file for this date
+     will be listed. Note that the hour must be a multiple of 3, since GEOS files are produced every three hours.
+    :type start_date: datetime-like
+
+    :param end_date: what date to stop list files. This is exclusive, and will not itself be included. Can be omitted
+     to just list one file.
+    :type end_date: None or datetime-like
+
+    :return: the list of file names and an array of file dates
+    :rtype: list, :class:`pandas.DatetimeIndex`
+    """
     freq = pd.Timedelta(hours=3)
+    if start_date.hour % 3 != 0:
+        raise ValueError('The hour of start_date must be a multiple of 3')
     if end_date is None:
         end_date = start_date + freq
 
@@ -505,6 +762,11 @@ def geosfp_file_names(product, file_type, start_date, end_date=None):
 def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None):
     """
     Create a list of GEOS-FP file names for specified dates
+
+    This differs from :func:`geosfp_file_names` because this function can list files for only specific hours across
+    multiple days. For example, if you want only 00:00 UTC FP-IT profile files for all of 2018, you would call this as::
+
+        geosfp_file_names_by_day('fpit', 'Np', pd.date_range('2018-01-01', '2018-12-31', utc_hours=[0])
 
     :param product: which GEOS-FP product to make names for: "fp" or "fpit"
     :type product: str
@@ -524,8 +786,6 @@ def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None):
     :return: a list of GEOS file names
     :rtype: list(str)
     """
-
-
     geos_utc_hours = np.arange(0, 24, 3)
     if utc_hours is not None:
         geos_utc_hours = geos_utc_hours[np.isin(geos_utc_hours, utc_hours)]
@@ -671,6 +931,27 @@ def mod_interpolation_new(z_grid, z_met, vals_met, interp_mode='linear'):
 
 
 def interp_to_tropopause_height(theta, altitude, theta_trop):
+    """
+    Given the potential temperature at the tropopause, find the altitude that corresponds to that tropopause.
+
+    :param theta: a vector of potential temperatures
+    :type theta: :class:`numpy.ndarray`
+
+    :param altitude: a vector of altitudes corresponding to ``theta``.
+    :type altitude: :class:`numpy.ndarray`
+
+    :param theta_trop: the potential temperature at the tropopause.
+    :type theta_trop: float
+
+    :return: the altitude of the tropopause
+
+    Note: this function recognizes that interpolation in the .mod files can result in boundary layer theta that
+    increases towards the surface and, in some cases, cross the tropopause potential temperature. To avoid accidentally
+    finding a tropopause altitude in the boundary layer, only looks for the tropopause potential temperature in the part
+    of the theta vector that is monotonically increasing. As a check, this prints a warning if the last level with
+    decreasing theta is above 3 km above sea level. Seeing this message does not necessarily mean there is a problem,
+    just that you may want to double check that theta profile.
+    """
     # Find the last point where theta is decreasing. It should be increasing consistently above the boundary layer
     # This prevents interpolating to a weirdly low tropopause if the boundary layer somehow contains the potential
     # temperature of the tropopause (sometimes happens if it's extrapolated to the surface)
@@ -682,50 +963,171 @@ def interp_to_tropopause_height(theta, altitude, theta_trop):
     else:
         last_decr = np.max(np.nonzero(decr_theta)[0]) + 1
     if altitude[last_decr] > 3:
-        print('Decreasing potential temperature found above 3 km ({} km). This is not expected, and may '
-              'cause erroneously high tropopause altitudes to be computed'.format(altitude[last_decr]))
+        print('Warning: decreasing potential temperature found above 3 km ({} km). This might cause an erroneously high '
+              'tropopause height.'.format(altitude[last_decr]))
 
     # Do the interpolation with just the altitudes where theta is monotonically increasing.
     return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()
 
 
-def age_of_air(lat, z, ztrop, ref_lat=0.0):
+def age_of_air(lat, z, ztrop, ref_lat=45.0):
+    """
+    Calculate age of air using a function form from GGG 2014.
+
+    :param lat: the latitude(s) to calculate age of air for
+    :type lat: float or :class:`numpy.ndarray`
+
+    :param z: the altitude(s) to calculate age of air for. If both ``z`` and ``lat`` given as a vectors, they must be
+     the same shape. Must have units of kilometers.
+    :type z: float or :class:`numpy.ndarray`
+
+    :param ztrop: the tropopause altitude, in kilometers.
+    :type ztrop: float
+
+    :param ref_lat: the reference latitude for the cycle. This is where the exponential in latitude is maximized. 45N
+     was chosen as the default as the center of the northern hemisphere, where most anthropogenic emissions are.
+    :type ref_lat: float
+
+    :return: age of air, in years, as a numpy array
+    :rtype: :class:`numpy.ndarray`
+    """
+    # Force z to be a numpy array. This allows us to use numpy indexing for the extra (stratospheric) term below and
+    # simultaneously ensures aoa is always a numpy array.
+    if not isinstance(z, np.ndarray):
+        z = np.array([z])
+
     fl = lat/22.0
     aoa = 0.313 - 0.085 * np.exp(-((lat-ref_lat)/18)**2) - 0.268*np.exp(-1.42 * z / (z+ztrop)) * fl / np.sqrt(1+fl**2)
-    extra_term = 7.0 * (z-ztrop)/z
-    aoa[z > ztrop] += extra_term[z > ztrop]
+
+    # We limit the calculation to z > ztrop here because that avoids a divide-by-0 warning
+    # This term is really only kept in for completeness; in practice, it should never be used because we don't use
+    # this term in the stratosphere.
+    extra_term = 7.0 * (z[z > ztrop]-ztrop)/z[z > ztrop]
+    aoa[z > ztrop] += extra_term
     return aoa
 
 
-def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=0.0):
+def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=45.0):
+    """
+    Calculate a factor to multiply a concentration by to account for the seasonal cycle.
+
+    :param lat: the latitude(s) to calculate age of air for
+    :type lat: float or :class:`numpy.ndarray`
+
+    :param z: the altitude(s) to calculate age of air for. If both ``z`` and ``lat`` given as a vectors, they must be
+     the same shape. Must have units of kilometers.
+    :type z: float or :class:`numpy.ndarray`
+
+    :param ztrop: the tropopause altitude, in kilometers.
+    :type ztrop: float
+
+    :param fyr: the fraction of the year that corresponds to this date. You can convert a date time to this value with
+     :func:`date_to_frac_year`.
+    :type fyr: float
+
+    :param species: which species seasonal cycle to calculate; affects the amplitude. Options are: 'co2'.
+    :type species: str
+
+    :param ref_lat: reference latitude for the age of air. Set to 45N as an approximation of where the NH emissions are.
+    :type ref_lat: float
+
+    :return: the seasonal cycle factor as a numpy array. Multiply this by a deseasonalized concentration at (lat, z) to
+     get the concentration including the seasonal cycle
+    """
     season_cycle_coeffs = {'co2': 0.007}
 
     aoa = age_of_air(lat, z, ztrop, ref_lat=ref_lat)
     sv = np.sin(2*np.pi *(fyr - 0.834 - aoa))
-    svnl = sv + 1.80 * np.exp(-((lat -74)/41)**2)*(0.5 - sv**2)
+    svnl = sv + 1.80 * np.exp(-((lat - 74)/41)**2)*(0.5 - sv**2)
     sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
     return 1 + sca * season_cycle_coeffs[species]
 
 
 def date_to_decimal_year(date_in):
+    """
+    Convert a datetime object to a decimal year.
+
+    A decimal year is e.g. 2018.5, where the part before the decimal is the year itself and after the decimal is how
+    much of the year has passed.
+
+    :param date_in: the datetime object to convert
+    :type date_in: datetime-like
+
+    :return: the decimal year
+    :rtype: float
+    """
     return date_in.year + date_to_frac_year(date_in)
 
 
 def date_to_frac_year(date_in):
-    doy = float(date_in.strftime('%j'))
+    """
+    Convert a datetime object to a fraction of a year.
+
+    The fraction is essentially how much of the year has passed, so June 1st (of any year) becomes ~0.416.
+
+    Note: this function assumes 365.25 days per year. This is an imperfect solution, ideally a fractional year should
+    really describe the fraction of an orbit the Earth has completed, so only use this for things where +/- a day is an
+    insignificant error.
+
+    :param date_in: the datetime object to convert
+    :type date_in: datetime-like
+
+    :return: the fractional year
+    :rtype: float
+    """
+    doy = float(date_in.strftime('%j')) - 1
     return doy / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
 
 
 def frac_year_to_doy(yr_in):
+    """
+    Convert a fractional year to a day of year.
+
+    Internally, this multiplies by 365.25, so see the warning in the docstring for :func:`date_to_frac_year` about
+    its precision. Crucially, this is NOT a reliable inverse operation to :func:`date_to_frac_year`.
+
+    :param yr_in: the fractional year to convert
+    :type yr_in: float
+
+    :return: the number of days since 1 Jan
+    :rtype: float
+    """
     return yr_in * 365.25
 
 
 def frac_years_to_reldelta(frac_year, allow_nans=True):
+    """
+    Convert a fractional year to a :class:`relativedelta` from dateutils.
+
+    Note: like the other fraction/decimal year functions, this assumes 365.25 days/year internally. Therefore, this
+    should function correctly as an inverse operation to date_to_frac_year when added back to Jan 1 of the year in
+    question.
+
+    :param frac_year: the fractional year(s) (e.g 2.5 for 2 and a half years) to convert
+    :type frac_year: float or a collection of floats
+
+    :param allow_nans: whether to permit NaNs in the decimal years. If ``True``, then NaNs will be retained in the
+     output list. If ``False``, an error is raised if NaNs are found in ``dec_year``.
+    :type allow_nans: bool
+
+    :return: a list of dateutils :class:`relativedelta` objects or a single :class:`relativedelta` if a scalar
+     ``frac_year`` was given.
+    :rtype: :class:`relativedelta` or list(:class:`relativedelta`)
+    """
+    if isinstance(frac_year, float):
+        return_scalar = True
+        frac_year = [frac_year]
+    else:
+        return_scalar = False
     if not allow_nans and np.any(np.isnan(frac_year)):
         raise ValueError('NaNs not permitted in frac_year. Either remove them, or set `allow_nans=True`')
     age_years = np.floor(frac_year)
     age_fracs = np.mod(frac_year, 1)
-    return [relativedelta(years=y, days=365.25 * d) if not (np.isnan(y) or np.isnan(d)) else np.nan for y, d in zip(age_years, age_fracs)]
+    rdels = [relativedelta(years=y, days=365.25 * d) if not (np.isnan(y) or np.isnan(d)) else np.nan for y, d in zip(age_years, age_fracs)]
+    if return_scalar:
+        rdels = rdels[0]
+
+    return rdels
 
 
 def start_of_month(date_in, out_type=dt.date):
