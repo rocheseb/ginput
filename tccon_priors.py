@@ -317,6 +317,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
 
         else:
             if target_date < first_available_date:
+                import pdb; pdb.set_trace()
                 sign = -1
             else:
                 sign = 1
@@ -333,7 +334,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
 
             # Get the most nearest nyears CO2 concentrations for this month in the record. Set the initial CO2 value
             # to the last of those.
-            prev_year = [y for y in range(nyear + years_extrap, years_extrap, -sign)]
+            prev_year = [y for y in reversed(range(years_extrap, nyear + years_extrap, sign))]
 
             # If extrapolating backwards in time, we want the years in order from latest to earliest. That way when
             # we recursively extrapolate, we can still drop the first CO2 in the array and append to the end when
