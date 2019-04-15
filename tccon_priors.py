@@ -29,11 +29,13 @@ from contextlib import closing
 import ctypes
 import datetime as dt
 from dateutil.relativedelta import relativedelta
+from glob import glob
 import multiprocessing as mp
 import netCDF4 as ncdf
 import numpy as np
 import os
 import pandas as pd
+import re
 from scipy.interpolate import LinearNDInterpolator
 
 # TODO: move all into package and use a proper relative import
@@ -50,9 +52,16 @@ _clams_file = os.path.join(_data_dir, 'clams_age_clim_scaled.nc')
 # FUNCTIONS SUPPORTING PRIORS CALCUALTION #
 ###########################################
 
-class CO2RecordError(Exception):
+class GasRecordError(Exception):
     """
     Base error for problems in the CO2 record
+    """
+    pass
+
+
+class GasRecordInputMissingError(GasRecordError):
+    """
+    Error to use when cannot find the necessary input files for a trace gas record
     """
     pass
 
@@ -90,17 +99,77 @@ def _init_prof(profs, n_lev, n_profs=0):
 
 class CO2TropicsRecord(object):
     """
-    This class stored the Mauna Loa/Samoa average CO2 record and provides methods to sample it.
+    This class stores the Mauna Loa/Samoa average CO2 record and provides methods to sample it.
 
     No arguments required for initialization.
     """
     months_avg_for_trend = 12
+    age_spec_regions = ('tropics', 'midlat', 'vortex')
+    _age_spectrum_data_dir = os.path.join(_data_dir, 'age_spectra')
+    _age_spectrum_time_file = os.path.join(_age_spectrum_data_dir, 'time.txt')
 
-    def __init__(self):
-        self.co2_seasonal = self.get_mlo_smo_mean()
-        # Deseasonalize the data by taking a 12 month rolling average. May replace with a more sophisticated approach
-        # in the future.
-        self.co2_trend = self.co2_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna()
+    def __init__(self, first_date=None, last_date=None):
+        # For the stratosphere data, since the age spectra are defined over a 30 year window, we need to make sure
+        # we have values back to slightly more than 30 years before the first TCCON data. Assuming that's around 2004,
+        # a default age of 2000 - 30 = 1970 should be good.
+        age_spectra_length = relativedelta(years=30)
+        if first_date is None:
+            first_date = dt.datetime(2000, 1, 1) - age_spectra_length
+        else:
+            first_date -= age_spectra_length
+
+        if last_date is None:
+            # By default, we want to extrapolate to 2 years out from today; the max negative age-of-air in the
+            # troposphere should be about 6 months at most, but we need to allow some room for the rolling average to
+            # get the trend.
+            last_date = dt.datetime.today() + relativedelta(years=2)
+        self.co2_seasonal = self.get_mlo_smo_mean(first_date, last_date)
+
+        # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
+        # leave the latency
+        self.co2_trend = self.co2_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
+
+        self.strat_co2 = self._calc_age_spec_co2(self.co2_seasonal)
+        # TODO: add the convolution, probably need to apply the 2 month lag here so that the convolution is operating
+        #  over the right ages.
+
+    @classmethod
+    def _get_agespec_files(cls, region):
+        def _file_name_helper(reg, prefix):
+            base_name = '{}.{}.txt'.format(prefix, reg)
+            full_name = os.path.join(cls._age_spectrum_data_dir, base_name)
+            if not os.path.isfile(full_name):
+                agespec_files = glob(os.path.join(cls._age_spectrum_data_dir, '{}.*.txt'.format(prefix)))
+                re_pattern = r'(?<={}\.)\w+(?=\.txt)'.format(prefix)
+                agespec_regions = [re.search(re_pattern, os.path.basename(f)) for f in agespec_files]
+                raise GasRecordInputMissingError('Cannot find an {pre} file for the region "{reg}". Available regions '
+                                                 'are: {avail}'.format(pre=prefix, reg=region,
+                                                                       avail=', '.join(agespec_regions)))
+
+            return full_name
+
+        age_file = _file_name_helper(region, 'age')
+        agespec_file = _file_name_helper(region, 'agespec')
+
+        return age_file, agespec_file
+
+    @classmethod
+    def _load_age_spectrum_data(cls, region, normalize_spectra=True):
+        def _load_helper(filename):
+            return pd.read_csv(filename, header=None, sep=' ')
+
+        time = _load_helper(cls._age_spectrum_time_file)
+        delt = np.mean(np.diff(time.values, axis=0))
+        age_file, agespec_file = cls._get_agespec_files(region)
+        age = _load_helper(age_file)
+        spectra = _load_helper(agespec_file)
+        if normalize_spectra:
+            # Ensure that the integral of each age spectrum is 1. Assumes that time has a consistent spacing between
+            # adjacent points, then basically does a midpoint rule integration
+            for i in range(spectra.shape[0]):
+                spec = spectra.iloc[i, :]
+                spectra.iloc[i, :] = (delt * spec) / (np.nansum(spec) * delt)
+        return time, delt, age, spectra
 
     @classmethod
     def read_insitu_co2(cls, fpath, fname):
@@ -131,39 +200,65 @@ class CO2TropicsRecord(object):
         return df
 
     @classmethod
-    def get_mlo_smo_mean(cls):
+    def get_mlo_smo_mean(cls, first_date, last_date):
         """
         Generate the Mauna Loa/Samoa mean CO2 record from the files stored in this repository.
 
         Reads in the :file:`data/ML_monthly_obs.txt` and :file:`data/SMO_monthly_obs.txt` files included in this
         repository, averages them, and fills in any missing months by interpolation.
 
-        :return: the data frame containing the mean CO2 ('co2_mean') and a flag ('interp_flag') set to 1 for any months
+        :return: the data frame containing the mean CO2 ('dmf_mean') and a flag ('interp_flag') set to 1 for any months
          that had to be interpolated. Index by timestamp.
         :rtype: :class:`pandas.DataFrame`
         """
         df_mlo = cls.read_insitu_co2(_data_dir, 'ML_monthly_obs.txt')
         df_smo = cls.read_insitu_co2(_data_dir, 'SMO_monthly_obs.txt')
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
-        df_combined['co2_mean'] = df_combined['co2'].mean(axis=1)
+        df_combined['dmf_mean'] = df_combined['co2'].mean(axis=1)
         df_combined.drop(['site', 'co2', 'year', 'month', 'day'], axis=1, inplace=True)
 
         # Fill in any missing months. Add a flag so we can keep track of whether they've had to be interpolated or
         # not. Having a consistent monthly frequency makes the rest of the code easier - we can just always assume that
-        # there will be a value at the beginning of every month.
-        n_months = df_combined.index.size
-        df_combined = df_combined.assign(interp_flag=np.zeros((n_months,), dtype=np.int))
-        all_months = pd.date_range(min(df_combined.index), max(df_combined.index), freq='MS')
+        # there will be a value at the beginning of every month. Also track latency in the data frame.
+
+        # Make sure that first_date and last_date are at the start of a month. If not, go to the start of month that
+        # makes sure we cover the requested time period
+        if first_date.day != 1:
+            first_date = mod_utils.start_of_month(first_date)
+
+        if last_date.day != 1:
+            last_date = mod_utils.start_of_month(last_date) + relativedelta(months=1)
+        all_months = pd.date_range(first_date, last_date, freq='MS')
+        n_months = all_months.size
+
+        #import pdb; pdb.set_trace()
         df_combined = df_combined.reindex(all_months)
+        df_combined = df_combined.assign(interp_flag=np.zeros((n_months,), dtype=np.int),
+                                         latency=np.zeros((n_months,), dtype=np.int))
+
         # set the interpolation flag
-        missing = pd.isna(df_combined['interp_flag'])
-        df_combined.loc[missing, 'interp_flag'] = 1
-        # Now only co2_mean should have missing values
-        df_combined.interpolate(method='index', inplace=True)
+        missing = pd.isna(df_combined['dmf_mean'])
+        # filling the internal missing NaNs first, mark them as interpolated, then extrapolate
+        df_combined.interpolate(method='index', inplace=True, limit_area='inside')
+        interpolated = missing.values & ~pd.isna(df_combined['dmf_mean'])
+        extrapolated = missing.values & pd.isna(df_combined['dmf_mean'])
+
+        df_combined.loc[interpolated, 'interp_flag'] = 1
+        df_combined.loc[extrapolated, 'interp_flag'] = 2
+
+        # Finally handle the extrapolation. Only these values will have latency
+        ex_inds = extrapolated.to_numpy().nonzero()[0]
+        for i in ex_inds:
+            timestamp = df_combined.index[i]
+            df_combined.loc[timestamp, 'dmf_mean'], quality_dict = cls._calc_monthly_co2_(df_combined[~extrapolated], timestamp.year, timestamp.month)
+            df_combined.loc[timestamp, 'latency'] = quality_dict['latency']
 
         return df_combined
 
-    def get_co2_by_month(self, year, month, deseasonalize=False, limit_extrapolation_to=None):
+    # TODO: replace get_co2_by_month
+    # def get_co2_by_month(self, year, month, deseasonalize=False, limit_extrapolation_to=None):
+    @staticmethod
+    def _calc_monthly_co2_(df, year, month, limit_extrapolation_to=None):
         """
         Get CO2 for a specific month, extrapolating if necessary.
 
@@ -191,79 +286,240 @@ class CO2TropicsRecord(object):
 
         :rtype: float, dict
         """
-        df = self.co2_trend if deseasonalize else self.co2_seasonal
 
-        flag = 0
         years_extrap = 0
         day = 1
         fillval = np.nan
         target_date = pd.Timestamp(year, month, day)
+
         if limit_extrapolation_to is None:
-            # 100 years in the future should be sufficiently far as to be effectively no limit
-            limit_extrapolation_to = pd.Timestamp.now() + relativedelta(years=100)
-        llimit = df.index.min()
+            # 100 years should be sufficiently far as to be effectively no limit
+            limit_extrapolation_to = relativedelta(years=100)
 
-        if llimit < target_date <= limit_extrapolation_to:
+        first_available_date = df.index.min()
+        last_available_date = df.index.max()
+        first_allowed_date = first_available_date - limit_extrapolation_to
+        last_allowed_date = last_available_date + limit_extrapolation_to
 
-            if (target_date > llimit) & (target_date < df.index[-1]):
-
-                flag = 0
-                #print('Reading data from file...')
-                # As of pandas version 0.24.1, df.co2_mean[target_date] was ~10x faster than
-                # df.loc[target_date]['co2_mean']
-                val = df.co2_mean[target_date]
-
-            else:
-                flag = 1
-                nyear = 5
-                #print('Date outside available time period... extrapolating!')
-
-                # Need to find the most recent year that we have data for this month
-                last_available_date = max(df.index)
-                latest_date = target_date
-                while latest_date > last_available_date:
-                    latest_date -= relativedelta(years=1)
-                    years_extrap += 1
-
-                # TODO: ask Matt to revalidate this
-                # Get the most recent nyears CO2 concentrations for this month in the record. Set the initial CO2 value
-                # to the last of those.
-                prev_year = [y for y in range(years_extrap, nyear + years_extrap)]
-                prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
-                prev_co2 = df[df.index.isin(prev_date)]['co2_mean'].values
-
-                val = df.loc[latest_date]['co2_mean']
-                for start_yr in range(years_extrap):
-                    # For each year we need to extrapolate, calculate the growth rate as the average of the growth
-                    # rate over five years. This should help smooth out any El Nino effects, which would tend to
-                    # cause unusual growth rates.
-                    growth = np.diff(prev_co2).mean()
-                    val += growth
-
-                    # Now that we have the extrapolated value, update the last 5 CO2 values to include it and remove
-                    # the earliest one so that we have update CO2 values for the next time through the loop.
-                    prev_co2 = np.append(prev_co2, val)
-                    prev_co2 = np.delete(prev_co2, 0)
-
-        elif target_date < df.index[0]:
-
+        if target_date < first_allowed_date or target_date > last_allowed_date:
             flag = 2
-            #print('No data available before {}! Setting fill value...'.format(df.index[0]))
             val = fillval
+        elif (target_date >= first_available_date) & (target_date <= last_available_date):
 
-        elif target_date > limit_extrapolation_to:
-
-            flag = 3
-            #print('Data too far in the future. Setting fill value...')
-            val = fillval
+            flag = 0
+            #print('Reading data from file...')
+            # As of pandas version 0.24.1, df.dmf_mean[target_date] was ~10x faster than
+            # df.loc[target_date]['dmf_mean']
+            val = df.dmf_mean[target_date]
 
         else:
+            if target_date < first_available_date:
+                sign = -1
+            else:
+                sign = 1
+            flag = 1
+            nyear = 5 * sign
+            #print('Date outside available time period... extrapolating!')
 
-            flag = 4
-            #print('Error!')
-            val = fillval
+            # Need to find the most recent year that we have data for this month
+
+            latest_date = target_date
+            while latest_date > last_available_date or latest_date < first_available_date:
+                latest_date -= relativedelta(years=1*sign)
+                years_extrap += 1*sign
+
+            # Get the most nearest nyears CO2 concentrations for this month in the record. Set the initial CO2 value
+            # to the last of those.
+            prev_year = [y for y in range(nyear + years_extrap, years_extrap, -sign)]
+
+            # If extrapolating backwards in time, we want the years in order from latest to earliest. That way when
+            # we recursively extrapolate, we can still drop the first CO2 in the array and append to the end when
+            # calculating the growth rate. That way we don't have to have a separate branch in the last for loop for
+            # extrapolating backwards
+            #if sign < 0:
+            #    prev_year.reverse()
+
+            prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
+            prev_co2 = df.loc[prev_date, 'dmf_mean'].values
+
+            val = df.loc[latest_date]['dmf_mean']
+            for start_yr in range(0, years_extrap, sign):
+                # For each year we need to extrapolate, calculate the growth rate as the average of the growth
+                # rate over five years. This should help smooth out any El Nino effects, which would tend to
+                # cause unusual growth rates.
+                growth = np.diff(prev_co2).mean()
+                val += growth
+
+                # Now that we have the extrapolated value, update the last 5 CO2 values to include it and remove
+                # the earliest one so that we have update CO2 values for the next time through the loop.
+                prev_co2 = np.append(prev_co2, val)
+                prev_co2 = np.delete(prev_co2, 0)
 
         return val, {'flag': flag, 'latency': years_extrap}
+
+    @classmethod
+    def _calc_age_spec_co2(cls, df, lag=relativedelta(months=2), requested_dates=None):
+        def index_to_dec_year(dframe):
+            return [mod_utils.date_to_decimal_year(d) for d in dframe.index]
+
+        def dec_year_to_dtindex(dec_yr, force_first_of_month=False):
+            date_times = mod_utils.decimal_year_to_date(dec_yr)
+            if force_first_of_month:
+                # Get the start of the month on either side of this date. Figure out which one is closer, and set it to
+                # that.
+                for i, dtime in enumerate(date_times):
+                    som = mod_utils.start_of_month(dtime, out_type=dt.datetime)
+                    nearby_months = np.array([som, som+relativedelta(months=1)])
+                    i_time = np.argmin(np.abs(nearby_months - dtime))
+                    date_times[i] = nearby_months[i_time]
+
+            return pd.DatetimeIndex(date_times)
+
+        co2 = dict()
+
+        # Apply the requested lag by adding it to the dates that make up the index of the input data frame. Adding it
+        # means that, e.g. 2018-03-01 will actually point to data from 2018-01-01, which is what we want. We're lagging
+        # the data because the stratospheric boundary condition should account for the fact that it takes time for air
+        # to get from the tropical surface (where MLO/SMO measure) and into the stratosphere.
+        lagged_index = pd.DatetimeIndex(d + lag for d in df.index)
+        df_lagged = df.set_index(lagged_index)
+
+        # We'll need both the date as decimal years and timestamps for different parts of this code, so make those
+        # additional columns in the data frame. We'll switch between them for the index as needed
+        df_lagged = df_lagged.assign(timestamp=df_lagged.index, dec_year=index_to_dec_year)
+
+        # By default, we'll assume that we want the output to be on the same dates as the input. With the lag that will
+        # mean that some extra points near the beginning are NaNs, but that is expected and okay. We're more limited by
+        # how far back in time the
+        out_dates = df.index if requested_dates is None else requested_dates
+
+        for region in cls.age_spec_regions:
+            time, delt, age, spectra = cls._load_age_spectrum_data(region, normalize_spectra=True)
+
+            # Add a zero age to the beginning of age
+            age = np.concatenate([[0], age.to_numpy().squeeze()])
+            out_df = pd.DataFrame(index=out_dates, columns=age)
+            # Put the lagged record, without any age spectrum applied, as the zero age data
+            out_df.iloc[:, 0] = df_lagged['dmf_mean']
+
+            for i in range(spectra.shape[0]):
+                # The first step is to put the trace gas record on the same time resolution as the age spectra. This is
+                # necessary for the convolution to work. Note that the age spectra aren't assigned to any specific date,
+                # we just need the adjacent points in the age spectra and gas record to have the same spacing in time.
+                max_dec_year = mod_utils.date_to_decimal_year(df_lagged.index.max())
+                # 1950 is the year Arlyn Andrews used in her code. That will cause some NaNs at the beginning of the
+                # record before our gas records start, but that's fine.
+                new_index = np.arange(1950.0, max_dec_year, delt)
+                # To handle the reindexing properly, we need to keep the original indices in until we handle the
+                # interpolation to the new values. For this part we need to use the decimal years as the index
+                tmp_index = np.unique(np.concatenate([df_lagged['dec_year'], new_index]))
+                df_asi = df_lagged.set_index('dec_year', drop=False).reindex(tmp_index).interpolate(method='index').reindex(new_index)
+
+                # Now we can do the convolution. Note: in Arlyn's original R code, she had to flip the age spectrum to
+                # act as the convolution kernel, but testing showed that in order to get the same answer using numpy's
+                # convolution function we had to leave the spectrum unflipped.
+                conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(), spectra.iloc[i, :].values, mode='valid')
+                conv_dates = new_index[(spectra.shape[1] - 1):]
+                conv_dates = dec_year_to_dtindex(conv_dates, force_first_of_month=False)
+                # Finally we put the age-convolved gas concentration back onto the dates of the input dataframe, unless
+                # alternate dates were specified.
+                conv_df = pd.DataFrame(conv_result, index=conv_dates)
+                tmp_index = np.unique(np.concatenate([out_dates, conv_dates]))
+                this_out_df = conv_df.reindex(tmp_index).interpolate(method='index').reindex(out_dates)
+
+                # And store this result in the output data frame, remembering that we added an extra row at the
+                # beginning for zero age air
+                out_df.iloc[:, i+1] = this_out_df.reindex(out_df.index).values
+
+            co2[region] = out_df
+
+        return co2
+
+    def get_strat_co2(self, date, ages, eqlat, as_dataframe=False):
+        """
+        Get stratospheric CO2 for a given profile
+
+        :param date: the UTC date of the observation
+        :type date: datetime-like
+
+        :param ages: the age or ages of air (in years) to get CO2 for. Must be the same shape as ``eqlat``.
+        :type ages: float or :class:`numpy.ndarray`
+
+        :param eqlat: the equivalent latitude or eq. lat profile to get CO2 for. Must be the same shape as ``ages``.
+        :type eqlat: float or :class:`numpy.ndarray`
+
+        :param as_dataframe: if ``True``, the gas concentration will be returned as a data frame. If ``False``, it will
+         be returned as an array if ``ages`` and ``eqlat`` were arrays or a float if they were floats.
+        :type as_dataframe: bool
+
+        :return: the gas concentration as a data frame, numpy array, or scalar, depending on ``as_dataframe`` and the
+         input types.
+        :rtype: float, :class:`numpy.ndarray`, or :class:`pandas.DataFrame`
+        """
+
+        if isinstance(ages, float):
+            return_scalar = True
+            # make sure that we get a 1D array when we turn this into a numpy array
+            ages = [ages]
+        else:
+            return_scalar = False
+
+        if isinstance(eqlat, float):
+            eqlat = [eqlat]
+
+        ages = np.array(ages)
+        eqlat = np.array(eqlat)
+
+        if ages.shape != eqlat.shape:
+            raise ValueError('Both ages and eqlat must be the same shape')
+        elif ages.ndim != 1 or eqlat.ndim != 1:
+            raise ValueError('Both ages and eqlat expected to be 1D arrays, if given as arrays')
+
+        # Get the CO2 for the given ages and equivalent latitudes for each region (tropics, midlat, and vortex). We'll
+        # stitch them together after.
+        co2_by_region = dict()
+
+        # For each region, interpolate to the date and ages we need by creating a new data frame that has just the
+        # entries for the months bracketing the obs date plus the actual obs date and obs ages.
+        prev_month = mod_utils.start_of_month(date, pd.Timestamp)
+        next_month = prev_month + relativedelta(months=1)
+        date_timestamp = pd.Timestamp(date)
+        df_dates = pd.unique(pd.DatetimeIndex([prev_month, date_timestamp, next_month]))
+        ages_index = pd.Float64Index(ages)
+
+        import pdb; pdb.set_trace()
+
+        for region in self.age_spec_regions:
+            df_ages = np.unique(np.concatenate([self.strat_co2[region].columns, ages_index]))
+            region_df = self.strat_co2[region].reindex(df_dates, axis=0).reindex(df_ages, axis=1)
+
+            # Interpolate to fill in the ages first, then the date. Do it this way because if an age has no data in
+            # the surrounding months, we can't interpolate to the desired date
+            region_df.interpolate(method='index', axis=0, limit_area='inside', inplace=True)
+            region_df.interpolate(method='index', axis=1, limit_area='inside', inplace=True)
+
+            region_df = region_df.reindex(pd.DatetimeIndex([date_timestamp]), axis=0).reindex(ages_index, axis=1)
+            co2_by_region[region] = region_df.T  # transpose to put the ages as the index - makes more sense now that there's only one date
+
+        co2 = co2_by_region['midlat']
+        xx_tropics = np.abs(eqlat) < 20.0
+        doy = mod_utils.day_of_year(date)
+        if 140 < doy < 245:
+            xx_vortex = (eqlat < -55.0) & (ages > 3.25)
+        elif doy > 275 or doy < 60:
+            xx_vortex = (eqlat > 55.0) & (ages > 3.25)
+        else:
+            xx_vortex = np.zeros_like(xx_tropics)
+
+        co2[xx_tropics] = co2_by_region['tropics'][xx_tropics]
+        co2[xx_vortex] = co2_by_region['vortex'][xx_vortex]
+
+        if as_dataframe:
+            return co2
+        elif not return_scalar:
+            return co2.to_numpy().squeeze()
+        else:
+            return co2.to_numpy().item()
 
     def get_co2_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
         """
@@ -306,9 +562,9 @@ class CO2TropicsRecord(object):
         # First get just monthly data. freq='MS' gives us monthly data at the start of the month. Use the existing logic
         # to extrapolate the record for a given month if needed.
         monthly_idx = pd.date_range(start_date_subset, end_date_subset, freq='MS')
-        monthly_df = pd.DataFrame(index=monthly_idx, columns=['co2_mean', 'latency'], dtype=np.float)
+        monthly_df = pd.DataFrame(index=monthly_idx, columns=['dmf_mean', 'latency'], dtype=np.float)
         for timestamp in monthly_df.index:
-            monthly_df.co2_mean[timestamp], info_dict = self.get_co2_by_month(timestamp.year, timestamp.month, deseasonalize=deseasonalize)
+            monthly_df.dmf_mean[timestamp], info_dict = self.get_co2_by_month(timestamp.year, timestamp.month, deseasonalize=deseasonalize)
             monthly_df.latency[timestamp] = info_dict['latency']
 
         # Now we resample to the dates requested, making sure to keep the values at the start of each month on either
@@ -320,7 +576,7 @@ class CO2TropicsRecord(object):
         df_resampled = monthly_df.reindex(sample_date_idx)
 
         # Verify we have non-NaN values for all monthly reference points
-        if df_resampled['co2_mean'][monthly_idx].isna().any():
+        if df_resampled['dmf_mean'][monthly_idx].isna().any():
             raise RuntimeError('Failed to resample CO2 for date range {} to {}; first and/or last point is NA'
                                .format(start_date_subset, end_date_subset))
 
@@ -331,7 +587,7 @@ class CO2TropicsRecord(object):
         if as_dataframe:
             return df_resampled
         else:
-            return df_resampled['co2_mean'].values
+            return df_resampled['dmf_mean'].values
 
     def avg_co2_in_date_range(self, start_date, end_date, deseasonalize=False):
         """
@@ -360,7 +616,7 @@ class CO2TropicsRecord(object):
         avg_idx = pd.date_range(start=start_date, end=end_date, freq=resolution)
         df_resampled = self.get_co2_for_dates(avg_idx, deseasonalize=deseasonalize, as_dataframe=True)
 
-        mean_co2 = df_resampled['co2_mean'][avg_idx].mean()
+        mean_co2 = df_resampled['dmf_mean'][avg_idx].mean()
         latency = dict()
         latency['mean'] = df_resampled['latency'][avg_idx].mean()
         latency['min'] = df_resampled['latency'][avg_idx].min()
@@ -727,7 +983,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
     prof_world_flag[xx_trop] = const.trop_flag
 
     co2_df = co2_record.get_co2_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
-    prof_co2[xx_trop] = co2_df['co2_mean'].values
+    prof_co2[xx_trop] = co2_df['dmf_mean'].values
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop, :] = co2_df['latency'].values.reshape(-1, 1)
     # Record the date that the CO2 was taken from as a year with a fraction
