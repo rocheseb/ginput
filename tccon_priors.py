@@ -317,7 +317,6 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
 
         else:
             if target_date < first_available_date:
-                import pdb; pdb.set_trace()
                 sign = -1
             else:
                 sign = 1
@@ -1349,8 +1348,8 @@ def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None,
     shared_info = {'ntimes': ntimes, 'nlev': nlev, 'nlat': nlat, 'nlon': nlon, 'geos_prof_data': geos_prof_data,
                    'geos_surf_data': geos_surf_data, 'geos_dates': geos_dates, 'prior_kwargs': prior_kwargs}
 
-    #flat_indices = np.arange(n_columns)
-    flat_indices = np.arange(0, n_columns, 5000)
+    flat_indices = np.arange(n_columns)
+
     if run_parallel:
         # Parallelization heavily inspired by https://stackoverflow.com/a/7908612
         def par_init(shared_info_dict_):
