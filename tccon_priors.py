@@ -98,10 +98,6 @@ def _init_prof(profs, n_lev, n_profs=0):
 
 
 class TraceGasTropicsRecord(object):
-    pass
-
-
-class CO2TropicsRecord(TraceGasTropicsRecord):
     """
     This class stores the Mauna Loa/Samoa average CO2 record and provides methods to sample it.
 
@@ -127,15 +123,13 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
             # troposphere should be about 6 months at most, but we need to allow some room for the rolling average to
             # get the trend.
             last_date = dt.datetime.today() + relativedelta(years=2)
-        self.co2_seasonal = self.get_mlo_smo_mean(first_date, last_date)
+        self.conc_seasonal = self.get_mlo_smo_mean(first_date, last_date)
 
         # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
         # leave the latency
-        self.co2_trend = self.co2_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
+        self.conc_trend = self.conc_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
 
-        self.strat_co2 = self._calc_age_spec_co2(self.co2_seasonal)
-        # TODO: add the convolution, probably need to apply the 2 month lag here so that the convolution is operating
-        #  over the right ages.
+        self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal)
 
     @classmethod
     def _get_agespec_files(cls, region):
@@ -176,9 +170,9 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         return time, delt, age, spectra
 
     @classmethod
-    def read_insitu_co2(cls, fpath, fname):
+    def read_insitu_gas(cls, fpath, fname):
         """
-        Read a CO2 record file. Assumes that the file is of monthly average CO2.
+        Read a trace gas record file. Assumes that the file is of monthly average concentrations.
 
         :param fpath: the path to the directory containing the file.
         :type fpath: str
@@ -186,7 +180,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         :param fname: the name of the file
         :type fname: str
 
-        :return: a data frame containing the monthly CO2 data along with the site, year, month, and day. The index will
+        :return: a data frame containing the monthly trace gas data along with the site, year, month, and day. The index will
          be a timestamp of the measurment time.
         :rtype: :class:`pandas.DataFrame`
         """
@@ -206,17 +200,17 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     @classmethod
     def get_mlo_smo_mean(cls, first_date, last_date):
         """
-        Generate the Mauna Loa/Samoa mean CO2 record from the files stored in this repository.
+        Generate the Mauna Loa/Samoa mean trace gas record from the files stored in this repository.
 
         Reads in the :file:`data/ML_monthly_obs.txt` and :file:`data/SMO_monthly_obs.txt` files included in this
         repository, averages them, and fills in any missing months by interpolation.
 
-        :return: the data frame containing the mean CO2 ('dmf_mean') and a flag ('interp_flag') set to 1 for any months
-         that had to be interpolated. Index by timestamp.
+        :return: the data frame containing the mean trace gas concentration ('dmf_mean') and a flag ('interp_flag') set
+         to 1 for any months that had to be interpolated. Index by timestamp.
         :rtype: :class:`pandas.DataFrame`
         """
-        df_mlo = cls.read_insitu_co2(_data_dir, 'ML_monthly_obs.txt')
-        df_smo = cls.read_insitu_co2(_data_dir, 'SMO_monthly_obs.txt')
+        df_mlo = cls.read_insitu_gas(_data_dir, 'ML_monthly_obs.txt')
+        df_smo = cls.read_insitu_gas(_data_dir, 'SMO_monthly_obs.txt')
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
         df_combined['dmf_mean'] = df_combined['co2'].mean(axis=1)
         df_combined.drop(['site', 'co2', 'year', 'month', 'day'], axis=1, inplace=True)
@@ -253,17 +247,15 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         ex_inds = extrapolated.to_numpy().nonzero()[0]
         for i in ex_inds:
             timestamp = df_combined.index[i]
-            df_combined.loc[timestamp, 'dmf_mean'], quality_dict = cls._calc_monthly_co2_(df_combined[~extrapolated], timestamp.year, timestamp.month)
+            df_combined.loc[timestamp, 'dmf_mean'], quality_dict = cls._calc_monthly_gas(df_combined[~extrapolated], timestamp.year, timestamp.month)
             df_combined.loc[timestamp, 'latency'] = quality_dict['latency']
 
         return df_combined
 
-    # TODO: replace get_co2_by_month
-    #
     @staticmethod
-    def _calc_monthly_co2_(df, year, month, limit_extrapolation_to=None):
+    def _calc_monthly_gas(df, year, month, limit_extrapolation_to=None):
         """
-        Get CO2 for a specific month, extrapolating if necessary.
+        Get gas concentration for a specific month, extrapolating if necessary.
 
         :param year: what year to query
         :type year: int
@@ -271,15 +263,15 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         :param month: what month to query
         :type year: int
 
-        :param deseasonalize: set to ``True`` to use the CO2 record with the seasonal record smoothed out. Default is
-         ``False``, which keeps the seasonal record.
+        :param deseasonalize: set to ``True`` to use the concentration record with the seasonal record smoothed out.
+         Default is ``False``, which keeps the seasonal record.
         :type deseasonalize: bool
 
         :param limit_extrapolation_to: a date beyond which not to extrapolate
         :type limit_extrapolation_to: a datetime-like object
 
-        :return: the CO2 value for this month, and a dictionary with keys "flag" and "latency". "latency" will be the
-         number of years that the CO2 value had to be extrapolated. Flag will be one of:
+        :return: the concentration value for this month, and a dictionary with keys "flag" and "latency". "latency" will
+         be the number of years that the concentration value had to be extrapolated. Flag will be one of:
 
          * 0 = data read directly from record
          * 1 = data had to be extrapolated
@@ -331,37 +323,31 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
                 latest_date -= relativedelta(years=1*sign)
                 years_extrap += 1*sign
 
-            # Get the most nearest nyears CO2 concentrations for this month in the record. Set the initial CO2 value
+            # Get the most nearest nyears concentrations for this month in the record. Set the initial value
             # to the last of those.
             prev_year = [y for y in reversed(range(years_extrap, nyear + years_extrap, sign))]
 
-            # If extrapolating backwards in time, we want the years in order from latest to earliest. That way when
-            # we recursively extrapolate, we can still drop the first CO2 in the array and append to the end when
-            # calculating the growth rate. That way we don't have to have a separate branch in the last for loop for
-            # extrapolating backwards
-            #if sign < 0:
-            #    prev_year.reverse()
-
             prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
-            prev_co2 = df.loc[prev_date, 'dmf_mean'].values
+            prev_gas = df.loc[prev_date, 'dmf_mean'].values
 
             val = df.loc[latest_date]['dmf_mean']
             for start_yr in range(0, years_extrap, sign):
                 # For each year we need to extrapolate, calculate the growth rate as the average of the growth
                 # rate over five years. This should help smooth out any El Nino effects, which would tend to
                 # cause unusual growth rates.
-                growth = np.diff(prev_co2).mean()
+                growth = np.diff(prev_gas).mean()
                 val += growth
 
-                # Now that we have the extrapolated value, update the last 5 CO2 values to include it and remove
-                # the earliest one so that we have update CO2 values for the next time through the loop.
-                prev_co2 = np.append(prev_co2, val)
-                prev_co2 = np.delete(prev_co2, 0)
+                # Now that we have the extrapolated value, update the last 5 concentration values to include it and
+                # remove the earliest one so that we have updated concentration values for the next time through the
+                # loop.
+                prev_gas = np.append(prev_gas, val)
+                prev_gas = np.delete(prev_gas, 0)
 
         return val, {'flag': flag, 'latency': years_extrap}
 
     @classmethod
-    def _calc_age_spec_co2(cls, df, lag=relativedelta(months=2), requested_dates=None):
+    def _calc_age_spec_gas(cls, df, lag=relativedelta(months=2), requested_dates=None):
         def index_to_dec_year(dframe):
             return [mod_utils.date_to_decimal_year(d) for d in dframe.index]
 
@@ -378,7 +364,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
 
             return pd.DatetimeIndex(date_times)
 
-        co2 = dict()
+        gas_conc = dict()
 
         # Apply the requested lag by adding it to the dates that make up the index of the input data frame. Adding it
         # means that, e.g. 2018-03-01 will actually point to data from 2018-01-01, which is what we want. We're lagging
@@ -434,21 +420,22 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
                 # beginning for zero age air
                 out_df.iloc[:, i+1] = this_out_df.reindex(out_df.index).values
 
-            co2[region] = out_df
+            gas_conc[region] = out_df
 
-        return co2
+        return gas_conc
 
-    def get_strat_co2(self, date, ages, eqlat, as_dataframe=False):
+    def get_strat_gas(self, date, ages, eqlat, as_dataframe=False):
         """
-        Get stratospheric CO2 for a given profile
+        Get stratospheric gas concentration for a given profile
 
         :param date: the UTC date of the observation
         :type date: datetime-like
 
-        :param ages: the age or ages of air (in years) to get CO2 for. Must be the same shape as ``eqlat``.
+        :param ages: the age or ages of air (in years) to get concentration for. Must be the same shape as ``eqlat``.
         :type ages: float or :class:`numpy.ndarray`
 
-        :param eqlat: the equivalent latitude or eq. lat profile to get CO2 for. Must be the same shape as ``ages``.
+        :param eqlat: the equivalent latitude or eq. lat profile to get concentration for. Must be the same shape as
+         ``ages``.
         :type eqlat: float or :class:`numpy.ndarray`
 
         :param as_dataframe: if ``True``, the gas concentration will be returned as a data frame. If ``False``, it will
@@ -478,9 +465,9 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         elif ages.ndim != 1 or eqlat.ndim != 1:
             raise ValueError('Both ages and eqlat expected to be 1D arrays, if given as arrays')
 
-        # Get the CO2 for the given ages and equivalent latitudes for each region (tropics, midlat, and vortex). We'll
-        # stitch them together after.
-        co2_by_region = dict()
+        # Get the concentrations for the given ages and equivalent latitudes for each region (tropics, midlat, and
+        # vortex). We'll stitch them together after.
+        gas_by_region = dict()
 
         # For each region, interpolate to the date and ages we need by creating a new data frame that has just the
         # entries for the months bracketing the obs date plus the actual obs date and obs ages.
@@ -491,8 +478,8 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         ages_index = pd.Float64Index(ages)
 
         for region in self.age_spec_regions:
-            df_ages = np.unique(np.concatenate([self.strat_co2[region].columns, ages_index]))
-            region_df = self.strat_co2[region].reindex(df_dates, axis=0).reindex(df_ages, axis=1)
+            df_ages = np.unique(np.concatenate([self.conc_strat[region].columns, ages_index]))
+            region_df = self.conc_strat[region].reindex(df_dates, axis=0).reindex(df_ages, axis=1)
 
             # Interpolate to fill in the ages first, then the date. Do it this way because if an age has no data in
             # the surrounding months, we can't interpolate to the desired date
@@ -500,9 +487,9 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
             region_df.interpolate(method='index', axis=1, limit_area='inside', inplace=True)
 
             region_df = region_df.reindex(pd.DatetimeIndex([date_timestamp]), axis=0).reindex(ages_index, axis=1)
-            co2_by_region[region] = region_df.T  # transpose to put the ages as the index - makes more sense now that there's only one date
+            gas_by_region[region] = region_df.T  # transpose to put the ages as the index - makes more sense now that there's only one date
 
-        co2 = co2_by_region['midlat']
+        gas_conc = gas_by_region['midlat']
         xx_tropics = np.abs(eqlat) < 20.0
         doy = mod_utils.day_of_year(date)
         if 140 < doy < 245:
@@ -512,34 +499,37 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         else:
             xx_vortex = np.zeros_like(xx_tropics)
 
-        co2[xx_tropics] = co2_by_region['tropics'][xx_tropics]
-        co2[xx_vortex] = co2_by_region['vortex'][xx_vortex]
+        gas_conc[xx_tropics] = gas_by_region['tropics'][xx_tropics]
+        gas_conc[xx_vortex] = gas_by_region['vortex'][xx_vortex]
 
         if as_dataframe:
-            return co2, None
+            return gas_conc, None
         elif not return_scalar:
-            return co2.to_numpy().squeeze(), None
+            return gas_conc.to_numpy().squeeze(), None
         else:
-            return co2.to_numpy().item(), None
+            return gas_conc.to_numpy().item(), None
 
-    def get_co2_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
+    def get_gas_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
         """
-        Get CO2 for one or more dates.
+        Get trace gas concentrations for one or more dates.
 
-        This method will lookup CO2 for a specific date, interpolating between the monthly values as necessary.
+        This method will lookup concentrations for a specific date or dates, interpolating between the monthly values as
+        necessary.
 
-        :param dates: the date or dates to get CO2 for. If giving a single date, it may be any time that can be
-         converted to a Pandas :class:`~pandas.Timestamp`. If giving a series of dates, it must be a
+        :param dates: the date or dates to get concentrations for. If giving a single date, it may be any time that can
+         be converted to a Pandas :class:`~pandas.Timestamp`. If giving a series of dates, it must be a
          :class:`pandas.DatetimeIndex`.
 
-        :param deseasonalize: whether to draw CO2 data from the trend only (``True``) or the seasonal cycle (``False``).
+        :param deseasonalize: whether to draw concentrations data from the trend only (``True``) or the seasonal cycle
+         (``False``).
         :type deseasonalize: bool
 
-        :param as_dataframe: whether to return the CO2 data as a dataframe (``True``) or numpy array (``False``)
+        :param as_dataframe: whether to return the concentrations data as a dataframe (``True``) or numpy array
+         (``False``)
         :type as_dataframe: bool
 
-        :return: the CO2 data for the requested date(s), as a numpy vector or data frame. The data frame will also
-         include the latency (how many years the CO2 had to be extrapolated).
+        :return: the concentration data for the requested date(s), as a numpy vector or data frame. The data frame will
+         also include the latency (how many years the concentrations had to be extrapolated).
         """
         # Make inputs consistent: we expect dates to be a Pandas DatetimeIndex, but it may be a single timestamp or
         # datetime. For now, we will not allow collections of datetimes, such inputs must be converted to DatetimeIndex
@@ -565,7 +555,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         monthly_idx = pd.date_range(start_date_subset, end_date_subset, freq='MS')
         monthly_df = pd.DataFrame(index=monthly_idx, columns=['dmf_mean', 'latency'], dtype=np.float)
         for timestamp in monthly_df.index:
-            monthly_df.dmf_mean[timestamp], info_dict = self.get_co2_by_month(timestamp.year, timestamp.month, deseasonalize=deseasonalize)
+            monthly_df.dmf_mean[timestamp], info_dict = self.get_gas_by_month(timestamp.year, timestamp.month, deseasonalize=deseasonalize)
             monthly_df.latency[timestamp] = info_dict['latency']
 
         # Now we resample to the dates requested, making sure to keep the values at the start of each month on either
@@ -578,7 +568,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
 
         # Verify we have non-NaN values for all monthly reference points
         if df_resampled['dmf_mean'][monthly_idx].isna().any():
-            raise RuntimeError('Failed to resample CO2 for date range {} to {}; first and/or last point is NA'
+            raise RuntimeError('Failed to resample concentrations for date range {} to {}; first and/or last point is NA'
                                .format(start_date_subset, end_date_subset))
 
         df_resampled.interpolate(method='index', inplace=True)
@@ -590,7 +580,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         else:
             return df_resampled['dmf_mean'].values
 
-    def avg_co2_in_date_range(self, start_date, end_date, deseasonalize=False):
+    def avg_gas_in_date_range(self, start_date, end_date, deseasonalize=False):
         """
         Average the MLO/SMO record between the given dates
 
@@ -600,11 +590,12 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         :param end_date: the last date in the averaging period
         :type end_date: datetime-like object
 
-        :param deseasonalize: whether to draw CO2 data from the trend only (``True``) or the seasonal cycle (``False``).
+        :param deseasonalize: whether to draw concentration data from the trend only (``True``) or the seasonal cycle
+         (``False``).
         :type deseasonalize: bool
 
-        :return: the average CO2 and a dictionary specifying the mean, minimum, and maximum latency (number of years the
-         CO2 had to be extrapolated)
+        :return: the average concentration and a dictionary specifying the mean, minimum, and maximum latency
+         (number of years the concentrations had to be extrapolated)
         :rtype: float, dict
         """
         if not isinstance(start_date, dt.date) or not isinstance(end_date, dt.date):
@@ -615,46 +606,70 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
         resolution = dt.timedelta(days=1)
 
         avg_idx = pd.date_range(start=start_date, end=end_date, freq=resolution)
-        df_resampled = self.get_co2_for_dates(avg_idx, deseasonalize=deseasonalize, as_dataframe=True)
+        df_resampled = self.get_gas_for_dates(avg_idx, deseasonalize=deseasonalize, as_dataframe=True)
 
-        mean_co2 = df_resampled['dmf_mean'][avg_idx].mean()
+        mean_gas_conc = df_resampled['dmf_mean'][avg_idx].mean()
         latency = dict()
         latency['mean'] = df_resampled['latency'][avg_idx].mean()
         latency['min'] = df_resampled['latency'][avg_idx].min()
         latency['max'] = df_resampled['latency'][avg_idx].max()
-        return mean_co2, latency
+        return mean_gas_conc, latency
 
-    def get_co2_by_age(self, ref_date, age, deseasonalize=False, as_dataframe=False):
+    def get_gas_by_age(self, ref_date, age, deseasonalize=False, as_dataframe=False):
         """
-        Get CO2 for one or more times by specifying a reference date and age.
+        Get concentrations for one or more times by specifying a reference date and age.
 
-        This called :meth:`get_co2_for_dates` internally, so the CO2 is interpolated to the specific day just as that
-        method does.
+        This called :meth:`get_gas_for_dates` internally, so the concentration is interpolated to the specific day just
+        as that method does.
 
         :param ref_date: the date that the ages are relative to.
         :type ref_date: datetime-like object.
 
-        :param age: the number of years before the reference date to get CO2 from. May be a non-whole number.
+        :param age: the number of years before the reference date to get the concentration from. May be a non-whole
+         number.
         :type age: float or sequence of floats
 
-        :param deseasonalize: whether to draw CO2 data from the trend only (``True``) or the seasonal cycle (``False``).
+        :param deseasonalize: whether to draw concentration data from the trend only (``True``) or the seasonal cycle
+         (``False``).
         :type deseasonalize: bool
 
-        :param as_dataframe: whether to return the CO2 data as a dataframe (``True``) or numpy array (``False``)
+        :param as_dataframe: whether to return the concentration data as a dataframe (``True``) or numpy array
+         (``False``)
         :type as_dataframe: bool
 
-        :return: the CO2 data for the requested date(s), as a numpy vector or data frame. The data frame will also
-         include the latency (how many years the CO2 had to be extrapolated).
+        :return: the concentration data for the requested date(s), as a numpy vector or data frame. The data frame will
+         also include the latency (how many years the concentrations had to be extrapolated).
         """
-        co2_dates = [ref_date - dt.timedelta(days=a*365.25) for a in age]
-        return self.get_co2_for_dates(pd.DatetimeIndex(co2_dates), deseasonalize=deseasonalize,
+        gas_dates = [ref_date - dt.timedelta(days=a*365.25) for a in age]
+        return self.get_gas_for_dates(pd.DatetimeIndex(gas_dates), deseasonalize=deseasonalize,
                                       as_dataframe=as_dataframe)
 
-    def get_co2_by_month(self, year, month, deseasonalize=False):
-        df = self.co2_trend if deseasonalize else self.co2_seasonal
+    def get_gas_by_month(self, year, month, deseasonalize=False):
+        """
+        Get the trace gas concentration for a specific month
+
+        :param year: the date's year
+        :type year: int
+
+        :param month: the date's month
+        :type month: int
+
+        :param deseasonalize: whether to draw concentration data from the trend only (``True``) or the seasonal cycle
+         (``False``).
+        :type deseasonalize: bool
+
+        :return: the gas concentration and a dictionary with additional information (e.g. the latency, that is, how far
+         the concentrations had to be extrapolated).
+        :rtype: float, dict
+        """
+        df = self.conc_trend if deseasonalize else self.conc_seasonal
         ts = pd.Timestamp(year, month, 1)
         info_dict = {'latency': df.latency[ts]}
         return df.dmf_mean[ts], info_dict
+
+
+class CO2TropicsRecord(TraceGasTropicsRecord):
+    pass
 
 
 def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
@@ -1014,7 +1029,7 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_obs, z_trop, co2_r
     prof_aoa[xx_trop] = air_age
     prof_world_flag[xx_trop] = const.trop_flag
 
-    co2_df = co2_record.get_co2_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
+    co2_df = co2_record.get_gas_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
     prof_co2[xx_trop] = co2_df['dmf_mean'].values
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop, :] = co2_df['latency'].values.reshape(-1, 1)
@@ -1094,7 +1109,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     # record specifically designed for stratospheric CO2 that already incorporates the two month lag and the age
     # spectra.
 
-    prof_co2[xx_overworld], _ = co2_record.get_strat_co2(retrieval_date, age_of_air_years[xx_overworld], prof_eqlat[xx_overworld])
+    prof_co2[xx_overworld], _ = co2_record.get_strat_gas(retrieval_date, age_of_air_years[xx_overworld], prof_eqlat[xx_overworld])
     # TODO: decide how to calculate the latency for the CO2 profiles now that age spectra are used. Options:
     #   1. Convolve the latency as well
     #   2. Give the latency just for the retrieval date (possible with the two-month lag)
@@ -1105,7 +1120,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     # space between that and the first > 380 level.
     ow1 = np.argwhere(xx_overworld)[0]
     # TODO: replace this co2_lag with one on the record for consistency. Also decide if we should actually use a lag here
-    co2_entry_conc = co2_record.get_co2_for_dates(retrieval_date - co2_lag)
+    co2_entry_conc = co2_record.get_gas_for_dates(retrieval_date - co2_lag)
 
     co2_endpoints = np.array([co2_entry_conc.item(), prof_co2[ow1].item()])
     theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
