@@ -572,7 +572,7 @@ def _format_geosfp_name(product, file_type, date_time):
 
     :param file_type: which file type ('Np' for profiles, 'Nx' for surface) to use
 
-    :param date_time: the date and time of the desire file. The hour should be a multiple of 3.
+    :param date_time: the date and time of the desired file. The hour should be a multiple of 3.
     :type date_time: datetime-like
 
     :return: the file name
@@ -1059,6 +1059,10 @@ def date_to_decimal_year(date_in):
     return date_in.year + date_to_frac_year(date_in)
 
 
+def day_of_year(date_in):
+    return float(date_in.strftime('%j')) - 1
+
+
 def date_to_frac_year(date_in):
     """
     Convert a datetime object to a fraction of a year.
@@ -1075,8 +1079,7 @@ def date_to_frac_year(date_in):
     :return: the fractional year
     :rtype: float
     """
-    doy = float(date_in.strftime('%j')) - 1
-    return doy / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
+    return day_of_year(date_in) / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
 
 
 def frac_year_to_doy(yr_in):
@@ -1128,6 +1131,43 @@ def frac_years_to_reldelta(frac_year, allow_nans=True):
         rdels = rdels[0]
 
     return rdels
+
+
+def decimal_year_to_date(dec_year, date_type=dt.datetime):
+    """
+    Convert decimal year or years (e.g. 2018.5) to a datetime-like object
+
+    :param dec_year: the decimal year or years to convert. May be any kind of collection (if passing multiple values) so
+     long as it supports iteration and that iteration returns scalar values (i.e. a 2D numpy array will not work because
+     iteration returns rows).
+
+    :param date_type: what type to convert the decimal years in to. May be any time that can be called
+     ``date_type(year, month, day)``.
+
+    :return: the converted dates in the type ``date_type``. If a single decimal date was passed in, then a single value
+     of type ``date_type`` is returned. If a collection was passed in, then the dates will be returned in a 1D numpy
+     array.
+    """
+
+    if np.any(np.isnan(dec_year)):
+        raise NotImplementedError('NaNs in the input decimal years not implemented')
+
+    try:
+        dec_year[0]
+    except TypeError:
+        dec_year = [dec_year]
+        return_as_scalar = True
+    else:
+        return_as_scalar = False
+
+    years = np.array([int(d) for d in dec_year])
+    frac_yrs = np.array([d % 1 for d in dec_year])
+    dates = np.array([date_type(y, 1, 1) + frac_years_to_reldelta(fr, allow_nans=False) for y, fr in zip(years, frac_yrs)])
+
+    if return_as_scalar:
+        return dates[0]
+    else:
+        return dates
 
 
 def start_of_month(date_in, out_type=dt.date):
