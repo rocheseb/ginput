@@ -25,6 +25,7 @@ pp. 32295-32314).
 
 from __future__ import print_function, division
 
+from abc import abstractmethod, ABCMeta
 from contextlib import closing
 import ctypes
 import datetime as dt
@@ -37,6 +38,7 @@ import os
 import pandas as pd
 import re
 from scipy.interpolate import LinearNDInterpolator
+from scipy.optimize import minimize_scalar
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
@@ -150,6 +152,22 @@ class TraceGasTropicsRecord(object):
         agespec_file = _file_name_helper(region, 'agespec')
 
         return age_file, agespec_file
+
+    @classmethod
+    def _get_frac_remaining_by_age(cls, ages):
+        """
+        Get the fraction of a gas remaining for a given vector of ages.
+
+        The default is to assume no loss, and so 1 will be returned for every age. Subclasses
+        may override this method to calculate more complicated relationships between age and fraction remaining.
+
+        :param ages: the vector of ages to calculate the fraction of the gas remaining for
+        :type ages: :class:`numpy.ndarray` or float
+
+        :return: a data frame indexed by age with one column, "fraction" containing the fraction remaining.
+        :rtype: :class:`pandas.DataFrame`
+        """
+        return pd.DataFrame(data=np.ones_like(ages, dtype=np.float), columns=['fraction'], index=ages)
 
     @classmethod
     def _load_age_spectrum_data(cls, region, normalize_spectra=True):
@@ -381,9 +399,13 @@ class TraceGasTropicsRecord(object):
         # mean that some extra points near the beginning are NaNs, but that is expected and okay. We're more limited by
         # how far back in time the
         out_dates = df.index if requested_dates is None else requested_dates
+        import pdb; pdb.set_trace()
 
         for region in cls.age_spec_regions:
             time, delt, age, spectra = cls._load_age_spectrum_data(region, normalize_spectra=True)
+
+            # Get the fraction remaining on the same ages as the age spectra are defined
+            fgas = cls._get_frac_remaining_by_age(time.values.squeeze())
 
             # Add a zero age to the beginning of age
             age = np.concatenate([[0], age.to_numpy().squeeze()])
@@ -407,9 +429,29 @@ class TraceGasTropicsRecord(object):
                 # Now we can do the convolution. Note: in Arlyn's original R code, she had to flip the age spectrum to
                 # act as the convolution kernel, but testing showed that in order to get the same answer using numpy's
                 # convolution function we had to leave the spectrum unflipped.
-                conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(), spectra.iloc[i, :].values, mode='valid')
+                #
+                # This is because the numpy convolution operation acts to flip the kernel internally. It is defined as
+                #
+                # (a * v)[n] = \sum_{m=-\infty}^{\infty} a[m]v[n-m]
+                #
+                # Note that v is indexed with n-m. This has the effect of reversing the kernel; for n=10, a[11] gets
+                # multiplied by v[9], a[12] by v[8] and so on. R's convolve function uses a different indexing pattern
+                # that does not reverse the kernel.
+                #
+                # We want the kernel reversed because the trace gas records are defined from old to new, while the age
+                # spectra are from new to old. Therefore, we need to reverse the spectra before convolving to actually
+                # put both in the same direction.
+                #
+                # We also multiply the age spectra by the fraction of gas remaining at a given age. For something like
+                # CO2 that is not lost in the stratosphere, this will just be 1s, but for N2O, CH4, etc. that have loss
+                # then as we get to older air we also need to reduce MLO/SMO average to the fraction remaining to
+                # accurately represent the concentration in that air mass.
+                conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(),
+                                          spectra.iloc[i, :].values * fgas.values.squeeze(),
+                                          mode='valid')
                 conv_dates = new_index[(spectra.shape[1] - 1):]
                 conv_dates = dec_year_to_dtindex(conv_dates, force_first_of_month=False)
+                
                 # Finally we put the age-convolved gas concentration back onto the dates of the input dataframe, unless
                 # alternate dates were specified.
                 conv_df = pd.DataFrame(conv_result, index=conv_dates)
@@ -670,6 +712,32 @@ class TraceGasTropicsRecord(object):
 
 class CO2TropicsRecord(TraceGasTropicsRecord):
     pass
+
+
+class N2OTropicsRecord(TraceGasTropicsRecord):
+    @classmethod
+    def _get_frac_remaining_by_age(cls, ages):
+        fracs = [cls.calc_fn2o_from_age(a) for a in ages]
+        return pd.DataFrame(data=fracs, columns=['fraction'], index=ages)
+
+    @staticmethod
+    def calc_fn2o_from_age(age):
+        def age_fxn(n2o):
+            # This equation relates N2O to age in Fig. 3 of Andrews et al. (JGR, 106, pp. 32295-32314). This was derived
+            # from the ATLAS spectrometer on board the ER-2 aircraft flying in the 1990s. (In the paper, age is called
+            # "CO2 lag".)
+            return 0.0581 * (313.0 - n2o) - 2.54e-4 * (313 - n2o) ** 2.0 + 4.41e-7 * (313.0 - n2o) ** 3.0
+
+        # Rather than try to invert this cubic function to get N2O in terms of age, we solve numerically for what value
+        # of N2O gives the desired age. We apply some bounds to the minimization because this is about the range of
+        # concentrations measured (technically that should stop around 50 ppbv on the lower bound, but we may need to go
+        # a little past that to get to the oldest air).
+        n2o_at_age = minimize_scalar(lambda x: abs(age_fxn(x) - age), method='bounded', bounds=(0.0, 320.0))
+        n2o_at_age = n2o_at_age.x  # extract the actual concentration from the minimization result
+
+        # From the equation, 313 ppb N2O is clearly the age 0 concentration. We assume that that is the stratospheric
+        # boundary condition, and so the fraction of N2O remaining is the concentration divided by 313.
+        return n2o_at_age / 313.0
 
 
 def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):

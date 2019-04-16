@@ -34,6 +34,13 @@ geosfp_pres_levels = _std_model_pres_levels
 earth_radius = 6371  # kilometers
 
 
+class TropopauseError(Exception):
+    """
+    Error if could not find the tropopause
+    """
+    pass
+
+
 class ProgressBar(object):
     """
     Create a text-based progress bar
@@ -973,6 +980,64 @@ def interp_to_tropopause_height(theta, altitude, theta_trop):
 
     # Do the interpolation with just the altitudes where theta is monotonically increasing.
     return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()
+
+
+def calc_wmo_tropopause(temperature, altitude, limit_to=(5., 18.), raise_error=True):
+    """
+    Find the tropopause altitude using the WMO definition
+
+    The WMO thermal definition of the tropopause is: "the level at which the lapse rate drops to < 2 K/km and the
+    average lapse rate between this and all higher levels within 2 km does not exceed 2 K/km".
+    (quoted in https://www.atmos-chem-phys.net/8/1483/2008/acp-8-1483-2008.pdf, sect. 2.4).
+
+    :param temperature: the temperature profile, in K
+    :type temperature: :class:`numpy.ndarray` (1D)
+
+    :param altitude: the altitude for each level in the temperature profile, in kilometers
+    :type altitude: :class:`numpy.ndarray` (1D)
+
+    :param limit_to: the range of altitudes to limit the search for the tropopause to. This both helps avoid erroneous
+     results and potentially speed up the analysis.
+    :type limit_to: tuple(float, float)
+
+    :param raise_error: If ``True``, this function raises an error if it cannot find the tropopause. If ``False``, it
+     returns a NaN in that case.
+    :type raise_error: bool
+
+    :return: the tropopause altitude in kilometers
+    :rtype: float
+    :raises TropopauseError: if ``raise_error`` is ``True`` and this cannot find the tropopause.
+    """
+
+    # Calculate the lapse rate on the half levels. By definition, a positive lapse rate is a decrease with altitude, so
+    # we need the minus sign.
+    lapse = -np.diff(temperature) / np.diff(altitude)
+    alt_half = altitude[:-1] + np.diff(altitude)/2.0
+
+    # Cut down the data to just the relevant range of altitudes recommended by
+    # https://agupubs.onlinelibrary.wiley.com/doi/pdf/10.1029/2003GL018240 (end of sect. 2)
+    zz = (alt_half >= np.min(limit_to)) & (alt_half <= np.max(limit_to))
+    lapse = lapse[zz]
+    alt_half = alt_half[zz]
+
+    # Iterate over the levels. If the lapse rate is < 2 K/km, check that it remains there over the next 2 kilometers
+    import pdb; pdb.set_trace()
+    for k, (gamma, alt) in enumerate(zip(lapse, alt_half)):
+        if gamma < 2.0:
+            step = 0.1
+            test_alt = np.arange(alt, alt+2.0+step, step)
+            test_lapse = np.interp(test_alt, alt_half, lapse)
+            if np.all(test_lapse < 2.0):
+                # Interpolate to the exact tropopause altitude where the lapse rate first crosses the 2 K/km
+                # np.interp requires the x-coordinates to be sorted, hence the complicated formula to get k_inds
+                k_inds = np.argsort(lapse[[k-1, k]]) + k - 1
+                return np.interp(2.0, lapse[k_inds], alt_half[k_inds])
+
+    # If we get here, we failed to find the tropopause, so return a NaN or raise an error
+    if raise_error:
+        raise TropopauseError('Could not find a level meeting the WMO tropopause condition in the given profile')
+    else:
+        return np.nan
 
 
 def age_of_air(lat, z, ztrop, ref_lat=45.0):
