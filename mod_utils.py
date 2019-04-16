@@ -341,7 +341,8 @@ def hg_commit_info(hg_dir=None):
         # If in the current directory, then dirname(__file__) gives an empty string, which isn't allowed as the argument
         # to cwd in check_output
         hg_dir = '.'
-    summary = subprocess.check_output(['hg', 'log', '-l', '1'], cwd=hg_dir).splitlines()
+    # Get the last commit (-l 1) in the current branch (-f)
+    summary = subprocess.check_output(['hg', 'log', '-f', '-l', '1'], cwd=hg_dir).splitlines()
     log_dict = dict()
     for line in summary:
         splitline = line.split(':', 1)
