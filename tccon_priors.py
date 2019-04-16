@@ -632,11 +632,33 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
     return find_closest_theta(this_theta_clim, this_lat_clim, midtrop_theta)
 
 
+def adjust_zgrid(z_grid, z_trop, z_obs):
+    
+    idx_min = abs(z_grid - z_obs).argmin()
+    z_min = z_grid[idx_min]
+    dz = z_obs - z_min
+    
+    z_blend = z_obs+(z_trop-z_obs)/2.     
+    idx_blend = abs(z_grid - z_blend).argmin()
+    
+    z_pbl = z_grid[0:idx_blend]
+    z_ftrop = z_grid[idx_blend::]
+  
+    for i in range(idx_blend-1, idx_min-1, -1):
+        factor = float(idx_blend - i)/float(idx_blend - idx_min)
+        z_pbl[i] = (z_grid[i]+dz*factor**2)
+        
+    z_pbl=np.where(z_pbl<z_obs, 0, z_pbl)
+    z_grid = np.hstack((z_pbl, z_ftrop))
+    
+    return z_grid
+
+
 #########################
 # MAIN PRIORS FUNCTIONS #
 #########################
 
-def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, theta_grid=None, pres_grid=None,
+def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_obs, z_trop, co2_record, theta_grid=None, pres_grid=None,
                        ref_lat=45.0, use_theta_eqlat=True, profs_latency=None, prof_aoa=None, prof_world_flag=None,
                        prof_co2_date=None, prof_co2_date_width=None):
     """
@@ -700,6 +722,9 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_trop, co2_record, 
 
     :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
+
+    z_grid = adjust_zgrid(z_grid, z_trop, z_obs)    
+    print(z_grid)
     n_lev = np.size(z_grid)
     prof_co2 = _init_prof(prof_co2, n_lev)
     profs_latency = _init_prof(profs_latency, n_lev, 3)
@@ -915,6 +940,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     # Make the UTC date a datetime object that is rounded to a date (hour/minute/etc = 0)
     obs_utc_date = dt.datetime.combine((obs_date - utc_offset).date(), dt.time())
 
+    z_obs = mod_file_data['scalar']['Height']
     z_met = mod_file_data['profile']['Height']
     theta_met = mod_file_data['profile']['PT']
     eq_lat_met = mod_file_data['profile']['EL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
@@ -972,7 +998,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species='co2', sit
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_prof, z_trop_met,  concentration_record,
+    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_prof, z_obs, z_trop_met,  concentration_record,
                                            pres_grid=p_prof, theta_grid=theta_prof, use_theta_eqlat=use_eqlat_trop,
                                            profs_latency=latency_profs, prof_world_flag=stratum_flag,
                                            prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
