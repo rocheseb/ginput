@@ -1269,7 +1269,8 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species_record='co
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
         map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M')))
-        mod_utils.write_map_file(map_name, obs_lat, trop_eqlat, trop_ref_lat, z_trop_met, use_eqlat_strat, map_dict, units_dict, var_order=var_order)
+        mod_utils.write_map_file(map_name, obs_lat, trop_eqlat, trop_ref_lat, z_obs, z_trop_met, use_eqlat_strat,
+                                 map_dict, units_dict, var_order=var_order)
 
     return map_dict, units_dict
 
