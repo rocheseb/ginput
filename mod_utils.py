@@ -34,6 +34,13 @@ geosfp_pres_levels = _std_model_pres_levels
 earth_radius = 6371  # kilometers
 
 
+class TropopauseError(Exception):
+    """
+    Error if could not find the tropopause
+    """
+    pass
+
+
 class ProgressBar(object):
     """
     Create a text-based progress bar
@@ -229,6 +236,10 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     out_dict['constants'] = constants
     out_dict['profile'] = data
     return out_dict
+
+
+def map_file_name(site_abbrev, obs_lat, obs_date):
+    return '{}{}_{}.map'.format(site_abbrev, format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M'))
 
 
 def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tropopause_alt, strat_used_eqlat,
@@ -975,6 +986,64 @@ def interp_to_tropopause_height(theta, altitude, theta_trop):
     return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()
 
 
+def calc_wmo_tropopause(temperature, altitude, limit_to=(5., 18.), raise_error=True):
+    """
+    Find the tropopause altitude using the WMO definition
+
+    The WMO thermal definition of the tropopause is: "the level at which the lapse rate drops to < 2 K/km and the
+    average lapse rate between this and all higher levels within 2 km does not exceed 2 K/km".
+    (quoted in https://www.atmos-chem-phys.net/8/1483/2008/acp-8-1483-2008.pdf, sect. 2.4).
+
+    :param temperature: the temperature profile, in K
+    :type temperature: :class:`numpy.ndarray` (1D)
+
+    :param altitude: the altitude for each level in the temperature profile, in kilometers
+    :type altitude: :class:`numpy.ndarray` (1D)
+
+    :param limit_to: the range of altitudes to limit the search for the tropopause to. This both helps avoid erroneous
+     results and potentially speed up the analysis.
+    :type limit_to: tuple(float, float)
+
+    :param raise_error: If ``True``, this function raises an error if it cannot find the tropopause. If ``False``, it
+     returns a NaN in that case.
+    :type raise_error: bool
+
+    :return: the tropopause altitude in kilometers
+    :rtype: float
+    :raises TropopauseError: if ``raise_error`` is ``True`` and this cannot find the tropopause.
+    """
+
+    # Calculate the lapse rate on the half levels. By definition, a positive lapse rate is a decrease with altitude, so
+    # we need the minus sign.
+    lapse = -np.diff(temperature) / np.diff(altitude)
+    alt_half = altitude[:-1] + np.diff(altitude)/2.0
+
+    # Cut down the data to just the relevant range of altitudes recommended by
+    # https://agupubs.onlinelibrary.wiley.com/doi/pdf/10.1029/2003GL018240 (end of sect. 2)
+    zz = (alt_half >= np.min(limit_to)) & (alt_half <= np.max(limit_to))
+    lapse = lapse[zz]
+    alt_half = alt_half[zz]
+
+    # Iterate over the levels. If the lapse rate is < 2 K/km, check that it remains there over the next 2 kilometers
+    import pdb; pdb.set_trace()
+    for k, (gamma, alt) in enumerate(zip(lapse, alt_half)):
+        if gamma < 2.0:
+            step = 0.1
+            test_alt = np.arange(alt, alt+2.0+step, step)
+            test_lapse = np.interp(test_alt, alt_half, lapse)
+            if np.all(test_lapse < 2.0):
+                # Interpolate to the exact tropopause altitude where the lapse rate first crosses the 2 K/km
+                # np.interp requires the x-coordinates to be sorted, hence the complicated formula to get k_inds
+                k_inds = np.argsort(lapse[[k-1, k]]) + k - 1
+                return np.interp(2.0, lapse[k_inds], alt_half[k_inds])
+
+    # If we get here, we failed to find the tropopause, so return a NaN or raise an error
+    if raise_error:
+        raise TropopauseError('Could not find a level meeting the WMO tropopause condition in the given profile')
+    else:
+        return np.nan
+
+
 def age_of_air(lat, z, ztrop, ref_lat=45.0):
     """
     Calculate age of air using a function form from GGG 2014.
@@ -1012,7 +1081,7 @@ def age_of_air(lat, z, ztrop, ref_lat=45.0):
     return aoa
 
 
-def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=45.0):
+def seasonal_cycle_factor(lat, z, ztrop, fyr, species, ref_lat=45.0):
     """
     Calculate a factor to multiply a concentration by to account for the seasonal cycle.
 
@@ -1039,12 +1108,18 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=45.0):
     :return: the seasonal cycle factor as a numpy array. Multiply this by a deseasonalized concentration at (lat, z) to
      get the concentration including the seasonal cycle
     """
-    season_cycle_coeffs = {'co2': 0.007}
+    season_cycle_coeffs = {'h2o': 0.0, 'co2': 0.007, 'n2o': 0.0, 'co': 0.2, 'ch4': 0.012, 'hf': 0.0}
 
     aoa = age_of_air(lat, z, ztrop, ref_lat=ref_lat)
-    sv = np.sin(2*np.pi *(fyr - 0.834 - aoa))
-    svnl = sv + 1.80 * np.exp(-((lat - 74)/41)**2)*(0.5 - sv**2)
-    sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
+    if species == 'co2':
+        sv = np.sin(2*np.pi *(fyr - 0.834 - aoa))
+        svnl = sv + 1.80 * np.exp(-((lat - 74)/41)**2)*(0.5 - sv**2)
+        sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
+    else:
+        sv = np.sin(2*np.pi * (fyr - 0.78))  # basic seasonal variation
+        svl = sv * (lat / 15.0) / np.sqrt(1 + (lat / 15.0)**2.0)  # latitude dependence
+        sca = svl * np.exp(-aoa / 0.85)  # altitude dependence
+
     return 1 + sca * season_cycle_coeffs[species]
 
 

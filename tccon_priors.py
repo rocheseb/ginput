@@ -25,6 +25,7 @@ pp. 32295-32314).
 
 from __future__ import print_function, division
 
+from abc import abstractmethod, ABCMeta
 from contextlib import closing
 import ctypes
 import datetime as dt
@@ -37,6 +38,7 @@ import os
 import pandas as pd
 import re
 from scipy.interpolate import LinearNDInterpolator
+from scipy.optimize import minimize_scalar
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
@@ -103,18 +105,24 @@ class TraceGasTropicsRecord(object):
 
     No arguments required for initialization.
     """
-    
+
+    # these should be overridden in subclasses to specify the name and unit of the gas. The name must be recognized by
+    # the seasonal cycle function
     gas_name = ''
+    gas_unit = ''
+
     months_avg_for_trend = 12
     age_spec_regions = ('tropics', 'midlat', 'vortex')
     _age_spectrum_data_dir = os.path.join(_data_dir, 'age_spectra')
     _age_spectrum_time_file = os.path.join(_age_spectrum_data_dir, 'time.txt')
+    _default_sbc_lag = relativedelta(months=2)
 
-    def __init__(self, first_date=None, last_date=None):
+    def __init__(self, first_date=None, last_date=None, lag=None):
         # For the stratosphere data, since the age spectra are defined over a 30 year window, we need to make sure
         # we have values back to slightly more than 30 years before the first TCCON data. Assuming that's around 2004,
         # a default age of 2000 - 30 = 1970 should be good.
         age_spectra_length = relativedelta(years=30)
+
         if first_date is None:
             first_date = dt.datetime(2000, 1, 1) - age_spectra_length
         else:
@@ -125,13 +133,19 @@ class TraceGasTropicsRecord(object):
             # troposphere should be about 6 months at most, but we need to allow some room for the rolling average to
             # get the trend.
             last_date = dt.datetime.today() + relativedelta(years=2)
+
+        if lag is None:
+            self.sbc_lag = self._default_sbc_lag
+        else:
+            self.sbc_lag = lag
+
         self.conc_seasonal = self.get_mlo_smo_mean(first_date, last_date)
 
         # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
         # leave the latency
         self.conc_trend = self.conc_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
 
-        self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal)
+        self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
 
     @classmethod
     def _get_agespec_files(cls, region):
@@ -152,6 +166,22 @@ class TraceGasTropicsRecord(object):
         agespec_file = _file_name_helper(region, 'agespec')
 
         return age_file, agespec_file
+
+    @classmethod
+    def _get_frac_remaining_by_age(cls, ages):
+        """
+        Get the fraction of a gas remaining for a given vector of ages.
+
+        The default is to assume no loss, and so 1 will be returned for every age. Subclasses
+        may override this method to calculate more complicated relationships between age and fraction remaining.
+
+        :param ages: the vector of ages to calculate the fraction of the gas remaining for
+        :type ages: :class:`numpy.ndarray` or float
+
+        :return: a data frame indexed by age with one column, "fraction" containing the fraction remaining.
+        :rtype: :class:`pandas.DataFrame`
+        """
+        return pd.DataFrame(data=np.ones_like(ages, dtype=np.float), columns=['fraction'], index=ages)
 
     @classmethod
     def _load_age_spectrum_data(cls, region, normalize_spectra=True):
@@ -349,7 +379,7 @@ class TraceGasTropicsRecord(object):
         return val, {'flag': flag, 'latency': years_extrap}
 
     @classmethod
-    def _calc_age_spec_gas(cls, df, lag=relativedelta(months=2), requested_dates=None):
+    def _calc_age_spec_gas(cls, df, lag, requested_dates=None):
         def index_to_dec_year(dframe):
             return [mod_utils.date_to_decimal_year(d) for d in dframe.index]
 
@@ -387,6 +417,9 @@ class TraceGasTropicsRecord(object):
         for region in cls.age_spec_regions:
             time, delt, age, spectra = cls._load_age_spectrum_data(region, normalize_spectra=True)
 
+            # Get the fraction remaining on the same ages as the age spectra are defined
+            fgas = cls._get_frac_remaining_by_age(time.values.squeeze())
+
             # Add a zero age to the beginning of age
             age = np.concatenate([[0], age.to_numpy().squeeze()])
             out_df = pd.DataFrame(index=out_dates, columns=age)
@@ -409,9 +442,29 @@ class TraceGasTropicsRecord(object):
                 # Now we can do the convolution. Note: in Arlyn's original R code, she had to flip the age spectrum to
                 # act as the convolution kernel, but testing showed that in order to get the same answer using numpy's
                 # convolution function we had to leave the spectrum unflipped.
-                conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(), spectra.iloc[i, :].values, mode='valid')
+                #
+                # This is because the numpy convolution operation acts to flip the kernel internally. It is defined as
+                #
+                # (a * v)[n] = \sum_{m=-\infty}^{\infty} a[m]v[n-m]
+                #
+                # Note that v is indexed with n-m. This has the effect of reversing the kernel; for n=10, a[11] gets
+                # multiplied by v[9], a[12] by v[8] and so on. R's convolve function uses a different indexing pattern
+                # that does not reverse the kernel.
+                #
+                # We want the kernel reversed because the trace gas records are defined from old to new, while the age
+                # spectra are from new to old. Therefore, we need to reverse the spectra before convolving to actually
+                # put both in the same direction.
+                #
+                # We also multiply the age spectra by the fraction of gas remaining at a given age. For something like
+                # CO2 that is not lost in the stratosphere, this will just be 1s, but for N2O, CH4, etc. that have loss
+                # then as we get to older air we also need to reduce MLO/SMO average to the fraction remaining to
+                # accurately represent the concentration in that air mass.
+                conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(),
+                                          spectra.iloc[i, :].values * fgas.values.squeeze(),
+                                          mode='valid')
                 conv_dates = new_index[(spectra.shape[1] - 1):]
                 conv_dates = dec_year_to_dtindex(conv_dates, force_first_of_month=False)
+                
                 # Finally we put the age-convolved gas concentration back onto the dates of the input dataframe, unless
                 # alternate dates were specified.
                 conv_df = pd.DataFrame(conv_result, index=conv_dates)
@@ -671,13 +724,46 @@ class TraceGasTropicsRecord(object):
 
 
 class CO2TropicsRecord(TraceGasTropicsRecord):
-    gas_name='co2'
-    
+    gas_name = 'co2'
+    gas_unit = 'ppm'
+
+
 class N2OTropicsRecord(TraceGasTropicsRecord):
-    gas_name='n2o'
+    gas_name = 'n2o'
+    gas_unit = 'ppb'
+
+    @classmethod
+    def _get_frac_remaining_by_age(cls, ages):
+        fracs = [cls.calc_fn2o_from_age(a) for a in ages]
+        return pd.DataFrame(data=fracs, columns=['fraction'], index=ages)
+
+    @staticmethod
+    def calc_fn2o_from_age(age):
+        def age_fxn(n2o):
+            # This equation relates N2O to age in Fig. 3 of Andrews et al. (JGR, 106, pp. 32295-32314). This was derived
+            # from the ATLAS spectrometer on board the ER-2 aircraft flying in the 1990s. (In the paper, age is called
+            # "CO2 lag".)
+            return 0.0581 * (313.0 - n2o) - 2.54e-4 * (313 - n2o) ** 2.0 + 4.41e-7 * (313.0 - n2o) ** 3.0
+
+        # Rather than try to invert this cubic function to get N2O in terms of age, we solve numerically for what value
+        # of N2O gives the desired age. We apply some bounds to the minimization because this is about the range of
+        # concentrations measured (technically that should stop around 50 ppbv on the lower bound, but we may need to go
+        # a little past that to get to the oldest air).
+        n2o_at_age = minimize_scalar(lambda x: abs(age_fxn(x) - age), method='bounded', bounds=(0.0, 320.0))
+        n2o_at_age = n2o_at_age.x  # extract the actual concentration from the minimization result
+
+        # From the equation, 313 ppb N2O is clearly the age 0 concentration. We assume that that is the stratospheric
+        # boundary condition, and so the fraction of N2O remaining is the concentration divided by 313.
+        return n2o_at_age / 313.0
+
     
 class CH4TropicsRecord(TraceGasTropicsRecord):
-    gas_name='ch4'
+    gas_name = 'ch4'
+    gas_unit = 'ppb'
+
+
+# Make the list of available gases' records
+_gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord]}
 
 
 def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
@@ -944,15 +1030,15 @@ def adjust_zgrid(z_grid, z_trop, z_obs):
 # MAIN PRIORS FUNCTIONS #
 #########################
 
-def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_obs, z_trop, co2_record, theta_grid=None, pres_grid=None,
-                       ref_lat=45.0, use_theta_eqlat=True, profs_latency=None, prof_aoa=None, prof_world_flag=None,
-                       prof_co2_date=None, prof_co2_date_width=None):
+def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_record, theta_grid=None, pres_grid=None,
+                   ref_lat=45.0, use_theta_eqlat=True, profs_latency=None, prof_aoa=None, prof_world_flag=None,
+                   prof_gas_date=None, prof_gas_date_width=None):
     """
     Add troposphere CO2 to the prior profile.
 
-    :param prof_co2: the profile CO2 mixing ratios, in ppm. Will be modified in-place to add the stratospheric
+    :param prof_gas: the profile trace gas mixing ratios. Will be modified in-place to add the stratospheric
      component.
-    :type prof_co2: :class:`numpy.ndarray` (in ppm)
+    :type prof_gas: :class:`numpy.ndarray`
 
     :param obs_date: the UTC date of the retrieval.
     :type obs_date: :class:`datetime.datetime`
@@ -966,8 +1052,8 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_obs, z_trop, co2_r
     :param z_trop: the altitude of the tropopause (in kilometers)
     :type z_trop: float
 
-    :param co2_record: the Mauna Loa-Samoa CO2 record.
-    :type co2_record: :class:`CO2TropicsRecord`
+    :param gas_record: the Mauna Loa-Samoa record for the desired gas.
+    :type gas_record: :class:`TraceGasTropicsRecord`
 
     :param theta_grid: potential temperature on the same levels as ``z_grid``. Only needed is ``use_theta_eqlat`` is set
      to ``True``.
@@ -999,25 +1085,24 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_obs, z_trop, co2_r
     :param prof_world_flag: nlev-element vector of ints which will indicate which levels are considered overworld and
      which middleworld. The values used for each are defined in :mod:`mod_constants`
 
-    :param prof_co2_date: nlev-element vector that stores the date in the MLO/SMO record that the CO2 was taken from.
+    :param prof_gas_date: nlev-element vector that stores the date in the MLO/SMO record that the gas was taken from.
      Since most levels will have a window of dates, this is the middle of those windows. The dates are stored as a
      decimal year, e.g. 2016.5.
 
-    :param prof_co2_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
-     the CO2 concentrations.
+    :param prof_gas_date_width: nlev-element vector that stores the width (in years) of the age windows used to compute
+     the gas concentrations.
 
     :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
 
-    z_grid = adjust_zgrid(z_grid, z_trop, z_obs)    
-    print(z_grid)
+    z_grid = adjust_zgrid(z_grid, z_trop, z_obs)
     n_lev = np.size(z_grid)
-    prof_co2 = _init_prof(prof_co2, n_lev)
+    prof_gas = _init_prof(prof_gas, n_lev)
     profs_latency = _init_prof(profs_latency, n_lev, 3)
     prof_aoa = _init_prof(prof_aoa, n_lev)
     prof_world_flag = _init_prof(prof_world_flag, n_lev)
-    prof_co2_date = _init_prof(prof_co2_date, n_lev)
-    prof_co2_date_width = _init_prof(prof_co2_date_width, n_lev)
+    prof_gas_date = _init_prof(prof_gas_date, n_lev)
+    prof_gas_date_width = _init_prof(prof_gas_date_width, n_lev)
 
     # First get the ages of air for every grid point within the troposphere. The formula that Geoff Toon developed for
     # age of air has some nice properties, namely it has about a 6 month interhemispheric lag time at the surface which
@@ -1037,35 +1122,35 @@ def add_co2_trop_prior(prof_co2, obs_date, obs_lat, z_grid, z_obs, z_trop, co2_r
     prof_aoa[xx_trop] = air_age
     prof_world_flag[xx_trop] = const.trop_flag
 
-    co2_df = co2_record.get_gas_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
-    prof_co2[xx_trop] = co2_df['dmf_mean'].values
+    gas_df = gas_record.get_gas_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
+    prof_gas[xx_trop] = gas_df['dmf_mean'].values
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
-    profs_latency[xx_trop, :] = co2_df['latency'].values.reshape(-1, 1)
+    profs_latency[xx_trop, :] = gas_df['latency'].values.reshape(-1, 1)
     # Record the date that the CO2 was taken from as a year with a fraction
-    co2_dates = np.array([mod_utils.date_to_decimal_year(v) for v in co2_df.index])
-    prof_co2_date[xx_trop] = co2_dates
+    gas_dates = np.array([mod_utils.date_to_decimal_year(v) for v in gas_df.index])
+    prof_gas_date[xx_trop] = gas_dates
     # The width for the age is defined as what time window we average over to detrend
-    prof_co2_date_width[xx_trop] = co2_record.months_avg_for_trend / 12.0
+    prof_gas_date_width[xx_trop] = gas_record.months_avg_for_trend / 12.0
 
     # Finally, apply a parameterized seasonal cycle. This is better than using the seasonal cycle in the MLO/SMO data
     # because that is dominated by the NH cycle. This approach allows the seasonal cycle to vary in sign and intensity
     # with latitude.
     year_fraction = mod_utils.date_to_frac_year(obs_date)
-    prof_co2[xx_trop] *= mod_utils.seasonal_cycle_factor(obs_lat, z_grid[xx_trop], z_trop, year_fraction, species='co2',
-                                                         ref_lat=ref_lat)
+    prof_gas[xx_trop] *= mod_utils.seasonal_cycle_factor(obs_lat, z_grid[xx_trop], z_trop, year_fraction,
+                                                         species=gas_record.gas_name, ref_lat=ref_lat)
 
-    return prof_co2, {'co2_latency': profs_latency, 'co2_date': prof_co2_date, 'co2_date_width': prof_co2_date_width,
+    return prof_gas, {'co2_latency': profs_latency, 'co2_date': prof_gas_date, 'co2_date_width': prof_gas_date_width,
                       'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}
 
 
-def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, co2_record,
-                        co2_lag=relativedelta(months=2), profs_latency=None, prof_aoa=None, prof_world_flag=None):
+def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, gas_record,
+                    profs_latency=None, prof_aoa=None, prof_world_flag=None):
     """
-    Add the stratospheric CO2 to a TCCON prior profile
+    Add the stratospheric trace gas to a TCCON prior profile
 
-    :param prof_co2: the profile CO2 mixing ratios, in ppm. Will be modified in-place to add the stratospheric
+    :param prof_gas: the profile trace gase mixing ratios. Will be modified in-place to add the stratospheric
      component.
-    :type prof_co2: :class:`numpy.ndarray` (in ppm)
+    :type prof_gas: :class:`numpy.ndarray` (in ppm)
 
     :param retrieval_date: the UTC date of the retrieval.
     :type retrieval_date: :class:`datetime.datetime`
@@ -1079,11 +1164,11 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     :param tropopause_theta: the potential temperature at the tropopause, according to the input meteorology.
     :type tropopause_theta: float (in K)
 
-    :param co2_record: the Mauna Loa-Samoa CO2 record.
-    :type co2_record: :class:`CO2TropicsRecord`
+    :param gas_record: the Mauna Loa-Samoa CO2 record.
+    :type gas_record: :class:`TraceGasTropicsRecord`
 
-    :param co2_lag: the lag between the MLO/SAM record and the CO2 concentration at the tropopause.
-    :type co2_lag: :class:`~dateutil.relativedelta.relativedelta` or :class:`datetime.timedelta`
+    :param lag: the lag between the MLO/SAM record and the CO2 concentration at the tropopause.
+    :type lag: :class:`~dateutil.relativedelta.relativedelta` or :class:`datetime.timedelta`
 
     The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
     stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
@@ -1098,7 +1183,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
 
-    n_lev = np.size(prof_co2)
+    n_lev = np.size(prof_gas)
     profs_latency = _init_prof(profs_latency, n_lev, 3)
     prof_aoa = _init_prof(prof_aoa, n_lev)
     prof_world_flag = _init_prof(prof_world_flag, n_lev)
@@ -1117,7 +1202,7 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     # record specifically designed for stratospheric CO2 that already incorporates the two month lag and the age
     # spectra.
 
-    prof_co2[xx_overworld], _ = co2_record.get_strat_gas(retrieval_date, age_of_air_years[xx_overworld], prof_eqlat[xx_overworld])
+    prof_gas[xx_overworld], _ = gas_record.get_strat_gas(retrieval_date, age_of_air_years[xx_overworld], prof_eqlat[xx_overworld])
     # TODO: decide how to calculate the latency for the CO2 profiles now that age spectra are used. Options:
     #   1. Convolve the latency as well
     #   2. Give the latency just for the retrieval date (possible with the two-month lag)
@@ -1127,20 +1212,22 @@ def add_co2_strat_prior(prof_co2, retrieval_date, prof_theta, prof_eqlat, tropop
     # assume that at the tropopause the CO2 is equal to the lagged MLO/SAM record and interpolate linearly in theta
     # space between that and the first > 380 level.
     ow1 = np.argwhere(xx_overworld)[0]
-    # TODO: replace this co2_lag with one on the record for consistency. Also decide if we should actually use a lag here
-    co2_entry_conc = co2_record.get_gas_for_dates(retrieval_date - co2_lag)
 
-    co2_endpoints = np.array([co2_entry_conc.item(), prof_co2[ow1].item()])
+    # For consistency, assume that the entry level concentration that serves as the lower limit for the interpolation
+    # has the same lag as we've been using to calculate the stratospheric concentrations.
+    gas_entry_conc = gas_record.get_gas_for_dates(retrieval_date - gas_record.sbc_lag)
+
+    gas_endpoints = np.array([gas_entry_conc.item(), prof_gas[ow1].item()])
     theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
     xx_middleworld = (tropopause_theta < prof_theta) & (prof_theta < 380.0)
-    prof_co2[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, co2_endpoints)
+    prof_gas[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, gas_endpoints)
     prof_world_flag[xx_middleworld] = const.middleworld_flag
 
-    return prof_co2, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag}
+    return prof_gas, {'latency': profs_latency, 'age_of_air': prof_aoa, 'stratum': prof_world_flag}
 
 
-def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species_record='co2', site_abbrev='xx',
-                         use_geos_grid=True, use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
+def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentration_record, site_abbrev='xx',
+                                use_geos_grid=True, use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
 
@@ -1155,11 +1242,10 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species_record='co
      ``obs_date`` was given in US Pacific Standard Time, this should be ``timedelta(hours=-8). This is used to correct
      the date to UTC to ensure the CO2 from the right time is used.
 
-    :param species_record: which species to generate the prior profile for. Either give the species name as a string
-     (currently only "co2" is implemented, case insensitive) or the proper subclass of TraceGasTropicsRecord for the
-     given species. The latter is useful if you are making multiple calls to this function, as it removes the need to
-     instantiate the record during each call
-    :type species_record: str or :class:`TraceGasTropicsRecord`
+    :param concentration_record: which species to generate the prior profile for. Must be the proper subclass of
+     TraceGasTropicsRecord for the given species. The latter is useful if you are making multiple calls to this
+     function, as it removes the need to instantiate the record during each call
+    :type concentration_record: str or :class:`TraceGasTropicsRecord`
 
     :param site_abbrev: the two-letter site abbreviation. Currently only used in naming the output file.
     :type site_abbrev: str
@@ -1200,7 +1286,7 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species_record='co
     # Make the UTC date a datetime object that is rounded to a date (hour/minute/etc = 0)
     obs_utc_date = dt.datetime.combine((obs_date - utc_offset).date(), dt.time())
 
-    z_obs = mod_file_data['scalar']['Height']
+    z_surf = mod_file_data['scalar']['Height']
     z_met = mod_file_data['profile']['Height']
     theta_met = mod_file_data['profile']['PT']
     eq_lat_met = mod_file_data['profile']['EL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
@@ -1212,25 +1298,19 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species_record='co
     p_trop_met = mod_file_data['scalar']['TROPPB']
     theta_trop_met = mod_utils.calculate_potential_temperature(p_trop_met, t_trop_met)
 
-    # The age-of-air calculation used for the tropospheric CO2 profile calculation needs the tropopause altitude.
+    # The age-of-air calculation used for the tropospheric trace gas profile calculation needs the tropopause altitude.
     # Assume that potential temperature varies linearly with altitude to calculate that, use the potential temperature
     # of the tropopause to ensure consistency between the two parts of the profile.
     z_trop_met = mod_utils.interp_to_tropopause_height(theta_met, z_met, theta_trop_met)
     if z_trop_met < np.nanmin(z_met):
-        raise RuntimeError('Tropopause altitude calculated to be below that the bottom of the profile. Something has '
+        raise RuntimeError('Tropopause altitude calculated to be below the bottom of the profile. Something has '
                            'gone horribly wrong.')
 
-    if isinstance(species_record, str):
-        species_record = species_record.lower()
-    if species_record == 'co2':
-        concentration_record = CO2TropicsRecord()
-    elif isinstance(species_record, CO2TropicsRecord):
-        concentration_record = species_record
-    elif isinstance(species_record, str):
-        raise ValueError('species "{}" not recognized'.format(species_record))
-    else:
-        raise ValueError('species_record must be either a recognized string or a subclass instance of '
-                         'TraceGasTropicsRecord')
+    if not isinstance(concentration_record, TraceGasTropicsRecord):
+        raise TypeError('concentration_record must be a subclass instance of TraceGasTropicsRecord')
+    elif concentration_record.gas_name == '':
+        raise TypeError('concentration_record must be a specific subclass instance of TraceGasTropicsRecord that '
+                        'has a non-empty gas_name attribute; it cannot be an instance of TraceGasTropicsRecord itself.')
 
     # First we need to get the altitudes/theta levels that the prior will be defined on. We also need to get the blended
     # tropopause height from the GEOS met file. We will calculate the troposphere CO2 profile from a deseasonalized
@@ -1258,44 +1338,127 @@ def generate_tccon_prior(mod_file_data, obs_date, utc_offset, species_record='co
                                                  interp_mode='lin-log')
 
     n_lev = np.size(z_prof)
-    co2_prof = np.full_like(z_prof, np.nan)
-    co2_date_prof = np.full_like(z_prof, np.nan)
-    co2_date_width_prof = np.full_like(z_prof, np.nan)
+    gas_prof = np.full_like(z_prof, np.nan)
+    gas_date_prof = np.full_like(z_prof, np.nan)
+    gas_date_width_prof = np.full_like(z_prof, np.nan)
     latency_profs = np.full((n_lev, 3), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    _, ancillary_trop = add_co2_trop_prior(co2_prof, obs_utc_date, obs_lat, z_prof, z_obs, z_trop_met,  concentration_record,
-                                           pres_grid=p_prof, theta_grid=theta_prof, use_theta_eqlat=use_eqlat_trop,
-                                           profs_latency=latency_profs, prof_world_flag=stratum_flag,
-                                           prof_co2_date=co2_date_prof, prof_co2_date_width=co2_date_width_prof)
+    _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, z_prof, z_surf, z_trop_met, concentration_record,
+                                       pres_grid=p_prof, theta_grid=theta_prof, use_theta_eqlat=use_eqlat_trop,
+                                       profs_latency=latency_profs, prof_world_flag=stratum_flag,
+                                       prof_gas_date=gas_date_prof, prof_gas_date_width=gas_date_width_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
     trop_ref_lat = ancillary_trop['ref_lat']
     trop_eqlat = ancillary_trop['trop_lat']
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_co2_strat_prior(co2_prof, obs_utc_date, theta_prof, eq_lat_prof, theta_trop_met,
-                                             concentration_record, profs_latency=latency_profs,
-                                             prof_world_flag=stratum_flag)
+    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, theta_trop_met,
+                                         concentration_record, profs_latency=latency_profs,
+                                         prof_world_flag=stratum_flag)
     aoa_prof_strat = ancillary_strat['age_of_air']
 
+    # Finally prepare the output, writing a .map file if needed.
+    gas_name = concentration_record.gas_name
+    gas_unit = concentration_record.gas_unit
     map_dict = {'Height': z_prof, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EL': eq_lat_prof,
-                'co2': co2_prof, 'mean_co2_latency': latency_profs[:, 0], 'min_co2_latency': latency_profs[:, 1],
-                'max_co2_latency': latency_profs[:, 2], 'trop_age_of_air': aoa_prof_trop,
-                'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'co2_date': co2_date_prof,
-                'co2_date_width': co2_date_width_prof}
-    units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EL': 'degrees', 'co2': 'ppm',
-                  'mean_co2_latency': 'yr', 'min_co2_latency': 'yr', 'max_co2_latency': 'yr', 'trop_age_of_air': 'yr',
-                  'strat_age_of_air': 'yr', 'atm_stratum': 'flag', 'co2_date': 'yr', 'co2_date_width': 'yr'}
-    var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EL', 'co2', 'mean_co2_latency', 'min_co2_latency',
-                 'max_co2_latency', 'trop_age_of_air', 'strat_age_of_air', 'atm_stratum', 'co2_date', 'co2_date_width')
+                gas_name: gas_prof, 'mean_latency': latency_profs[:, 0], 'min_latency': latency_profs[:, 1],
+                'max_latency': latency_profs[:, 2], 'trop_age_of_air': aoa_prof_trop,
+                'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'gas_date': gas_date_prof,
+                'gas_date_width': gas_date_width_prof}
+    units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EL': 'degrees', gas_name: gas_unit,
+                  'mean_latency': 'yr', 'min_latency': 'yr', 'max_latency': 'yr', 'trop_age_of_air': 'yr',
+                  'strat_age_of_air': 'yr', 'atm_stratum': 'flag', 'gas_date': 'yr', 'gas_date_width': 'yr'}
+    var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EL', gas_name, 'mean_latency', 'min_latency',
+                 'max_latency', 'trop_age_of_air', 'strat_age_of_air', 'atm_stratum', 'gas_date', 'gas_date_width')
+    map_constants = {'site_lat': obs_lat, 'trop_eqlat': trop_eqlat, 'prof_ref_lat': trop_ref_lat, 'surface_alt': z_surf,
+                     'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
-        map_name = os.path.join(map_dir, '{}{}_{}.map'.format(site_abbrev, mod_utils.format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M')))
-        mod_utils.write_map_file(map_name, obs_lat, trop_eqlat, trop_ref_lat, z_obs, z_trop_met, use_eqlat_strat,
+        map_name = os.path.join(map_dir, )
+        mod_utils.write_map_file(map_name, obs_lat, trop_eqlat, trop_ref_lat, z_surf, z_trop_met, use_eqlat_strat,
                                  map_dict, units_dict, var_order=var_order)
 
-    return map_dict, units_dict
+    return map_dict, units_dict, map_constants
+
+
+def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site_abbrevs='xx', write_maps=False,
+                                 **prior_kwargs):
+
+    num_profiles = max(np.size(inpt) for inpt in [mod_data, obs_dates, utc_offsets, site_abbrevs])
+
+    def check_input(inpt, name, allowed_types):
+        type_err_msg = '{} must be either a collect or single instance of one of the types: {}'.format(
+            name, ', '.join(t.__name__ for t in allowed_types)
+        )
+        if np.ndim(inpt) > 1:
+            raise ValueError('{} must be 1-dimensional'.format(name))
+        elif np.ndim(inpt) == 1:
+            if np.size(inpt) != num_profiles:
+                raise ValueError('{} must either be a scalar or 1D with the same number of elements ({}) as '
+                                 'mod_file_data, obs_date, utc_offset, and site_abbrevs'.format(name, num_profiles))
+            if not isinstance(inpt[0], allowed_types):
+                raise TypeError(type_err_msg)
+        elif np.ndim(inpt) == 0:
+            if not isinstance(inpt, allowed_types):
+                raise TypeError(type_err_msg)
+            return [inpt] * num_profiles
+        else:
+            return inpt
+
+    # Input checking. Make sure these are the right type and either the same size as each other or a single value. In
+    # the latter case, replicate it. These will have one
+    mod_data = check_input(mod_data, 'mod_data', (str, dict))
+    obs_dates = check_input(obs_dates, 'obs_dates', (dt.datetime, pd.Timestamp))
+    utc_offsets = check_input(utc_offsets, 'utc_offsets', (dt.timedelta, pd.Timedelta))
+    site_abbrevs = check_input(site_abbrevs, 'site_abbrevs', (str,))
+
+    # species will each be generated for every site.
+    if isinstance(species, (str, TraceGasTropicsRecord)):
+        species = [species]
+
+    # if given species names, convert to the actual records.
+    species = [_gas_records[s]() if isinstance(s, str) else s for s in species]
+
+    if write_maps:
+        maps_dir = write_maps
+        write_maps = True
+    else:
+        maps_dir = ''
+
+    # MAIN LOOP #
+    # Loop over the requested profiles, creating a prior for each gas requested. Check that the other variables are all
+    # the same for each gas, then combine them to make a single .map file or dict for each profile
+    ancillary_variables = ('Height', 'Temp', 'Pressure', 'PT', 'EL')
+    for iprofile in range(num_profiles):
+        var_order = list(ancillary_variables)
+        for ispecie, specie_record in enumerate(species):
+            var_order.append(specie_record.gas_name)
+            specie_profile, specie_units, specie_constants = \
+                generate_single_tccon_prior(mod_data[iprofile], obs_dates[iprofile], utc_offsets[iprofile],
+                                            specie_record, site_abbrev=site_abbrevs[iprofile], write_map=False,
+                                            **prior_kwargs)
+
+            if ispecie == 0:
+                profile_dict = specie_profile
+                units_dict = specie_units
+                map_constants = specie_constants
+            else:
+                for ancvar in ancillary_variables:
+                    if not np.allclose(specie_profile[ancvar], profile_dict[ancvar], equal_nan=True):
+                        raise RuntimeError('Got different vectors for {} for difference species'.format(ancvar))
+
+                # All good? Add the current specie concentration to the dicts
+                gas_name = specie_record.gas_name
+                profile_dict[gas_name] = specie_profile[gas_name]
+                units_dict[gas_name] = specie_units[gas_name]
+
+        # Write the combined .map file for all the requested species
+        if write_maps:
+            map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], ))
+            mod_utils.write_map_file(map_name, variables=profile_dict, units=units_dict, var_order=var_order,
+                                     **map_constants)
 
 
 ###########################################
@@ -1337,7 +1500,7 @@ def prior_wrapper(i, my_co2, ntimes, nlat, nlon, geos_prof_data, geos_surf_data,
 
     mod_dict['constants'] = {'obs_lat': geos_prof_data['lat'][ilat]}
 
-    map_dict, _ = generate_tccon_prior(mod_dict, geos_dates[itime], dt.timedelta(hours=0), **prior_kwargs)
+    map_dict, _ = generate_single_tccon_prior(mod_dict, geos_dates[itime], dt.timedelta(hours=0), **prior_kwargs)
     my_co2[itime, :, ilat, ilon] = map_dict['co2']
 
 
@@ -1385,7 +1548,7 @@ def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None,
     else:
         geos_prof_data['EL'] = np.full_like(geos_prof_data['PT'], np.nan)
 
-    # Third, pass each column to as a mod file-like dictionary, passing it to generate_tccon_prior, and storing the
+    # Third, pass each column to as a mod file-like dictionary, passing it to generate_single_tccon_prior, and storing the
     # result in a CO2 array.
     ntimes, nlev, nlat, nlon = geos_prof_data['H'].shape
     prior_kwargs.update({'use_eqlat_strat': use_eqlat_strat, 'write_map': False, 'use_geos_grid': True})
