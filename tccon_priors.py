@@ -275,14 +275,68 @@ class TraceGasTropicsRecord(object):
         df_combined.loc[interpolated, 'interp_flag'] = 1
         df_combined.loc[extrapolated, 'interp_flag'] = 2
 
-        # Finally handle the extrapolation. Only these values will have latency
+        # Almost there - handle the extrapolation. Only these values will have latency
         ex_inds = extrapolated.to_numpy().nonzero()[0]
         for i in ex_inds:
             timestamp = df_combined.index[i]
             df_combined.loc[timestamp, 'dmf_mean'], quality_dict = cls._calc_monthly_gas(df_combined[~extrapolated], timestamp.year, timestamp.month)
             df_combined.loc[timestamp, 'latency'] = quality_dict['latency']
 
+        # Do any last post-processing to handle any problems that arise during extrapolation. We'll verify that the
+        # indices remain unchanged by the processing and the original columns remain in the data frame (though
+        # additional columns may be added)
+        orig_index = df_combined.index
+        orig_columns = df_combined.columns
+        df_combined = cls._extrap_post_proc_hook(df_combined)
+
+        if not (df_combined.index == orig_index).all():
+            raise RuntimeError('The data frame returned from the extrapolation post processing has different indices '
+                               'than it did before the processing')
+        if any(c not in df_combined.columns for c in orig_columns):
+            raise RuntimeError('One or more columns are missing from the data frame returned by the extrapolation post '
+                               'processing')
+
         return df_combined
+
+    @classmethod
+    def _extrap_post_proc_hook(cls, gas_df):
+        """
+        Method to handle any necessary post processing of trace gas trends after extrapolated to the full time required
+
+        The default behavior is to replace all dates extrapolated backwards with a smoothed version. This avoids issues
+        when the extrapolation causes the seasonal cycle to become larger and larger as it goes back in time.
+
+        This method should be overridden in subclasses if more careful treatment is required.
+
+        :param gas_df: the data frame indexed by date giving the gas concentration (column "dmf_mean"), interpolation
+         flag ("interp_flag") and latency ("latency").
+        :type gas_df: :class:`pandas.DataFrame`
+
+        :return: the data frame with values adjusted. Will have the same indices and columns. Note: subclass override
+         methods must be sure to return the data frame with the same indices and the original columns. New columns may
+         be added, but none of the original columns can be removed.
+        :rtype: :class:`pandas.DataFrame`
+        """
+
+        # Testing showed that N2O and CH4 at least were very succeptible to an ever increasing seasonal cycle amplitude
+        # as the extrapolation backward in time got further and further. This is the simplest fix, a 12 month average
+        # wipes out the seasonal cycle, and since the central tendency didn't get messed up, this result is at least
+        # reasonable.
+        #
+        # We allow Pandas to fill in values at the beginning (limit_direction='backward') with the nearest value to keep
+        # the data frame defined over the full date range. Yes this will flatten the trend out in those first six
+        # months, but since those first six months contribute very little to the age-spectrum average concentration for
+        # any time period relevant to TCCON, that's not going to affect the priors much. A proper linear extrapolation
+        # would be better long-term.
+        #
+        # Alternately, data from sites like
+        # https://www.eea.europa.eu/data-and-maps/daviz/atmospheric-concentration-of-carbon-dioxide-4
+        # that extend back further could be used to at least get the shape of the trends. If early (pre 1990) data
+        # becomes crucial, that is probably the best approach.
+        smoothed_conc = gas_df.dmf_mean.rolling(window=12, center=True).mean().interpolate(method='index', limit_direction='backward')
+        xx = gas_df.latency < 0
+        gas_df.loc[xx, 'dmf_mean'] = smoothed_conc
+        return gas_df
 
     @staticmethod
     def _calc_monthly_gas(df, year, month, limit_extrapolation_to=None):
