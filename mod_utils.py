@@ -238,6 +238,10 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     return out_dict
 
 
+def map_file_name(site_abbrev, obs_lat, obs_date):
+    return '{}{}_{}.map'.format(site_abbrev, format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M'))
+
+
 def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tropopause_alt, strat_used_eqlat,
                    variables, units, var_order=None):
     """
@@ -1077,7 +1081,7 @@ def age_of_air(lat, z, ztrop, ref_lat=45.0):
     return aoa
 
 
-def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=45.0):
+def seasonal_cycle_factor(lat, z, ztrop, fyr, species, ref_lat=45.0):
     """
     Calculate a factor to multiply a concentration by to account for the seasonal cycle.
 
@@ -1104,12 +1108,18 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species='co2', ref_lat=45.0):
     :return: the seasonal cycle factor as a numpy array. Multiply this by a deseasonalized concentration at (lat, z) to
      get the concentration including the seasonal cycle
     """
-    season_cycle_coeffs = {'co2': 0.007}
+    season_cycle_coeffs = {'h2o': 0.0, 'co2': 0.007, 'n2o': 0.0, 'co': 0.2, 'ch4': 0.012, 'hf': 0.0}
 
     aoa = age_of_air(lat, z, ztrop, ref_lat=ref_lat)
-    sv = np.sin(2*np.pi *(fyr - 0.834 - aoa))
-    svnl = sv + 1.80 * np.exp(-((lat - 74)/41)**2)*(0.5 - sv**2)
-    sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
+    if species == 'co2':
+        sv = np.sin(2*np.pi *(fyr - 0.834 - aoa))
+        svnl = sv + 1.80 * np.exp(-((lat - 74)/41)**2)*(0.5 - sv**2)
+        sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
+    else:
+        sv = np.sin(2*np.pi * (fyr - 0.78))  # basic seasonal variation
+        svl = sv * (lat / 15.0) / np.sqrt(1 + (lat / 15.0)**2.0)  # latitude dependence
+        sca = svl * np.exp(-aoa / 0.85)  # altitude dependence
+
     return 1 + sca * season_cycle_coeffs[species]
 
 
