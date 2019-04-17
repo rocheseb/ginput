@@ -1430,7 +1430,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
                      'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
-        map_name = os.path.join(map_dir, )
+        map_name = os.path.join(map_dir, mod_utils.map_file_name(site_abbrev, obs_lat, obs_date))
         mod_utils.write_map_file(map_name, obs_lat, trop_eqlat, trop_ref_lat, z_surf, z_trop_met, use_eqlat_strat,
                                  map_dict, units_dict, var_order=var_order)
 
