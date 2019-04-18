@@ -25,7 +25,6 @@ pp. 32295-32314).
 
 from __future__ import print_function, division
 
-from abc import abstractmethod, ABCMeta
 from contextlib import closing
 import ctypes
 import datetime as dt
@@ -39,6 +38,7 @@ import pandas as pd
 import re
 from scipy.interpolate import LinearNDInterpolator
 from scipy.optimize import minimize_scalar
+import xarray as xr
 
 # TODO: move all into package and use a proper relative import
 import mod_utils
@@ -476,9 +476,18 @@ class TraceGasTropicsRecord(object):
 
             # Add a zero age to the beginning of age
             age = np.concatenate([[0], age.to_numpy().squeeze()])
-            out_df = pd.DataFrame(index=out_dates, columns=age)
-            # Put the lagged record, without any age spectrum applied, as the zero age data
-            out_df.iloc[:, 0] = df_lagged['dmf_mean']
+            theta = np.array([0.0])  # placeholder value
+
+            n_dates = out_dates.size
+            n_ages = age.size
+            n_theta = theta.size
+
+            out_array = xr.DataArray(np.full((n_dates, n_ages, n_theta), np.nan),
+                                     coords=[('date', out_dates), ('age', age), ('theta', theta)])
+
+            # Put the lagged record, without any age spectrum applied, as the zero age data, for all higher variables
+            # using broadcasting
+            out_array[:, 0] = df_lagged['dmf_mean'].reindex(out_dates).to_numpy().reshape(-1, 1)
 
             for i in range(spectra.shape[0]):
                 # The first step is to put the trace gas record on the same time resolution as the age spectra. This is
@@ -526,10 +535,10 @@ class TraceGasTropicsRecord(object):
                 this_out_df = conv_df.reindex(tmp_index).interpolate(method='index').reindex(out_dates)
 
                 # And store this result in the output data frame, remembering that we added an extra row at the
-                # beginning for zero age air
-                out_df.iloc[:, i+1] = this_out_df.reindex(out_df.index).values
+                # beginning for zero age air, and again using broadcasting.
+                out_array[:, i+1] = this_out_df.reindex(out_dates).to_numpy().reshape(-1, 1)
 
-            gas_conc[region] = out_df
+            gas_conc[region] = out_array
 
         return gas_conc
 
@@ -578,25 +587,9 @@ class TraceGasTropicsRecord(object):
         # vortex). We'll stitch them together after.
         gas_by_region = dict()
 
-        # For each region, interpolate to the date and ages we need by creating a new data frame that has just the
-        # entries for the months bracketing the obs date plus the actual obs date and obs ages.
-        prev_month = mod_utils.start_of_month(date, pd.Timestamp)
-        next_month = prev_month + relativedelta(months=1)
-        date_timestamp = pd.Timestamp(date)
-        df_dates = pd.unique(pd.DatetimeIndex([prev_month, date_timestamp, next_month]))
-        ages_index = pd.Float64Index(ages)
-
         for region in self.age_spec_regions:
-            df_ages = np.unique(np.concatenate([self.conc_strat[region].columns, ages_index]))
-            region_df = self.conc_strat[region].reindex(df_dates, axis=0).reindex(df_ages, axis=1)
-
-            # Interpolate to fill in the ages first, then the date. Do it this way because if an age has no data in
-            # the surrounding months, we can't interpolate to the desired date
-            region_df.interpolate(method='index', axis=0, limit_area='inside', inplace=True)
-            region_df.interpolate(method='index', axis=1, limit_area='inside', inplace=True)
-
-            region_df = region_df.reindex(pd.DatetimeIndex([date_timestamp]), axis=0).reindex(ages_index, axis=1)
-            gas_by_region[region] = region_df.T  # transpose to put the ages as the index - makes more sense now that there's only one date
+            region_arr = self.conc_strat[region]
+            gas_by_region[region] = region_arr.interp(date=date, age=ages, method='linear')
 
         gas_conc = gas_by_region['midlat']
         xx_tropics = np.abs(eqlat) < 20.0
@@ -612,11 +605,11 @@ class TraceGasTropicsRecord(object):
         gas_conc[xx_vortex] = gas_by_region['vortex'][xx_vortex]
 
         if as_dataframe:
-            return gas_conc, None
+            return gas_conc.to_dataframe(name='dmf_mean').drop(['theta', 'date'], axis=1), None
         elif not return_scalar:
-            return gas_conc.to_numpy().squeeze(), None
+            return gas_conc, None
         else:
-            return gas_conc.to_numpy().item(), None
+            return gas_conc.item(), None
 
     def get_gas_for_dates(self, dates, deseasonalize=False, as_dataframe=False):
         """
