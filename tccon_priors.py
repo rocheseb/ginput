@@ -117,6 +117,9 @@ class TraceGasTropicsRecord(object):
     _age_spectrum_time_file = os.path.join(_age_spectrum_data_dir, 'time.txt')
     _default_sbc_lag = relativedelta(months=2)
 
+    # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
+    _no_theta_coord = np.array([0.])
+
     def __init__(self, first_date=None, last_date=None, lag=None):
         # For the stratosphere data, since the age spectra are defined over a 30 year window, we need to make sure
         # we have values back to slightly more than 30 years before the first TCCON data. Assuming that's around 2004,
@@ -181,7 +184,9 @@ class TraceGasTropicsRecord(object):
         :return: a data frame indexed by age with one column, "fraction" containing the fraction remaining.
         :rtype: :class:`pandas.DataFrame`
         """
-        return pd.DataFrame(data=np.ones_like(ages, dtype=np.float), columns=['fraction'], index=ages)
+        n_ages = np.size(ages)
+        arr = xr.DataArray(data=np.ones([n_ages, 1], dtype=np.float), coords=[('age', ages), ('theta', cls._no_theta_coord)])
+        return arr
 
     @classmethod
     def _load_age_spectrum_data(cls, region, normalize_spectra=True):
@@ -476,7 +481,7 @@ class TraceGasTropicsRecord(object):
 
             # Add a zero age to the beginning of age
             age = np.concatenate([[0], age.to_numpy().squeeze()])
-            theta = np.array([0.0])  # placeholder value
+            theta = fgas.theta
 
             n_dates = out_dates.size
             n_ages = age.size
@@ -489,54 +494,57 @@ class TraceGasTropicsRecord(object):
             # using broadcasting
             out_array[:, 0] = df_lagged['dmf_mean'].reindex(out_dates).to_numpy().reshape(-1, 1)
 
-            for i in range(spectra.shape[0]):
-                # The first step is to put the trace gas record on the same time resolution as the age spectra. This is
-                # necessary for the convolution to work. Note that the age spectra aren't assigned to any specific date,
-                # we just need the adjacent points in the age spectra and gas record to have the same spacing in time.
-                max_dec_year = mod_utils.date_to_decimal_year(df_lagged.index.max())
-                # 1950 is the year Arlyn Andrews used in her code. That will cause some NaNs at the beginning of the
-                # record before our gas records start, but that's fine.
-                new_index = np.arange(1950.0, max_dec_year, delt)
-                # To handle the reindexing properly, we need to keep the original indices in until we handle the
-                # interpolation to the new values. For this part we need to use the decimal years as the index
-                tmp_index = np.unique(np.concatenate([df_lagged['dec_year'], new_index]))
-                df_asi = df_lagged.set_index('dec_year', drop=False).reindex(tmp_index).interpolate(method='index').reindex(new_index)
+            for ispec in range(spectra.shape[0]):
+                for itheta in range(n_theta):
+                    # The first step is to put the trace gas record on the same time resolution as the age spectra. This
+                    # is necessary for the convolution to work. Note that the age spectra aren't assigned to any
+                    # specific date, we just need the adjacent points in the age spectra and gas record to have the same
+                    # spacing in time.
+                    max_dec_year = mod_utils.date_to_decimal_year(df_lagged.index.max())
+                    # 1950 is the year Arlyn Andrews used in her code. That will cause some NaNs at the beginning of the
+                    # record before our gas records start, but that's fine.
+                    new_index = np.arange(1950.0, max_dec_year, delt)
+                    # To handle the reindexing properly, we need to keep the original indices in until we handle the
+                    # interpolation to the new values. For this part we need to use the decimal years as the index
+                    tmp_index = np.unique(np.concatenate([df_lagged['dec_year'], new_index]))
+                    df_asi = df_lagged.set_index('dec_year', drop=False).reindex(tmp_index).interpolate(method='index').reindex(new_index)
 
-                # Now we can do the convolution. Note: in Arlyn's original R code, she had to flip the age spectrum to
-                # act as the convolution kernel, but testing showed that in order to get the same answer using numpy's
-                # convolution function we had to leave the spectrum unflipped.
-                #
-                # This is because the numpy convolution operation acts to flip the kernel internally. It is defined as
-                #
-                # (a * v)[n] = \sum_{m=-\infty}^{\infty} a[m]v[n-m]
-                #
-                # Note that v is indexed with n-m. This has the effect of reversing the kernel; for n=10, a[11] gets
-                # multiplied by v[9], a[12] by v[8] and so on. R's convolve function uses a different indexing pattern
-                # that does not reverse the kernel.
-                #
-                # We want the kernel reversed because the trace gas records are defined from old to new, while the age
-                # spectra are from new to old. Therefore, we need to reverse the spectra before convolving to actually
-                # put both in the same direction.
-                #
-                # We also multiply the age spectra by the fraction of gas remaining at a given age. For something like
-                # CO2 that is not lost in the stratosphere, this will just be 1s, but for N2O, CH4, etc. that have loss
-                # then as we get to older air we also need to reduce MLO/SMO average to the fraction remaining to
-                # accurately represent the concentration in that air mass.
-                conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(),
-                                          spectra.iloc[i, :].values * fgas.values.squeeze(),
-                                          mode='valid')
-                conv_dates = new_index[(spectra.shape[1] - 1):]
-                conv_dates = dec_year_to_dtindex(conv_dates, force_first_of_month=False)
-                
-                # Finally we put the age-convolved gas concentration back onto the dates of the input dataframe, unless
-                # alternate dates were specified.
-                conv_df = pd.DataFrame(conv_result, index=conv_dates)
-                tmp_index = np.unique(np.concatenate([out_dates, conv_dates]))
-                this_out_df = conv_df.reindex(tmp_index).interpolate(method='index').reindex(out_dates)
+                    # Now we can do the convolution. Note: in Arlyn's original R code, she had to flip the age spectrum
+                    # to act as the convolution kernel, but testing showed that in order to get the same answer using
+                    # numpy's convolution function we had to leave the spectrum unflipped.
+                    #
+                    # This is because the numpy convolution operation acts to flip the kernel internally. It is defined
+                    # as
+                    #
+                    # (a * v)[n] = \sum_{m=-\infty}^{\infty} a[m]v[n-m]
+                    #
+                    # Note that v is indexed with n-m. This has the effect of reversing the kernel; for n=10, a[11] gets
+                    # multiplied by v[9], a[12] by v[8] and so on. R's convolve function uses a different indexing
+                    # pattern that does not reverse the kernel.
+                    #
+                    # We want the kernel reversed because the trace gas records are defined from old to new, while the
+                    # age spectra are from new to old. Therefore, we need to reverse the spectra before convolving to
+                    # actually put both in the same direction.
+                    #
+                    # We also multiply the age spectra by the fraction of gas remaining at a given age. For something
+                    # like CO2 that is not lost in the stratosphere, this will just be 1s, but for N2O, CH4, etc. that
+                    # have loss then as we get to older air we also need to reduce MLO/SMO average to the fraction
+                    # remaining to accurately represent the concentration in that air mass.
+                    conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(),
+                                              spectra.iloc[ispec, :].values * fgas[:, itheta].squeeze(),
+                                              mode='valid')
+                    conv_dates = new_index[(spectra.shape[1] - 1):]
+                    conv_dates = dec_year_to_dtindex(conv_dates, force_first_of_month=False)
 
-                # And store this result in the output data frame, remembering that we added an extra row at the
-                # beginning for zero age air, and again using broadcasting.
-                out_array[:, i+1] = this_out_df.reindex(out_dates).to_numpy().reshape(-1, 1)
+                    # Finally we put the age-convolved gas concentration back onto the dates of the input dataframe,
+                    # unless alternate dates were specified.
+                    conv_df = pd.DataFrame(conv_result, index=conv_dates)
+                    tmp_index = np.unique(np.concatenate([out_dates, conv_dates]))
+                    this_out_df = conv_df.reindex(tmp_index).interpolate(method='index').reindex(out_dates)
+
+                    # And store this result in the output data frame, remembering that we added an extra row at the
+                    # beginning for zero age air, and again using broadcasting.
+                    out_array[:, ispec+1, itheta] = this_out_df.reindex(out_dates).to_numpy().squeeze()
 
             gas_conc[region] = out_array
 
@@ -781,8 +789,8 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
 
     @classmethod
     def _get_frac_remaining_by_age(cls, ages):
-        fracs = [cls.calc_fn2o_from_age(a) for a in ages]
-        return pd.DataFrame(data=fracs, columns=['fraction'], index=ages)
+        fracs = np.array([cls.calc_fn2o_from_age(a) for a in ages])
+        return xr.DataArray(data=fracs[:, np.newaxis], coords=[('age', ages), ('theta', cls._no_theta_coord)])
 
     @staticmethod
     def calc_fn2o_from_age(age):
