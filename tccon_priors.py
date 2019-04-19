@@ -615,7 +615,7 @@ class TraceGasTropicsRecord(object):
         if as_dataframe:
             return gas_conc.to_dataframe(name='dmf_mean').drop(['theta', 'date'], axis=1), None
         elif not return_scalar:
-            return gas_conc, None
+            return gas_conc.squeeze(), None
         else:
             return gas_conc.item(), None
 
