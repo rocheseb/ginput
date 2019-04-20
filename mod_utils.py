@@ -123,6 +123,24 @@ class ProgressBar(object):
         sys.stdout.flush()
 
 
+def check_depedencies_newer(out_file, *dependency_files):
+    """
+    Check if
+    :param out_file:
+    :param dependency_files:
+    :return:
+    """
+    if len(dependency_files) == 0:
+        raise ValueError('Give at least one dependency file')
+
+    out_last_modified = os.path.getmtime(out_file)
+    for dep in dependency_files:
+        if os.path.getmtime(dep) > out_last_modified:
+            return True
+
+    return False
+
+
 def _get_num_header_lines(filename):
     """
     Get the number of header lines in a standard GGG file

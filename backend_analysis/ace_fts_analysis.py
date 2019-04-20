@@ -29,14 +29,15 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
     # positive and definitely not tropospheric (CH4 < 2e-6 i.e. < 2000 ppb), not in the polar vortex (abs(lat) < 50)
     # and not in the mesosphere or upper stratosphere (alt < 40).
     xx = ~np.isnan(ace_fch4) & ~np.isnan(ace_fn2o) & (ace_fch4 >= 0) & (ace_fn2o >= 0) & (ace_ch4_raw < 2e-6) & \
-         (np.abs(ace_lat[:, np.newaxis]) < 50) & (ace_alt[np.newaxis, :] < 40)
+         (np.abs(ace_lat[:, np.newaxis]) < 50) & (ace_alt[np.newaxis, :] < 65)
 
     # Define bins for F(N2O) and theta
     fn2o_bins = np.arange(0.0, 1.05, 0.05)
     fn2o_bin_centers = fn2o_bins[:-1] + np.diff(fn2o_bins) / 2
 
     #theta_bins = np.concatenate([np.arange(380, 680, 20), np.arange(680, 1080, 50), np.arange(1080, 1680, 100)])
-    theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100)])
+    #theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100)])
+    theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100), np.arange(1680, 3680, 200)])
     theta_bin_centers = theta_bins[:-1] + np.diff(theta_bins) / 2
 
     # Find outliers to avoid overly noisy relationships
