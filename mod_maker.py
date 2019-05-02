@@ -1853,7 +1853,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 
 
 def driver(start_date, end_date, GEOS_path, save_path=None, keep_latlon_prec=False, save_in_utc=False, muted=False,
-		   slant=False, alt=None, lon=None, lat=None, site_abbrv=None):
+		   slant=False, alt=None, lon=None, lat=None, site_abbrv=None, **kwargs):
 	func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
 												   muted=muted)
 	mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=GEOS_path, slant=slant,
