@@ -590,9 +590,13 @@ def querry_indices(dataset,site_lat,site_lon_180,box_lat_half_width,box_lon_half
 	merra_lon_in_box_IDs = np.where((merra_lon>=min_lon) & (merra_lon<=max_lon))[0]
 	merra_lat_in_box_IDs = np.where((merra_lat>=min_lat) & (merra_lat<=max_lat))[0]
 
-	min_lat_ID, max_lat_ID = merra_lat_in_box_IDs[0], merra_lat_in_box_IDs[-1]+1
-	min_lon_ID, max_lon_ID = merra_lon_in_box_IDs[0], merra_lon_in_box_IDs[-1]+1
+	nlon = np.size(merra_lon)
+	nlat = np.size(merra_lat)
+	min_lat_ID, max_lat_ID = merra_lat_in_box_IDs[0], (merra_lat_in_box_IDs[-1]+1) % nlat
+	min_lon_ID, max_lon_ID = merra_lon_in_box_IDs[0], (merra_lon_in_box_IDs[-1]+1) % nlon
 	# +1 because ARRAY[i:j] in python will return elements i to j-1
+	# take the modulus of the second index because if you have a lat/lon near the end of a MERRA grid we need to
+	# wrap around in the interpolation and interpolate between points on either end of the grid (periodic bdy condition)
 
 	return [min_lat_ID, max_lat_ID, min_lon_ID, max_lon_ID]
 
