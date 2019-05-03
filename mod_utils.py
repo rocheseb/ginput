@@ -1141,6 +1141,28 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species, ref_lat=45.0):
     return 1 + sca * season_cycle_coeffs[species]
 
 
+def hf_ch4_slope_fit(yrs, a, b, c, t0):
+    """
+    A fitting function appropriate to fit the trend of CH4 vs. HF slopes
+
+    This function has the form:
+
+    ..math::
+        a * exp(b*(t - t0)) + c
+
+    where t is given in years.
+
+    :param yrs: t in the above equation.
+    :type yrs: :class:`numpy.ndarray`
+
+    :param a, b, c, t0: the fitting parameters in the above equation
+    :type a, b, c, t0: float
+
+    :return: the predicted slopes at ``yrs``
+    """
+    return a * np.exp(b*(yrs - t0)) + c
+
+
 def date_to_decimal_year(date_in):
     """
     Convert a datetime object to a decimal year.

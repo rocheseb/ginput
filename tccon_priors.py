@@ -138,7 +138,18 @@ class TraceGasTropicsRecord(object):
             raise GasRecordInconsistentDimsError('Some regions have a theta dependence in their stratospheric lookup '
                                                  'table, some do not. This is not expected.')
 
-    def __init__(self, first_date=None, last_date=None, lag=None):
+    def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None):
+        first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
+        self.conc_seasonal = self.get_mlo_smo_mean(mlo_file, smo_file, first_date, last_date)
+
+        # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
+        # leave the latency
+        self.conc_trend = self.conc_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
+
+        self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
+
+    @classmethod
+    def _init_helper(cls, first_date, last_date, lag, mlo_file, smo_file):
         # For the stratosphere data, since the age spectra are defined over a 30 year window, we need to make sure
         # we have values back to slightly more than 30 years before the first TCCON data. Assuming that's around 2004,
         # a default age of 2000 - 30 = 1970 should be good.
@@ -156,17 +167,18 @@ class TraceGasTropicsRecord(object):
             last_date = dt.datetime.today() + relativedelta(years=2)
 
         if lag is None:
-            self.sbc_lag = self._default_sbc_lag
+            sbc_lag = cls._default_sbc_lag
         else:
-            self.sbc_lag = lag
+            sbc_lag = lag
 
-        self.conc_seasonal = self.get_mlo_smo_mean(first_date, last_date)
+        files_none = [mlo_file is None, smo_file is None]
+        if all(files_none):
+            mlo_file = 'ML_monthly_obs_{}.txt'.format(cls.gas_name)
+            smo_file = 'SMO_monthly_obs_{}.txt'.format(cls.gas_name)
+        elif any(files_none):
+            raise TypeError('Must give both MLO and SMO files or neither')
 
-        # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
-        # leave the latency
-        self.conc_trend = self.conc_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
-
-        self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
+        return first_date, last_date, sbc_lag, mlo_file, smo_file
 
     @classmethod
     def _get_agespec_files(cls, region):
@@ -253,22 +265,42 @@ class TraceGasTropicsRecord(object):
         return df
 
     @classmethod
-    def get_mlo_smo_mean(cls, first_date, last_date):
+    def get_mlo_smo_mean(cls, mlo_file, smo_file, first_date, last_date):
         """
         Generate the Mauna Loa/Samoa mean trace gas record from the files stored in this repository.
 
-        Reads in the :file:`data/ML_monthly_obs.txt` and :file:`data/SMO_monthly_obs.txt` files included in this
-        repository, averages them, and fills in any missing months by interpolation.
+        Reads in the given Mauna Loa and Samoa record files, averages then, fills in missing values by interpolation,
+        extrapolates as needed to provide the full record requested, and returns the result.
+
+        :param mlo_file: the name (not the full path) of the Mauna Loa flask data file that is included in the repo
+         data directory.
+        :type mlo_file: str
+
+        :param smo_file: the name (not the full path) of the Samoa flask data file that is included in the repo
+         data directory.
+        :type smo_file: str
+
+        :param first_date: the earliest date to use in the record. Note that the actual first date will always be the
+         first of the month for this date.
+        :type first_date: datetime-like
+
+        :param last_date: the latest date to include in the record. Note that if it is not the first of the month, then
+         the actual latest date used would be the next first of the month to follow this date. I.e. if this is June
+         15th, then July 1st would be used instead.
+        :type last_date: datetime-like
+
+        :return: the data frame containing the mean trace gas concentration ('dmf_mean'), a flag ('interp_flag') set
+         to 1 for any months that had to be interpolated and 2 for months that had to be extrapolated, and the latency
+         ('latency') in years that a concentration had to be extrapolated. Index by timestamp.
 
         :return: the data frame containing the mean trace gas concentration ('dmf_mean') and a flag ('interp_flag') set
          to 1 for any months that had to be interpolated. Index by timestamp.
         :rtype: :class:`pandas.DataFrame`
         """
-        df_mlo = cls.read_insitu_gas(_data_dir, 'ML_monthly_obs_%s.txt'%cls.gas_name)
-        df_smo = cls.read_insitu_gas(_data_dir, 'SMO_monthly_obs_%s.txt'%cls.gas_name)
+        df_mlo = cls.read_insitu_gas(_data_dir, mlo_file)
+        df_smo = cls.read_insitu_gas(_data_dir, smo_file)
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
-        df_combined['dmf_mean'] = df_combined[cls.gas_name].mean(axis=1)
-        df_combined.drop(['site', cls.gas_name, 'year', 'month', 'day'], axis=1, inplace=True)
+        df_combined = pd.DataFrame(df_combined[cls.gas_name].mean(axis=1), columns=['dmf_mean'])
 
         # Fill in any missing months. Add a flag so we can keep track of whether they've had to be interpolated or
         # not. Having a consistent monthly frequency makes the rest of the code easier - we can just always assume that
@@ -455,36 +487,42 @@ class TraceGasTropicsRecord(object):
 
         return val, {'flag': flag, 'latency': years_extrap}
 
-    @classmethod
-    def _calc_age_spec_gas(cls, df, lag, requested_dates=None):
-        def index_to_dec_year(dframe):
-            return [mod_utils.date_to_decimal_year(d) for d in dframe.index]
-
-        def dec_year_to_dtindex(dec_yr, force_first_of_month=False):
-            date_times = mod_utils.decimal_year_to_date(dec_yr)
-            if force_first_of_month:
-                # Get the start of the month on either side of this date. Figure out which one is closer, and set it to
-                # that.
-                for i, dtime in enumerate(date_times):
-                    som = mod_utils.start_of_month(dtime, out_type=dt.datetime)
-                    nearby_months = np.array([som, som+relativedelta(months=1)])
-                    i_time = np.argmin(np.abs(nearby_months - dtime))
-                    date_times[i] = nearby_months[i_time]
-
-            return pd.DatetimeIndex(date_times)
-
-        gas_conc = dict()
-
+    @staticmethod
+    def _make_lagged_df(df, lag):
         # Apply the requested lag by adding it to the dates that make up the index of the input data frame. Adding it
         # means that, e.g. 2018-03-01 will actually point to data from 2018-01-01, which is what we want. We're lagging
         # the data because the stratospheric boundary condition should account for the fact that it takes time for air
         # to get from the tropical surface (where MLO/SMO measure) and into the stratosphere.
         lagged_index = pd.DatetimeIndex(d + lag for d in df.index)
-        df_lagged = df.set_index(lagged_index)
+        return df.set_index(lagged_index)
+
+    @staticmethod
+    def _index_to_dec_year(dframe):
+        return [mod_utils.date_to_decimal_year(d) for d in dframe.index]
+
+    @staticmethod
+    def _dec_year_to_dtindex(dec_yr, force_first_of_month=False):
+        date_times = mod_utils.decimal_year_to_date(dec_yr)
+        if force_first_of_month:
+            # Get the start of the month on either side of this date. Figure out which one is closer, and set it to
+            # that.
+            for i, dtime in enumerate(date_times):
+                som = mod_utils.start_of_month(dtime, out_type=dt.datetime)
+                nearby_months = np.array([som, som + relativedelta(months=1)])
+                i_time = np.argmin(np.abs(nearby_months - dtime))
+                date_times[i] = nearby_months[i_time]
+
+        return pd.DatetimeIndex(date_times)
+
+    @classmethod
+    def _calc_age_spec_gas(cls, df, lag, requested_dates=None):
+        gas_conc = dict()
+
+        df_lagged = cls._make_lagged_df(df, lag)
 
         # We'll need both the date as decimal years and timestamps for different parts of this code, so make those
         # additional columns in the data frame. We'll switch between them for the index as needed
-        df_lagged = df_lagged.assign(timestamp=df_lagged.index, dec_year=index_to_dec_year)
+        df_lagged = df_lagged.assign(timestamp=df_lagged.index, dec_year=cls._index_to_dec_year)
 
         # By default, we'll assume that we want the output to be on the same dates as the input. With the lag that will
         # mean that some extra points near the beginning are NaNs, but that is expected and okay. We're more limited by
@@ -559,7 +597,7 @@ class TraceGasTropicsRecord(object):
                         # The call to dec_year_to_dtindex was ~80% of the time for this function when it was being
                         # called in every loop. There should be no reason to recalculate on every loop; the spectra
                         # should not be changing size and should therefore always give results on the same dates
-                        conv_dates = dec_year_to_dtindex(conv_dates, force_first_of_month=False)
+                        conv_dates = cls._dec_year_to_dtindex(conv_dates, force_first_of_month=False)
                         old_shape = spectra.shape[1]
                     elif spectra.shape[1] != old_shape:
                         raise NotImplementedError('Different spectra have different lengths; this is not allowed as '
@@ -629,8 +667,6 @@ class TraceGasTropicsRecord(object):
         interp_dims = {'date': date, 'age': xr.DataArray(ages, dims='level')}
         if self.strat_has_theta_dep:
             interp_dims['theta'] = xr.DataArray(theta, dims='level')
-
-        import pdb; pdb.set_trace()
 
         for region in self.age_spec_regions:
             region_arr = self.conc_strat[region]
@@ -818,6 +854,180 @@ class TraceGasTropicsRecord(object):
         return df.dmf_mean[ts], info_dict
 
 
+class HFTropicsRecord(TraceGasTropicsRecord):
+
+    # If the bin names in the ch4_hf_slopes.nc file are changed, this will need updated.
+    age_spec_regions = ('Antarctic', 'SMidlats', 'Tropics', 'NMidlats', 'Arctic')
+
+    @classmethod
+    def get_mlo_smo_mean(cls, mlo_file, smo_file, first_date, last_date):
+        """
+        Generate the Mauna Loa/Samoa mean trace gas record.
+
+        For HF, there is no MLO/SMO record because it has no presence in the troposphere. Since this method is called
+        by __init__ to set the seasonal cycle concentration, we override it to just create a data frame with the correct
+        format but with concentrations of 0 for all times.
+
+        :param mlo_file: unused, kept for consistency with other TraceGasTropicsRecord subclasses
+        :type mlo_file: str
+
+        :param smo_file: unused, kept for consistency with other TraceGasTropicsRecord subclasses
+        :type smo_file: str
+
+        :param first_date: the earliest date to use in the record. Note that the actual first date will always be the
+         first of the month for this date.
+        :type first_date: datetime-like
+
+        :param last_date: the latest date to include in the record. Note that if it is not the first of the month, then
+         the actual latest date used would be the next first of the month to follow this date. I.e. if this is June
+         15th, then July 1st would be used instead.
+        :type last_date: datetime-like
+
+        :return: the data frame containing the mean trace gas concentration ('dmf_mean'), a flag ('interp_flag') set
+         to 1 for any months that had to be interpolated and 2 for months that had to be extrapolated, and the latency
+         ('latency') in years that a concentration had to be extrapolated. Index by timestamp.
+        :rtype: :class:`pandas.DataFrame`
+        """
+
+        # HF has no tropospheric concentration. Therefore, all we need to do is to set the concentration to 0 for
+        # all dates. This will mimic the
+        if first_date.day != 1:
+            first_date = mod_utils.start_of_month(first_date)
+
+        if last_date.day != 1:
+            last_date = mod_utils.start_of_month(last_date) + relativedelta(months=1)
+        all_months = pd.date_range(first_date, last_date, freq='MS')
+        n_months = all_months.size
+
+        df_combined = pd.DataFrame(index=all_months, columns=['dmf_mean']).fillna(0.0)
+        df_combined = df_combined.assign(interp_flag=np.zeros((n_months,), dtype=np.int),
+                                         latency=np.zeros((n_months,), dtype=np.int))
+
+        # Post processing is currently unnecessary for HF (since all concentrations are 0). However, we keep this call
+        # in for consistency.
+        orig_index = df_combined.index
+        orig_columns = df_combined.columns
+        df_combined = cls._extrap_post_proc_hook(df_combined)
+
+        if not (df_combined.index == orig_index).all():
+            raise RuntimeError('The data frame returned from the extrapolation post processing has different indices '
+                               'than it did before the processing')
+        if any(c not in df_combined.columns for c in orig_columns):
+            raise RuntimeError('One or more columns are missing from the data frame returned by the extrapolation post '
+                               'processing')
+
+        return df_combined
+
+    @classmethod
+    def _calc_age_spec_gas(cls, df, lag, requested_dates=None):
+        gas_conc = dict()
+
+        df_lagged = cls._make_lagged_df(df, lag)
+
+        # We'll need both the date as decimal years and timestamps for different parts of this code, so make those
+        # additional columns in the data frame. We'll switch between them for the index as needed
+        df_lagged = df_lagged.assign(timestamp=df_lagged.index, dec_year=cls._index_to_dec_year)
+
+        # By default, we'll assume that we want the output to be on the same dates as the input. With the lag that will
+        # mean that some extra points near the beginning are NaNs, but that is expected and okay. We're more limited by
+        # how far back in time the
+        out_dates = df.index if requested_dates is None else requested_dates
+
+        # HF concentrations will be tied to CH4 concentrations via the relationships described in:
+        #   Saad et al. 2014, AMT, doi: 10.5194/amt-7-2907-2014
+        #   Washenfelder et al. 2003, GRL, doi: 10.1029/2003GL017969
+        ch4_record = CH4TropicsRecord()
+
+        for region in cls.age_spec_regions:
+            time, delt, age, spectra = cls._load_age_spectrum_data(region, normalize_spectra=True)
+
+            # Get the fraction remaining on the same ages as the age spectra are defined
+            fgas = cls.get_frac_remaining_by_age(time.values.squeeze())
+
+            # Add a zero age to the beginning of age
+            age = np.concatenate([[0], age.to_numpy().squeeze()])
+            theta = fgas.theta
+
+            n_dates = out_dates.size
+            n_ages = age.size
+            n_theta = theta.size
+
+            out_array = xr.DataArray(np.full((n_dates, n_ages, n_theta), np.nan),
+                                     coords=[('date', out_dates), ('age', age), ('theta', theta)])
+
+            # Put the lagged record, without any age spectrum applied, as the zero age data, for all higher variables
+            # using broadcasting
+            out_array[:, 0] = df_lagged['dmf_mean'].reindex(out_dates).to_numpy().reshape(-1, 1)
+
+            max_dec_year = mod_utils.date_to_decimal_year(df_lagged.index.max())
+            # 1950 is the year Arlyn Andrews used in her code. That will cause some NaNs at the beginning of the
+            # record before our gas records start, but that's fine.
+            new_index = np.arange(1950.0, max_dec_year, delt)
+            conv_dates = None
+            old_shape = -1  # will be initialized properly the first time through the loop
+
+            for ispec in range(spectra.shape[0]):
+                for itheta in range(n_theta):
+                    # The first step is to put the trace gas record on the same time resolution as the age spectra. This
+                    # is necessary for the convolution to work. Note that the age spectra aren't assigned to any
+                    # specific date, we just need the adjacent points in the age spectra and gas record to have the same
+                    # spacing in time.
+                    # To handle the reindexing properly, we need to keep the original indices in until we handle the
+                    # interpolation to the new values. For this part we need to use the decimal years as the index
+                    tmp_index = np.unique(np.concatenate([df_lagged['dec_year'], new_index]))
+                    df_asi = df_lagged.set_index('dec_year', drop=False).reindex(tmp_index).interpolate(
+                        method='index').reindex(new_index)
+
+                    # Now we can do the convolution. Note: in Arlyn's original R code, she had to flip the age spectrum
+                    # to act as the convolution kernel, but testing showed that in order to get the same answer using
+                    # numpy's convolution function we had to leave the spectrum unflipped.
+                    #
+                    # This is because the numpy convolution operation acts to flip the kernel internally. It is defined
+                    # as
+                    #
+                    # (a * v)[n] = \sum_{m=-\infty}^{\infty} a[m]v[n-m]
+                    #
+                    # Note that v is indexed with n-m. This has the effect of reversing the kernel; for n=10, a[11] gets
+                    # multiplied by v[9], a[12] by v[8] and so on. R's convolve function uses a different indexing
+                    # pattern that does not reverse the kernel.
+                    #
+                    # We want the kernel reversed because the trace gas records are defined from old to new, while the
+                    # age spectra are from new to old. Therefore, we need to reverse the spectra before convolving to
+                    # actually put both in the same direction.
+                    #
+                    # We also multiply the age spectra by the fraction of gas remaining at a given age. For something
+                    # like CO2 that is not lost in the stratosphere, this will just be 1s, but for N2O, CH4, etc. that
+                    # have loss then as we get to older air we also need to reduce MLO/SMO average to the fraction
+                    # remaining to accurately represent the concentration in that air mass.
+                    conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(),
+                                              spectra.iloc[ispec, :].values * fgas[:, itheta].squeeze(),
+                                              mode='valid')
+                    if conv_dates is None:
+                        conv_dates = new_index[(spectra.shape[1] - 1):]
+                        # The call to dec_year_to_dtindex was ~80% of the time for this function when it was being
+                        # called in every loop. There should be no reason to recalculate on every loop; the spectra
+                        # should not be changing size and should therefore always give results on the same dates
+                        conv_dates = cls._dec_year_to_dtindex(conv_dates, force_first_of_month=False)
+                        old_shape = spectra.shape[1]
+                    elif spectra.shape[1] != old_shape:
+                        raise NotImplementedError('Different spectra have different lengths; this is not allowed as '
+                                                  'currently implemented')
+
+                    # Finally we put the age-convolved gas concentration back onto the dates of the input dataframe,
+                    # unless alternate dates were specified.
+                    conv_df = pd.DataFrame(conv_result, index=conv_dates)
+                    tmp_index = np.unique(np.concatenate([out_dates, conv_dates]))
+                    this_out_df = conv_df.reindex(tmp_index).interpolate(method='index').reindex(out_dates)
+
+                    # And store this result in the output data frame, remembering that we added an extra row at the
+                    # beginning for zero age air, and again using broadcasting.
+                    out_array[:, ispec + 1, itheta] = this_out_df.reindex(out_dates).to_numpy().squeeze()
+
+            gas_conc[region] = out_array
+
+        return gas_conc
+
+
 class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
@@ -897,6 +1107,42 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
                 fch4_lut[j, :] = replace_end_nans(fch4_lut[j, :])
 
             return fch4_lut
+
+
+class CFCTropicsRecord(TraceGasTropicsRecord):
+    gas_name = 'cfc'
+
+    @classmethod
+    def read_insitu_gas(cls, fpath, fname):
+        """
+        Read a trace gas record file. Assumes that the file is of monthly average concentrations.
+
+        :param fpath: the path to the directory containing the file.
+        :type fpath: str
+
+        :param fname: the name of the file
+        :type fname: str
+
+        :return: a data frame containing the monthly trace gas data along with the site, year, month, and day. The index will
+         be a timestamp of the measurment time.
+        :rtype: :class:`pandas.DataFrame`
+        """
+        full_file_path = os.path.join(fpath, fname)
+        hlines = 1
+        with open(full_file_path, 'r') as f:
+            next_line = f.readline()
+            while next_line.startswith('#'):
+                hlines += 1
+                next_line = f.readline()
+
+        df = pd.read_csv(full_file_path, skiprows=hlines, skipinitialspace=True,
+                         delimiter=' ', header=None, names=['year', 'month', cls.gas_name, 'sd', 'n'])
+
+        # set datetime index in df (requires 'day' column)
+        df['day'] = 1
+        df.set_index(pd.to_datetime(df[['year', 'month', 'day']]), inplace=True)
+
+        return df
 
 
 # Make the list of available gases' records

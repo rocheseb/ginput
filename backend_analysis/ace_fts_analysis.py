@@ -1,16 +1,21 @@
 from __future__ import print_function, division
 
+from collections import OrderedDict
 import datetime as dt
+from dateutil.relativedelta import relativedelta
 import netCDF4 as ncdf
 import numpy as np
+import pandas as pd
 import os
 import re
+from scipy.optimize import curve_fit
 import sys
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(_mydir, '..'))
 import mod_utils, ioutils, tccon_priors
 
+_tccon_top_alt = 65.0
 
 def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
 
@@ -29,7 +34,7 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
     # positive and definitely not tropospheric (CH4 < 2e-6 i.e. < 2000 ppb), not in the polar vortex (abs(lat) < 50)
     # and not in the mesosphere or upper stratosphere (alt < 40).
     xx = ~np.isnan(ace_fch4) & ~np.isnan(ace_fn2o) & (ace_fch4 >= 0) & (ace_fn2o >= 0) & (ace_ch4_raw < 2e-6) & \
-         (np.abs(ace_lat[:, np.newaxis]) < 50) & (ace_alt[np.newaxis, :] < 65)
+         (np.abs(ace_lat[:, np.newaxis]) < 50) & (ace_alt[np.newaxis, :] < _tccon_top_alt)
 
     # Define bins for F(N2O) and theta
     fn2o_bins = np.arange(0.0, 1.05, 0.05)
@@ -48,6 +53,82 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
                                                                      theta_bins, fn2o_bins)
     _save_fch4_lut(lut_save_file, fch4_means, fch4_counts, fch4_overall, theta_overall,
                    fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins)
+
+
+def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, lut_save_file, ch4=None):
+    if ch4 is None:
+        ch4 = tccon_priors.CH4TropicsRecord()
+
+    with ncdf.Dataset(ace_ch4_file, 'r') as nch_ch4, ncdf.Dataset(ace_hf_file, 'r') as nch_hf:
+        ace_ch4 = nch_ch4.variables['CH4'][:].filled(np.nan)
+        ace_ch4_err = nch_ch4.variables['CH4_error'][:].filled(np.nan)
+        ace_hf = nch_hf.variables['HF'][:].filled(np.nan)
+        ace_hf_err = nch_hf.variables['HF_error'][:].filled(np.nan)
+        ace_lat = nch_ch4.variables['latitude'][:].filled(np.nan)
+        ace_ch4_qual = nch_ch4.variables['quality_flag'][:].filled(9)
+        ace_hf_qual = nch_ch4.variables['quality_flag'][:].filled(9)
+
+        ace_alt = nch_ch4.variables['altitude'][:].filled(np.nan)
+        ace_alt = np.tile(ace_alt, [ace_ch4.shape[0], 1])
+
+        ace_year = nch_ch4.variables['year'][:].filled(np.nan)
+        ace_dates = read_ace_date(nch_ch4)
+        ace_dates = np.tile(ace_dates.reshape(-1, 1), [1, 150])
+
+    # We do the same filtering as for the F(N2O):F(CH4) relationship, plus we require that the CH4 and HF error is < 5%.
+    xx = ~np.isnan(ace_ch4) & ~np.isnan(ace_ch4_err) & (ace_ch4_err / ace_ch4 < 0.05) & ~np.isnan(ace_hf) \
+         & ~np.isnan(ace_hf_err) & (ace_hf_err / ace_hf < 0.05) & (ace_ch4 >= 0.0) & (ace_ch4 <= 2e-6) \
+         & (ace_hf >= 0.0) & (ace_alt < _tccon_top_alt) & (ace_ch4_qual == 0) & (ace_hf_qual == 0)
+
+    # Read in the early slopes from Washenfelder et al. 2003 (doi: 10.1029/2003GL017969), table S3.
+    washenfelder_df = pd.read_csv(washenfelder_supp_table_file, header=2, sep=r'\s+')
+    washenfelder_slopes = washenfelder_df.set_index('Date').b.astype(np.float)
+    washenfelder_slopes.index = pd.DatetimeIndex(washenfelder_slopes.index)
+    washenfelder_slopes.name = 'slope'
+
+    # For each bin, get the slopes from the ACE-FTS data. Fit the data (including the Washenfelder slopes) to an
+    # exponential.
+    lat_bin_edges = OrderedDict([('Antarctic', (-90.0, -60.0)),
+                                 ('SMidlats', (-60.0, -30.0)),
+                                 ('Tropics', (-30.0, 30.0)),
+                                 ('NMidlats', (30.0, 60.0)),
+                                 ('Arctic', (60.0, 90.0))])
+    lat_bin_slopes = pd.DataFrame(index=_get_ace_date_range(ace_dates), columns=lat_bin_edges.keys())
+
+    fit_params = np.zeros([len(lat_bin_edges), 4], dtype=np.float)
+
+    for ibin, (bin_name, lat_bin) in enumerate(lat_bin_edges.items()):
+        for year_start_date in lat_bin_slopes.index:
+            year = year_start_date.year
+            print(bin_name, year)
+            lat_bin_slopes.loc[year_start_date, bin_name] = _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates,
+                                                                                   ace_ch4, ace_hf, ch4, xx, year,
+                                                                                   lat_bin)
+
+        full_series = pd.concat([washenfelder_slopes, lat_bin_slopes.loc[:, bin_name]])
+        full_series = full_series.sort_index()
+        full_series_year = full_series.index.year
+        full_series = full_series.to_numpy().astype(np.float)
+
+        # This was found to be a good initial guess for all latitude bins by trial and error. 3000.0 gets about the
+        # right magnitude at year 0, 0.18 get about the right decay, using the last slope as the offset generally works
+        # better than using the maximum (sometimes curve_fit has trouble moving this offset enough) and naturally we
+        # want t0 to be the first year. Trying to allow curve_fit to choose its own initial conditions ends badly.
+        p0 = [-3000.0, -0.18, full_series[-1], full_series_year[0]]
+        fit = curve_fit(mod_utils.hf_ch4_slope_fit, full_series_year, full_series, p0=p0)
+        fit_params[ibin, :] = fit[0]
+
+    # for the netCDF file, we'll include both the fits and the actual slopes for the ACE-FTS era. We'll use the fit
+    # to fill in values before the ACE era rather than the Washenfelder values directly because those values are
+    # irregularly spaced in time
+    first_year = washenfelder_slopes.index.min().year
+    last_year = lat_bin_slopes.index.max().year
+    full_dtindex = pd.date_range(start=dt.datetime(first_year, 1, 1), end=dt.datetime(last_year, 1, 1), freq='YS')
+
+    import pdb; pdb.set_trace()
+    _save_hf_ch4_lut(lut_save_file, lat_bin_edges, full_dtindex, lat_bin_slopes, fit_params)
+
+    return lat_bin_slopes
 
 
 def _find_ch4_outliers(ace_fn2o, ace_fch4, fn2o_bins, good_data):
@@ -102,6 +183,28 @@ def _bin_fch4(ace_fn2o, ace_fch4, ace_theta, good_data, theta_bins, fn2o_bins):
     return fch4_means, fch4_counts, fch4_overall, theta_overall
 
 
+def _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_ch4, ace_hf, ch4, xx, year, lat_bin):
+    yy = (ace_lat >= lat_bin[0]) & (ace_lat < lat_bin[1]) & (np.isclose(ace_year, year))
+    yy = yy.reshape(-1, 1)
+
+    ace_lagged_dates = pd.DatetimeIndex([d - relativedelta(months=2) for d in ace_dates[xx & yy]])
+    profile_ch4_sbc = ch4.get_gas_for_dates(ace_lagged_dates)
+
+    x = ace_hf[xx & yy] * 1e9
+    y = ace_ch4[xx & yy] * 1e9 - profile_ch4_sbc
+
+    # By default, numpy's polynomials are normalized to make fitting more reliable. convert() puts it back to the
+    # original units.
+    poly = np.polynomial.polynomial.Polynomial.fit(x, y, 1).convert()
+
+    return poly.coef[1]  # returns the slope
+
+
+def _get_year_avg_ch4_sbc(year, ch4):
+    tt = (ch4.conc_seasonal.index >= dt.datetime(year, 1, 1)) & (ch4.conc_seasonal.index < dt.datetime(year + 1, 1, 1))
+    return ch4.conc_seasonal.dmf_mean[tt].mean()
+
+
 def _save_fch4_lut(nc_filename, fch4_means, fch4_counts, fch4_overall, theta_overall,
                    fn2o_bin_centers, fn2o_bin_edges, theta_bin_centers, theta_bin_edges):
     with ncdf.Dataset(nc_filename, 'w') as nch:
@@ -131,6 +234,55 @@ def _save_fch4_lut(nc_filename, fch4_means, fch4_counts, fch4_overall, theta_ove
         ioutils.make_ncvar_helper(nch, 'theta_overall', theta_overall, (fn2o_dim,),
                                   description='Mean value of potential temperature in a given F(N2O) bin',
                                   units='K')
+
+
+def _save_hf_ch4_lut(nc_filename, lat_bin_edges, full_date_index, ace_slopes, slope_fit_params):
+    with ncdf.Dataset(nc_filename, 'w') as nch:
+
+        ch4_hf_slopes = pd.DataFrame(index=full_date_index, columns=ace_slopes.columns)
+        ch4_hf_source = pd.DataFrame(index=full_date_index, columns=ace_slopes.columns).fillna(1)
+        lat_bin_edges_df = pd.DataFrame(index=pd.Int64Index([0, 1]), columns=ace_slopes.columns)
+        # transpose so that the bins dim is second like the above dataframes
+        bin_names_char_array = ncdf.stringtochar(np.array(lat_bin_edges.keys())).T
+        slope_fit_params = slope_fit_params.T
+
+        # For each latitude bin, make a pandas series for the full date index from the fit first, then replace available
+        # years with the actual fit
+        for ibin, (bin_name, bin_edges) in enumerate(lat_bin_edges.items()):
+            lat_bin_edges_df.loc[:, bin_name] = bin_edges
+            ch4_hf_slopes.loc[:, bin_name] = mod_utils.hf_ch4_slope_fit(ch4_hf_slopes.index.year, *slope_fit_params[:, ibin])
+            ch4_hf_slopes.loc[ace_slopes.index, bin_name] = ace_slopes.loc[:, bin_name]
+            ch4_hf_source.loc[ace_slopes.index, bin_name] = 0
+
+        # Setup dimensions.
+        nbins = len(lat_bin_edges)
+        nchars = bin_names_char_array.shape[0]
+        nparams = slope_fit_params.shape[0]
+        year_dim = ioutils.make_ncdim_helper(nch, 'year', full_date_index.year.to_numpy())
+        bins_dim = nch.createDimension('latitude_bins', size=nbins)
+        bin_edges_dim = nch.createDimension('latitude_bin_edges', size=2)
+        char_dim = nch.createDimension('bin_name_length', size=nchars)
+        fit_params_dim = nch.createDimension('exp_fit_params_length', size=nparams)
+
+        # Save the variables
+        ioutils.make_ncvar_helper(nch, 'ch4_hf_slopes', ch4_hf_slopes.to_numpy().astype(np.float), [year_dim, bins_dim],
+                                  units='ppb CH4/ppb HF',
+                                  description='Slope of stratospheric CH4 concentrations vs HF concentrations from '
+                                              'ACE-FTS data for specific years and latitude bins')
+        ioutils.make_ncvar_helper(nch, 'ch4_hf_slopes_source', ch4_hf_source.to_numpy().astype(np.int), [year_dim, bins_dim],
+                                  units='N/A',
+                                  description='Flag indicating how the slope was computed. 0 means taken directly from '
+                                              'fits of ACE-FTS CH4 vs. HF; 1 means sampled from the exponential fit '
+                                              'of ACE-FTS + Washenfelder 03 slopes')
+        ioutils.make_ncvar_helper(nch, 'slope_fit_params', slope_fit_params, [fit_params_dim, bins_dim],
+                                  description='Fitting parameters a, b, c, and t0 for a function of form '
+                                              '"a * exp(b*(t - t0)) + c" used to fit the temporal trend of CH4 vs. HF '
+                                              'slopes, where t is the year (e.g. 2004)')
+        ioutils.make_ncvar_helper(nch, 'bin_edges', lat_bin_edges_df.to_numpy().astype(np.float), [bin_edges_dim, bins_dim],
+                                  units='degrees_north',
+                                  description='The edges of the latitude bins')
+        ioutils.make_ncvar_helper(nch, 'bin_names', bin_names_char_array, [char_dim, bins_dim],
+                                  description='The names used for the latitude bins')
 
 
 def calc_fraction_remaining_from_acefts(nc_file, gas_name, gas_record, tropopause_approach='theta'):
@@ -267,3 +419,19 @@ def read_ace_date(ace_nc_handle, out_type=dt.datetime):
 
     dates = [out_type(y, m, d) + dt.timedelta(hours=h) for y, m, d, h in zip(ace_years, ace_months, ace_days, ace_hours)]
     return np.array(dates)
+
+
+def _get_ace_date_range(ace_dates, freq='YS'):
+    min_date = np.min(ace_dates)
+    if min_date < dt.datetime(min_date.year, 4, 1):
+        start_year = min_date.year
+    else:
+        start_year = min_date.year + 1
+
+    max_date = np.max(ace_dates)
+    if max_date >= dt.datetime(max_date.year, 10, 1):
+        end_year = max_date.year
+    else:
+        end_year = max_date.year - 1
+
+    return pd.date_range(start=dt.datetime(start_year, 1, 1), end=dt.datetime(end_year, 1, 1), freq=freq)
