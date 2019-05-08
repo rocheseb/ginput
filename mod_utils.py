@@ -1163,6 +1163,23 @@ def hf_ch4_slope_fit(yrs, a, b, c, t0):
     return a * np.exp(b*(yrs - t0)) + c
 
 
+def is_tropics(lat, doy, ages):
+    return np.abs(lat) < 20.0
+
+
+def is_vortex(lat, doy, ages):
+    if not isinstance(doy, np.ndarray):
+        doy = np.full_like(lat, doy)
+    xx_vortex = np.zeros_like(lat, dtype=np.bool_)
+    xx_vortex[(doy > 140) & (doy < 245) & (lat < -55.0) & (ages > 3.25)] = True
+    xx_vortex[(doy > 275) & (doy < 60) & (lat > 55.0) & (ages > 3.25)] = True
+    return xx_vortex
+
+
+def is_midlat(lat, doy, ages):
+    return ~is_tropics(lat, doy, ages) & ~is_vortex(lat, doy, ages)
+
+
 def date_to_decimal_year(date_in):
     """
     Convert a datetime object to a decimal year.
