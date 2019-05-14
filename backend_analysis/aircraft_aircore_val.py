@@ -359,7 +359,7 @@ def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, data_type
 
     if limit_by_zsurf:
         z_surf = full_py_mapdate['constants']['Surface altitude']
-        z_alt = full_py_mapdate['profile']['Height']
+        z_alt = mapdat['Height'].values
         zz = z_alt >= z_surf
         this_prof_co2 = this_prof_co2[zz]
         this_prof_z = this_prof_z[zz]
@@ -478,6 +478,10 @@ def plot_binned_rmse(data_root, bin_edges, bin_centers, ztype='pres', years=None
         ax.legend()
         all_ax.append(ax)
         ax.set_title(dtype)
+        ax.grid()
+        if ztype == 'alt-trop':
+            ax.set_xlim(ax.get_xlim())
+            ax.plot(ax.get_xlim(), [0, 0], color='k', linestyle='--', linewidth=2)
 
     return fig, all_ax
 
