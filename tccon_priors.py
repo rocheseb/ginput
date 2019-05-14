@@ -1074,20 +1074,24 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
         # Then get the relationship between F(N2O) and F(CH4) derived from ACE-FTS data. This lookup table was created
         # using `backend_analysis/ace_fts_analysis.make_fch4_fn2o_lookup_table()`.
         with xr.open_dataset(cls._fn2o_fch4_lut_file) as dset:
-            fch4_lut = dset.fch4  # need to use fn2o.data b/c the theta coordinates are different
+            fch4_lut = dset.fch4
+
+            # Extrapolate out to all thetas before interpolating to F(N2O). If we don't do this first, then we'll lose
+            # information at higher thetas. Say we need to interpolate to F(N2O) = 0.03 and the F(N2O) = 0.025 bin goes
+            # out to theta = 3500, but the F(N2O) = 0.075 bin only goes to theta = 2500. Then F(N2O) = 0.03 will get
+            # NaNs for theta > 2500 and lose any information from F(N2O) = 0.025 past theta = 2500, despite being closer
+            # to the F(N2O) = 0.025 bin.
+            for j in range(fch4_lut.shape[0]):
+                fch4_lut[j, :] = replace_end_nans(fch4_lut[j, :])
 
             # Interpolate the F(CH4) remaining to the F(N2O) for each age, then replace the F(N2O) coordinate with the
             # age one.
+            # need to use fn2o.data b/c the theta coordinates are different
             fch4_lut = fch4_lut.interp(fn2o=fn2o.data, kwargs={'fill_value': 'extrapolate'})
             # I couldn't find a way to rename one of the coordinates, so I think we have to create a new DataArray
             fch4_lut = xr.DataArray(fch4_lut.data, coords=[('age', ages), ('theta', fch4_lut.theta)])
             # Fill in NaNs along each theta line
             fch4_lut = fch4_lut.interpolate_na('theta')
-
-            #for i in range(fch4_lut.shape[1]):
-            #    fch4_lut[:, i] = replace_end_nans(fch4_lut[:, i])
-            for j in range(fch4_lut.shape[0]):
-                fch4_lut[j, :] = replace_end_nans(fch4_lut[j, :])
 
             return fch4_lut
 
