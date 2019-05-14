@@ -490,6 +490,22 @@ def iter_time_periods(year, freq):
         mid_date = calc_mid_date(start_date)
 
 
+def lat_v_theta_clim_name(year, target_pres, by_hour):
+    # Include the target pressure levels in the name to avoid accidentally overwriting files if we want to experiment
+    # with different pressure levels.
+    if isinstance(target_pres, (int, float)):
+        target_pres_name_str = '{}hPa'.format(target_pres)
+    else:
+        target_pres_name_str = '-'.join(str(p) for p in target_pres) + 'hPa'
+
+    if by_hour:
+        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_{}_by_hour.nc'.format(year, target_pres_name_str)
+    else:
+        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_{}.nc'.format(year, target_pres_name_str)
+
+    return nc_file_name
+
+
 def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timedelta(days=14), by_hour=False,
                                       skip_if_missing=False, bin_var='latitude', target_pres=700):
     """
@@ -575,18 +591,7 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
     all_theta_stats = _cat_stats(all_theta_stats)
     all_lat_stats = _cat_stats(all_lat_stats)
 
-    # Include the target pressure levels in the name to avoid accidentally overwriting files if we want to experiment
-    # with different pressure levels.
-    if isinstance(target_pres, (int, float)):
-        target_pres_name_str = '{}hPa'.format(target_pres)
-    else:
-        target_pres_name_str = '-'.join(str(p) for p in target_pres) + 'hPa'
-
-    if by_hour:
-        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_{}_by_hour.nc'.format(year, target_pres_name_str)
-    else:
-        nc_file_name = 'GEOS_FPIT_lat_vs_theta_{}_{}.nc'.format(year, target_pres_name_str)
-
+    nc_file_name = lat_v_theta_clim_name(year, target_pres, by_hour)
     nc_file_name = os.path.join(save_path, nc_file_name)
     save_bin_ncdf_file(nc_file_name, dates, hours, bin_var, all_bin_centers, all_theta_stats, all_lat_stats,
                        percentiles=percentiles, target_pres=target_pres)

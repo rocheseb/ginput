@@ -14,15 +14,20 @@ import sys
 _mydir = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(_mydir, '..'))
 import mod_utils, ioutils, tccon_priors
+from ggg_logging import logger
 
 _tccon_top_alt = 65.0
 
+
 def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
 
+    logger.info('Instantiating trace gas records')
     n2o_record = tccon_priors.N2OTropicsRecord()
     ace_alt, ace_fn2o, ace_theta = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', n2o_record,
                                                                        tropopause_approach='theta')
     ch4_record = tccon_priors.CH4TropicsRecord()
+
+    logger.info('Reading ACE data')
     _, ace_fch4, _ = calc_fraction_remaining_from_acefts(ace_ch4_file, 'CH4', ch4_record,
                                                          tropopause_approach='theta')
 
@@ -30,6 +35,7 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
         ace_ch4_raw = nch.variables['CH4'][:].filled(np.nan)
         ace_lat = nch.variables['latitude'][:].filled(np.nan)
 
+    logger.info('Binning F(CH4) vs. F(N2O)')
     # We're looking for reliable stratospheric relationships. Therefore we limit to data where the concentration is
     # positive and definitely not tropospheric (CH4 < 2e-6 i.e. < 2000 ppb), not in the polar vortex (abs(lat) < 50)
     # and not in the mesosphere or upper stratosphere (alt < 40).
@@ -51,14 +57,18 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
     # Do the actual binning
     fch4_means, fch4_counts, fch4_overall, theta_overall = _bin_fch4(ace_fn2o, ace_fch4, ace_theta, xx & oo,
                                                                      theta_bins, fn2o_bins)
+
+    logger.info('Saving F(CH4):F(N2O) file')
     _save_fch4_lut(lut_save_file, fch4_means, fch4_counts, fch4_overall, theta_overall,
                    fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins)
 
 
 def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, lut_save_file, ch4=None):
     if ch4 is None:
+        logger.info('Instantiating CH4 record')
         ch4 = tccon_priors.CH4TropicsRecord()
 
+    logger.info('Loading ACE data')
     with ncdf.Dataset(ace_ch4_file, 'r') as nch_ch4, ncdf.Dataset(ace_hf_file, 'r') as nch_hf:
         ace_ch4 = nch_ch4.variables['CH4'][:].filled(np.nan)
         ace_ch4_err = nch_ch4.variables['CH4_error'][:].filled(np.nan)
@@ -83,6 +93,7 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
             add_clams_age_to_file(ace_ch4_file)
         ace_ages = nch_ch4.variables['age'][:].filled(np.nan)
 
+    logger.info('Calculating CH4 vs. HF slopes')
     # We do the same filtering as for the F(N2O):F(CH4) relationship, plus we require that the CH4 and HF error is < 5%.
     # Also have to filter for excessively high HF concentrations, or it will mess up the tropics. Generally HF doesn't
     # exceed 3 ppb and the ultra high values were all > 200 ppb, so 10 should leave all reasonable data and exclude
@@ -110,7 +121,7 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     for ibin, (bin_name, bin_fxn) in enumerate(lat_bin_functions.items()):
         for year_start_date in lat_bin_slopes.index:
             year = year_start_date.year
-            print(bin_name, year)
+            logger.debug('Generating {} slopes for {}'.format(bin_name, year))
             lat_bin_slopes.loc[year_start_date, bin_name], lat_bin_counts.loc[year_start_date, bin_name] \
                 = _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_ch4, ace_hf, ch4, xx,
                                          year, bin_fxn)
@@ -135,6 +146,7 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     last_year = lat_bin_slopes.index.max().year
     full_dtindex = pd.date_range(start=dt.datetime(first_year, 1, 1), end=dt.datetime(last_year, 1, 1), freq='YS')
 
+    logger.info('Saving CH4 vs. HF slopes')
     _save_hf_ch4_lut(lut_save_file, lat_bin_functions, full_dtindex, lat_bin_slopes, lat_bin_counts, fit_params)
 
     return lat_bin_slopes, lat_bin_counts

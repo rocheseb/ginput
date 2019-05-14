@@ -11,16 +11,44 @@ gas follows a similar scheme:
   A parameterized seasonal cycle (again, developed for previous versions of GGG from in situ observations) is applied.
   We use the parameterized seasonal cycle, rather than the real seasonal cycle in the MLO/SMO record, because the latter
   will not capture any latitudinal dependence.
-* In the stratospheric overworld (potential temperature > 380 K), an age of air from CLAMS (Chemical Lagrangian Model of
-  the Stratosphere), looked up based on a potential vorticity-based equivalent latitude and potential temperature, is
-  used to determine what date to look up concentration from the MLO/SMO record. In this case, the MLO/SMO record with
-  seasonality is used, as we assume that all air enters the stratosphere in the tropics, and will include the tropical
-  seasonal cycle. This age is convolved with an age spectrum to account for mixing over time.
+* In the stratosphere, concentrations are calculated as the convolution of an age spectrum with the two month-lagged
+  MLO/SMO record. That is, for different mean ages of air, there are defined spectra that provide the contribution of
+  different ages to that air parcel. These can also be thought of as a probability distribution of age of air in a
+  given parcel. The trace gas concentration for a given age and date is the product of the age spectrum and the trace
+  gas record. A. Andrews derived different age spectra for tropics, midlatitudes, and polar vortex, therefore each
+  level of the profile must be classified into one of these three regions by latitude, day of year, and age.
 * In the middle world (above the tropopause & theta < 380 K), the profiles are interpolate with respect to theta between
   the tropopause and the first overworld level.
 
 The stratospheric approach was developed by Arlyn Andrews, based on her research in Andrews et al. 2001 (JGR, 106 [D23],
-pp. 32295-32314).
+pp. 32295-32314). For gases other than CO2, chemical loss or production in the stratosphere must be accounted for.
+
+* For N2O, the relationship of N2O vs. age of air from Andrews et al. (2001) was recast as fraction of N2O remaining vs.
+  age, which allows us to use the MLO/SMO record directly rather than apply a growth factor. That is, in A. Andrews
+  code, she uses a function to calculate the N2O concentration based on age from a relationship derived in the 1990s,
+  then adds a growth factor to account for increase in N2O concentration since the 1990s. We instead use MLO/SMO to
+  get the stratospheric boundary condition, then multiply by the fraction remaining vs. age to get the actual
+  concentration. This allows us to use the MLO/SMO record to get the growth, rather than having to calculate a growth
+  rate separately.
+* For CH4, we use ACE-FTS data to derive a CH4-N2O relationship. Again, this is in terms of fraction remaining for both
+  CH4 and N2O.  Therefore for a given age, we find the fraction of N2O remaining and then use the ACE-FTS relationship
+  to convert that to a fraction of CH4 remaining. Since the F(CH4):F(N2O) relationship varies with potential
+  temperature, the CH4 lookup table includes a theta dependence.
+* For HF, we use relationships between HF and CH4 concentration derived in Saad et al. (2014,
+  doi: 10.5194/amt-7-2907-2014) and Washenfelder et al. (2003, doi: 10.1029/2003GL017969). These papers derive a slope
+  of CH4 concentration vs. HF concentration. Saad et al. find variations in the slope with latitude; for consistency
+  with the other gases, we use the tropics/midlatitudes/polar vortex regions rather than the latitude bins defined in
+  Saad et al. We rederive our own slopes during the ACE-FTS era (from ~2004) for these three bins, then prepend the
+  slopes back to ~1977 from Washenfelder et al. and fit the slope vs. time with an exponential. The HF code is set up
+  to use the ACE-FTS derived slopes directly in years where they are available and slopes derived from the exponential
+  fit outside the ACE window. The HF concentrations are calculated from CH4 concentrations assuming a linear
+  relationship where the y-intercept is assumed to be the normal two month-lagged MLO/SMO stratospheric boundary
+  condition and the slope is that precomputed from the ACE-FTS data or Washenfelder et al. Unlike N2O and CH4, fraction
+  remaining was not used since the Washenfelder et al. results make clear the CH4/HF relationship changes substantially
+  with time and we do not have ACE-FTS data to derive the F(CH4)/F(HF) relationship before 2004, after which the
+  change in slope vs. time is essentially flat.
+
+:func:`generate_single_tccon_prior` is the primary function to use to create a single prior. It is used for all gases
 """
 
 from __future__ import print_function, division
