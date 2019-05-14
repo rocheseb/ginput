@@ -141,10 +141,13 @@ class TraceGasTropicsRecord(object):
     No arguments required for initialization.
     """
 
-    # these should be overridden in subclasses to specify the name and unit of the gas. The name must be recognized by
-    # the seasonal cycle function
+    # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
+    # seasonal cycle function to determine if it uses the CO2 parameterization or the default one, and the seasonal
+    # cycle coefficient scales the seasonal cycle. If the coefficient is None, the seasonal cycle function will raise
+    # an error.
     gas_name = ''
     gas_unit = ''
+    gas_seas_cyc_coeff = None
 
     months_avg_for_trend = 12
     age_spec_regions = ('tropics', 'midlat', 'vortex')
@@ -878,6 +881,9 @@ class TraceGasTropicsRecord(object):
 
 
 class HFTropicsRecord(TraceGasTropicsRecord):
+    gas_name = 'hf'
+    gas_unit = 'ppb'
+    gas_seas_cyc_coeff = 0.0
 
     ch4_hf_slopes_file = os.path.join(_data_dir, 'ch4_hf_slopes.nc')
 
@@ -1014,11 +1020,13 @@ class HFTropicsRecord(TraceGasTropicsRecord):
 class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
+    gas_seas_cyc_coeff = 0.007
 
 
 class N2OTropicsRecord(TraceGasTropicsRecord):
     gas_name = 'n2o'
     gas_unit = 'ppb'
+    gas_seas_cyc_coeff = 0.0
 
     @classmethod
     def get_frac_remaining_by_age(cls, ages):
@@ -1048,6 +1056,7 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
 class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'ch4'
     gas_unit = 'ppb'
+    gas_seas_cyc_coeff = 0.012
 
     _fn2o_fch4_lut_file = os.path.join(_data_dir, 'n2o_ch4_acefts.nc')
 
@@ -1096,44 +1105,15 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
             return fch4_lut
 
 
-class CFCTropicsRecord(TraceGasTropicsRecord):
-    gas_name = 'cfc'
-
-    @classmethod
-    def read_insitu_gas(cls, fpath, fname):
-        """
-        Read a trace gas record file. Assumes that the file is of monthly average concentrations.
-
-        :param fpath: the path to the directory containing the file.
-        :type fpath: str
-
-        :param fname: the name of the file
-        :type fname: str
-
-        :return: a data frame containing the monthly trace gas data along with the site, year, month, and day. The index will
-         be a timestamp of the measurment time.
-        :rtype: :class:`pandas.DataFrame`
-        """
-        full_file_path = os.path.join(fpath, fname)
-        hlines = 1
-        with open(full_file_path, 'r') as f:
-            next_line = f.readline()
-            while next_line.startswith('#'):
-                hlines += 1
-                next_line = f.readline()
-
-        df = pd.read_csv(full_file_path, skiprows=hlines, skipinitialspace=True,
-                         delimiter=' ', header=None, names=['year', 'month', cls.gas_name, 'sd', 'n'])
-
-        # set datetime index in df (requires 'day' column)
-        df['day'] = 1
-        df.set_index(pd.to_datetime(df[['year', 'month', 'day']]), inplace=True)
-
-        return df
+class COTropicsRecord(TraceGasTropicsRecord):
+    gas_name = 'co'
+    gas_unit = '?'
+    gas_seas_cyc_coeff = 0.2
 
 
 # Make the list of available gases' records
-_gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord]}
+_gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord,
+                                        COTropicsRecord]}
 
 
 def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):
@@ -1508,7 +1488,7 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
     # with latitude.
     year_fraction = mod_utils.date_to_frac_year(obs_date)
     prof_gas[xx_trop] *= mod_utils.seasonal_cycle_factor(obs_lat, z_grid[xx_trop], z_trop, year_fraction,
-                                                         species=gas_record.gas_name, ref_lat=ref_lat)
+                                                         species=gas_record, ref_lat=ref_lat)
 
     return prof_gas, {'co2_latency': profs_latency, 'co2_date': prof_gas_date, 'co2_date_width': prof_gas_date_width,
                       'age_of_air': prof_aoa, 'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}

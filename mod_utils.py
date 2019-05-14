@@ -1117,8 +1117,10 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species, ref_lat=45.0):
      :func:`date_to_frac_year`.
     :type fyr: float
 
-    :param species: which species seasonal cycle to calculate; affects the amplitude. Options are: 'co2'.
-    :type species: str
+    :param species: a child class of :class:`~tccon_priors.TraceGasTropicsRecord` that defines a gas name and seasonal
+     cycle coefficient. May be an instance of the class or the class itself. If the gas name is "co2", then a
+     CO2-specific parameterization is used.
+    :type species: :class:`~tccon_priors.TraceGasTropicsRecord`
 
     :param ref_lat: reference latitude for the age of air. Set to 45N as an approximation of where the NH emissions are.
     :type ref_lat: float
@@ -1126,10 +1128,11 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species, ref_lat=45.0):
     :return: the seasonal cycle factor as a numpy array. Multiply this by a deseasonalized concentration at (lat, z) to
      get the concentration including the seasonal cycle
     """
-    season_cycle_coeffs = {'h2o': 0.0, 'co2': 0.007, 'n2o': 0.0, 'co': 0.2, 'ch4': 0.012, 'hf': 0.0}
+    if species.gas_seas_cyc_coeff is None:
+        raise TypeError('The species record ({}) does not define a seasonal cycle coefficient')
 
     aoa = age_of_air(lat, z, ztrop, ref_lat=ref_lat)
-    if species == 'co2':
+    if species.gas_name.lower() == 'co2':
         sv = np.sin(2*np.pi *(fyr - 0.834 - aoa))
         svnl = sv + 1.80 * np.exp(-((lat - 74)/41)**2)*(0.5 - sv**2)
         sca = svnl * np.exp(-aoa/0.20)*(1 + 1.33*np.exp(-((lat-76)/48)**2) * (z+6)/(z+1.4))
@@ -1138,7 +1141,7 @@ def seasonal_cycle_factor(lat, z, ztrop, fyr, species, ref_lat=45.0):
         svl = sv * (lat / 15.0) / np.sqrt(1 + (lat / 15.0)**2.0)  # latitude dependence
         sca = svl * np.exp(-aoa / 0.85)  # altitude dependence
 
-    return 1 + sca * season_cycle_coeffs[species]
+    return 1 + sca * species.gas_seas_cyc_coeff
 
 
 def hf_ch4_slope_fit(yrs, a, b, c, t0):
