@@ -956,8 +956,27 @@ class HFTropicsRecord(TraceGasTropicsRecord):
 
     @classmethod
     def _calc_hf_from_ch4(cls, ch4_concs, ch4_record, year, ch4_hf_slopes, ch4_hf_fit_params, lag):
-        year_indices = (ch4_record.conc_seasonal.index >= (pd.Timestamp(year, 1, 1)) - lag) & (ch4_record.conc_seasonal.index < (pd.Timestamp(year + 1, 1, 1) - lag))
-        sbc_ch4 = ch4_record.conc_seasonal.loc[year_indices, 'dmf_mean'].mean()
+        # We need to calculate the strat. bdy. cond. for each data point in ch4_concs because it's important to have the
+        # correct boundary condition since that is the intercept for the HF:CH4 slope. Originally I tried to use just an
+        #
+        sbc_ch4 = xr.DataArray(np.zeros_like(ch4_concs.data), coords=ch4_concs.coords)
+
+        # Holy incompatible types: ch4_concs.date is a numpy datetime64 which can't be added to a relativedelta. It is
+        # easiest to convert to a datetime index, but that *also* can't be added to a relativedelta, so we have to
+        # convert it further to an array of standard Python datetime objects.
+        ch4_date_as_pydt = pd.DatetimeIndex(ch4_concs.coords['date'].data).to_pydatetime()
+        for age in ch4_concs.coords['age'].data:
+            # Since the CH4 record seasonal dataframe isn't lagged, to get the strat. bdy. cond. for the right dates, we
+            # need to subtract the age from the ch4_concs date coordinate (to get back to the date when air of that age
+            # entered the stratosphere) and subtract the lag (to get back to when air entering the stratosphere was at
+            # the tropical surface).
+            ch4_sbc_dates = ch4_date_as_pydt - mod_utils.frac_years_to_reldelta(age) - lag
+            ch4_sbc_dates = pd.DatetimeIndex(ch4_sbc_dates).unique()
+            # Get the CH4 record on the required dates and broadcast into the date/theta slice for this age in the
+            # sbc_ch4
+            tmp_index = ch4_record.conc_seasonal.index.append(ch4_sbc_dates).unique()
+            ch4_sbc_vec = ch4_record.conc_seasonal.reindex(tmp_index).interpolate(method='index').reindex(ch4_sbc_dates).dmf_mean
+            sbc_ch4.loc[{'age': age}] = ch4_sbc_vec.to_numpy().reshape(-1, 1)
 
         if year in ch4_hf_slopes.coords['year']:
             slope = ch4_hf_slopes.sel(year=year)
@@ -967,6 +986,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
         # The slope is CH4 vs. HF. We want HF as a function of CH4 so
         #    CH4 - sbc = m * HF
         # => HF = (CH4 - sbc)/m
+
         return (ch4_concs - sbc_ch4) / slope
 
     @classmethod
@@ -1001,8 +1021,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
 
             ch4_concentrations = ch4_record.conc_strat[region]
             hf_concentrations = xr.DataArray(np.full_like(ch4_concentrations, np.nan), coords=ch4_concentrations.coords)
-            for date in hf_concentrations.coords['date']:
-                year = int(date.dt.year)
+            for year in np.unique(hf_concentrations.coords['date'].dt.year):
                 xx_date = slice(pd.Timestamp(year, 1, 1), pd.Timestamp(year, 12, 31))
                 ch4_subset = ch4_concentrations.sel(date=xx_date)
                 hf_concentrations.loc[{'date': xx_date}] = cls._calc_hf_from_ch4(ch4_subset, ch4_record, year, region_ch4_hf_slopes, region_ch4_hf_fits_params, lag)
