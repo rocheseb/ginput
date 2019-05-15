@@ -1,6 +1,7 @@
 from __future__ import print_function, division
 
 import datetime as dt
+from hashlib import sha1
 import netCDF4 as ncdf
 import numpy as np
 
@@ -131,7 +132,7 @@ def make_ncvar_helper(nc_handle, var_name, var_data, dims, **attrs):
 def add_creation_info(nc_handle, creation_note=None, creation_att_name='history'):
     now = dt.datetime.now()
     commit_hash, branch, _ = mod_utils.hg_commit_info()
-    clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean() else 'dirty'
+    clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean(ignore_files=[nc_handle.filepath()]) else 'dirty'
     if creation_note is not None:
         description = 'Created by {note} on {date} (mercurial commit {commit} on branch {branch}, {cleanstate})'
     else:
@@ -140,3 +141,14 @@ def add_creation_info(nc_handle, creation_note=None, creation_att_name='history'
     description = description.format(note=creation_note, date=now, commit=commit_hash, branch=branch, cleanstate=clean_or_dirty)
 
     nc_handle.setncattr(creation_att_name, description)
+
+
+def add_dependent_file_hash(nc_handle, hash_att_name, dependent_file):
+    hashobj = sha1()
+    with open(dependent_file, 'rb') as fobj:
+        block = fobj.read(4096)
+        while block:
+            hashobj.update(block)
+            block = fobj.read(4096)
+
+    nc_handle.setncattr(hash_att_name, hashobj.hexdigest())

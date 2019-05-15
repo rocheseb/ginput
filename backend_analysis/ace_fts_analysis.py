@@ -263,6 +263,9 @@ def _save_fch4_lut(nc_filename, fch4_means, fch4_counts, fch4_overall, theta_ove
 def _save_hf_ch4_lut(nc_filename, ace_ch4_file, ace_hf_file, lat_bin_edges, full_date_index, ace_slopes, ace_counts, slope_fit_params):
     with ncdf.Dataset(nc_filename, 'w') as nch:
         ioutils.add_creation_info(nch, creation_note='ace_fts_analysis.make_hf_ch4_slopes')
+        ioutils.add_dependent_file_hash(nch, 'ace_ch4_file_sha1', ace_ch4_file)
+        ioutils.add_dependent_file_hash(nch, 'ace_hf_file_sha1', ace_hf_file)
+
         nch.ace_ch4_file = ace_ch4_file
         nch.ace_hf_file = ace_hf_file
 

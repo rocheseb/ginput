@@ -391,7 +391,7 @@ def hg_commit_info(hg_dir=None):
     return parent, branch, parent_date
 
 
-def hg_is_commit_clean(hg_dir=None, ignore_untracked=True):
+def hg_is_commit_clean(hg_dir=None, ignore_untracked=True, ignore_files=tuple()):
     """
     Checks if a mercurial directory is clean.
 
@@ -410,9 +410,21 @@ def hg_is_commit_clean(hg_dir=None, ignore_untracked=True):
     :rtype: bool
     """
     hg_dir = _hg_dir_helper(hg_dir)
+    hg_root = subprocess.check_output(['hg', 'root'], cwd=hg_dir).strip()
     summary = subprocess.check_output(['hg', 'status'], cwd=hg_dir).splitlines()
+
+    def in_ignore(f):
+        f = os.path.join(hg_root, f)
+        for ignore in ignore_files:
+            if os.path.samefile(f, ignore):
+                return True
+        return False
+
     for line in summary:
-        if ignore_untracked and line.strip().startswith('?'):
+        status, hg_file = [p.strip() for p in line.split(' ', 1)]
+        if ignore_untracked and status == '?':
+            pass
+        elif in_ignore(hg_file):
             pass
         else:
             return False
