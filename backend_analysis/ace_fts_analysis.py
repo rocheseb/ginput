@@ -9,6 +9,8 @@ import pandas as pd
 import os
 import re
 from scipy.optimize import curve_fit
+from statsmodels.robust.robust_linear_model import RLM
+from statsmodels.robust.norms import TukeyBiweight
 import sys
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
@@ -99,8 +101,8 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     # exceed 3 ppb and the ultra high values were all > 200 ppb, so 10 should leave all reasonable data and exclude
     # unreasonable data (this occurred in tropics 2005)
     xx = ~np.isnan(ace_ch4) & ~np.isnan(ace_ch4_err) & (ace_ch4_err / ace_ch4 < 0.05) & ~np.isnan(ace_hf) \
-         & ~np.isnan(ace_hf_err) & (ace_hf_err / ace_hf < 0.05) & (ace_ch4 >= 0.0) & (ace_ch4 <= 2e-6) \
-         & (ace_hf >= 0.0) & (ace_alt < _tccon_top_alt) & (ace_ch4_qual == 0) & (ace_hf_qual == 0) & (ace_hf < 10e-9)
+         & ~np.isnan(ace_hf_err) & (ace_hf_err / ace_hf < 0.05) & (ace_ch4 <= 2e-6) \
+         & (ace_alt < _tccon_top_alt) & (ace_ch4_qual == 0) & (ace_hf_qual == 0) & (ace_hf < 10e-9)
 
     # Read in the early slopes from Washenfelder et al. 2003 (doi: 10.1029/2003GL017969), table S3.
     washenfelder_df = pd.read_csv(washenfelder_supp_table_file, header=2, sep=r'\s+')
@@ -147,7 +149,8 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     full_dtindex = pd.date_range(start=dt.datetime(first_year, 1, 1), end=dt.datetime(last_year, 1, 1), freq='YS')
 
     logger.info('Saving CH4 vs. HF slopes')
-    _save_hf_ch4_lut(lut_save_file, lat_bin_functions, full_dtindex, lat_bin_slopes, lat_bin_counts, fit_params)
+    _save_hf_ch4_lut(lut_save_file, ace_ch4_file, ace_hf_file, lat_bin_functions, full_dtindex,
+                     lat_bin_slopes, lat_bin_counts, fit_params)
 
     return lat_bin_slopes, lat_bin_counts
 
@@ -213,11 +216,12 @@ def _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_
     x = ace_hf[xx & yy] * 1e9
     y = ace_ch4[xx & yy] * 1e9 - profile_ch4_sbc
 
-    # By default, numpy's polynomials are normalized to make fitting more reliable. convert() puts it back to the
-    # original units.
-    poly = np.polynomial.polynomial.Polynomial.fit(x, y, 1).convert()
+    # We use the robust fitting method with Tukey's biweighting as in Saad et al. 2014. That paper used `robustfit` from
+    # Matlab, RLM from statsmodels is the Python equivalent. We do not include an intercept because we are using the
+    # CH4 stratospheric boundary condition as the intercept, and we've already subtracted that.
+    slope = RLM(y, x, M=TukeyBiweight()).fit().params.item()
 
-    return poly.coef[1], np.sum(xx & yy)  # returns the slope
+    return slope, np.sum(xx & yy)
 
 
 def _get_year_avg_ch4_sbc(year, ch4):
@@ -256,8 +260,11 @@ def _save_fch4_lut(nc_filename, fch4_means, fch4_counts, fch4_overall, theta_ove
                                   units='K')
 
 
-def _save_hf_ch4_lut(nc_filename, lat_bin_edges, full_date_index, ace_slopes, ace_counts, slope_fit_params):
+def _save_hf_ch4_lut(nc_filename, ace_ch4_file, ace_hf_file, lat_bin_edges, full_date_index, ace_slopes, ace_counts, slope_fit_params):
     with ncdf.Dataset(nc_filename, 'w') as nch:
+        ioutils.add_creation_info(nch, creation_note='ace_fts_analysis.make_hf_ch4_slopes')
+        nch.ace_ch4_file = ace_ch4_file
+        nch.ace_hf_file = ace_hf_file
 
         ch4_hf_slopes = pd.DataFrame(index=full_date_index, columns=ace_slopes.columns)
         ch4_hf_count = pd.DataFrame(index=full_date_index, columns=ace_counts.columns).fillna(0)

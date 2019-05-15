@@ -363,9 +363,14 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
                 mapf.write('\n')
 
 
-def hg_commit_info(hg_dir=None):
+def _hg_dir_helper(hg_dir):
     if hg_dir is None:
         hg_dir = os.path.dirname(__file__)
+    return os.path.abspath(hg_dir)
+
+
+def hg_commit_info(hg_dir=None):
+    hg_dir = _hg_dir_helper(hg_dir)
     if len(hg_dir) == 0:
         # If in the current directory, then dirname(__file__) gives an empty string, which isn't allowed as the argument
         # to cwd in check_output
@@ -384,6 +389,35 @@ def hg_commit_info(hg_dir=None):
     branch = log_dict['branch']
     parent_date = log_dict['date']
     return parent, branch, parent_date
+
+
+def hg_is_commit_clean(hg_dir=None, ignore_untracked=True):
+    """
+    Checks if a mercurial directory is clean.
+
+    By default, a directory is considered clean if all tracked files have no uncommitted changes. Untracked files are
+    not considered. Setting ``ignore_untracked`` to ``False`` means that there must be no untracked files for the
+    directory to be clean.
+
+    :param hg_dir: optional, the mercurial directory to check. If not given, defaults to the one containing this repo.
+    :type hg_dir: str
+
+    :param ignore_untracked: optional, set to ``False`` to require that there be no untracked files in the directory for
+     it to be considered clean.
+    :type ignore_untracked: bool
+
+    :return: ``True`` if the directory is clean, ``False`` otherwise.
+    :rtype: bool
+    """
+    hg_dir = _hg_dir_helper(hg_dir)
+    summary = subprocess.check_output(['hg', 'status'], cwd=hg_dir).splitlines()
+    for line in summary:
+        if ignore_untracked and line.strip().startswith('?'):
+            pass
+        else:
+            return False
+
+    return True
 
 
 def _lrange(*args):

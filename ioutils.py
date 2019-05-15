@@ -4,6 +4,8 @@ import datetime as dt
 import netCDF4 as ncdf
 import numpy as np
 
+import mod_utils
+
 
 def make_ncdim_helper(nc_handle, dim_name, dim_var, **attrs):
     """
@@ -124,3 +126,17 @@ def make_ncvar_helper(nc_handle, var_name, var_data, dims, **attrs):
     var[:] = var_data
     var.setncatts(attrs)
     return var
+
+
+def add_creation_info(nc_handle, creation_note=None, creation_att_name='history'):
+    now = dt.datetime.now()
+    commit_hash, branch, _ = mod_utils.hg_commit_info()
+    clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean() else 'dirty'
+    if creation_note is not None:
+        description = 'Created by {note} on {date} (mercurial commit {commit} on branch {branch}, {cleanstate})'
+    else:
+        description = 'Created with commit {commit} on branch {branch} ({cleanstate}) on {date}'
+
+    description = description.format(note=creation_note, date=now, commit=commit_hash, branch=branch, cleanstate=clean_or_dirty)
+
+    nc_handle.setncattr(creation_att_name, description)
