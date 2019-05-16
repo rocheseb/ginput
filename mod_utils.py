@@ -20,6 +20,7 @@ import subprocess
 import sys
 
 import mod_constants as const
+from ggg_logging import logger
 
 _std_model_pres_levels = np.array([1000.0, 975.0, 950.0, 925.0, 900.0, 875.0, 850.0, 825.0, 800.0, 775.0, 750.0, 725.0,
                                    700.0, 650.0, 600.0, 550.0, 500.0, 450.0, 400.0, 350.0, 300.0, 250.0, 200.0, 150.0,
@@ -160,6 +161,13 @@ def _get_num_header_lines(filename):
     return int(header_info.split()[0])
 
 
+def _write_header(fobj, header_lines, n_data_columns, file_mode='w'):
+    line1 = ' {} {}\n'.format(len(header_lines)+1, n_data_columns)
+    fobj.write(line1)
+    header_lines = [l if l.endswith('\n') else l + '\n' for l in header_lines]
+    fobj.writelines(header_lines)
+
+
 def read_mod_file(mod_file, as_dataframes=False):
     """
     Read a TCCON .mod file.
@@ -254,6 +262,69 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     out_dict['constants'] = constants
     out_dict['profile'] = data
     return out_dict
+
+
+def read_isotopes(isotopes_file, gases_only=False):
+    """
+    Read the isotopes defined in an isotopologs.dat file
+
+    :param isotopes_file: the path to the isotopologs.dat file
+    :type isotopes_file: str
+
+    :param gases_only: set to ``True`` to return a tuple of only the distinct gases, not the individual isotopes.
+     Default is ``False``, which includes the different isotope numbers.
+    :type gases_only: bool
+
+    :return: tuple of isotope or gas names
+    :rtype: tuple(str)
+    """
+    nheader = _get_num_header_lines(isotopes_file)
+    with open(isotopes_file, 'r') as fobj:
+        for i in range(nheader):
+            fobj.readline()
+
+        isotopes = []
+        for line in fobj:
+            iso_number = line[3:5].strip()
+            iso_name = line[6:14].strip()
+            if not gases_only:
+                iso_name = iso_number + iso_name
+            if iso_name not in isotopes:
+                isotopes.append(iso_name)
+
+        return tuple(isotopes)
+
+
+def get_isotopes_file(isotopes_file=None, use_gggpath=False):
+    """
+    Get the path to the isotopologs.dat file
+
+    :param isotopes_file: user input path. If this is not None, it is returned after checking that it exists.
+    :type isotopes_file: str or None
+
+    :param use_gggpath: set to ``True`` to find the isotopologs.dat file at the location defined by the GGGPATH
+     environmental variable. If ``False`` and ``isotopes_file`` is ``None`` then the isotopologs.date file included in
+     this repo is used.
+    :type use_gggpath: bool
+
+    :return: the path to the isotopologs.dat file
+    :rtype: str
+    """
+    if isotopes_file is not None:
+        if not os.path.isfile(isotopes_file):
+            raise IOError('The isotopes path {} is not a file'.format(isotopes_file))
+        return isotopes_file
+    elif use_gggpath:
+        gggpath = os.getenv('GGGPATH')
+        if gggpath is None:
+            raise EnvironmentError('use_gggpath=True requires the GGGPATH environmental variable to be set')
+        isotopes_file = os.path.join(gggpath, 'isotopologs', 'isotopologs.dat')
+        if not os.path.isfile(isotopes_file):
+            raise IOError('Failed to find isotopologs.dat at {}. Either update your GGGPATH environmental variable or '
+                          'set use_gggpath to False.'.format(isotopes_file))
+        return isotopes_file
+    else:
+        return os.path.join(const.data_dir, 'isotopologs.dat')
 
 
 def map_file_name(site_abbrev, obs_lat, obs_date):
@@ -361,6 +432,64 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
             mapf.write(','.join(formatted_values))
             if i < size_check - 1:
                 mapf.write('\n')
+
+
+def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_alt, profile_gases, isotope_opts=None):
+    """
+    Write a .vmr file
+    :param vmr_file:
+    :param tropopause_alt:
+    :param profile_date:
+    :param profile_lat:
+    :param profile_alt:
+    :param profile_gases:
+    :return:
+    """
+    isotope_opts = dict() if isotope_opts is None else isotope_opts
+    gas_name_order = read_isotopes(get_isotopes_file(**isotope_opts), gases_only=True)
+    gas_name_order_lower = [name.lower() for name in gas_name_order]
+    gas_name_mapping = {k: None for k in gas_name_order}
+
+    if np.ndim(profile_alt) != 1:
+        raise ValueError('profile_alt must be 1D')
+
+    # Check that all the gases in the profile_gases dict are expected to be written.
+    for gas_name, gas_data in profile_gases.items():
+        if gas_name.lower() not in gas_name_order_lower:
+            logger.warning('Gas "{}" was not listed in the isotopologs.dat file and will not be written to the .vmr '
+                           'file'.format(gas_name))
+        elif np.shape(gas_data) != np.shape(profile_alt):
+            raise ValueError('Gas "{}" has a different shape ({}) than the altitude data ({})'.format(
+                gas_name, np.shape(gas_data), np.shape(profile_alt)
+            ))
+        elif np.ndim(gas_data) != 1:
+            raise ValueError('Gas "{}" is not 1D'.format(gas_name))
+        else:
+            idx = gas_name_order_lower.index(gas_name.lower())
+            gas_name_mapping[gas_name_order[idx]] = gas_name
+
+    # Write the header, which starts with the number of header lines and data columns, then has the tropopause altitude,
+    # profile date as a decimal year, and profile latitude. I'm going to skip the secular trends, seasonal cycle, and
+    # latitude gradient because those are not necessary.
+    alt_fmt = '   {:.3f} '
+    gas_fmt = '{:.3E}  '
+    table_header = ['Altitude'] + ['{:10}'.format(name) for name in gas_name_order]
+    header_lines = [' ZTROP_VMR: {:.1f}'.format(tropopause_alt),
+                    ' DATE_VMR: {:.3f}'.format(date_to_decimal_year(profile_date)),
+                    ' LAT_VMR: {:.2f}'.format(profile_lat),
+                    ' '.join(table_header)]
+
+    with open(vmr_file, 'w') as fobj:
+        _write_header(fobj, header_lines, len(gas_name_order) + 1)
+        for i in range(np.size(profile_alt)):
+            fobj.write(alt_fmt.format(profile_alt[i]))
+            for gas_name in gas_name_order:
+                if gas_name_mapping[gas_name] is not None:
+                    gas_conc = profile_gases[gas_name_mapping[gas_name]][i]
+                else:
+                    gas_conc = 0.0
+                fobj.write(gas_fmt.format(gas_conc))
+            fobj.write('\n')
 
 
 def _hg_dir_helper(hg_dir):
