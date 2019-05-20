@@ -955,7 +955,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
         return list(bin_names), slopes, fit_params
 
     @classmethod
-    def _calc_hf_from_ch4(cls, ch4_concs, ch4_record, year, ch4_hf_slopes, ch4_hf_fit_params, lag):
+    def _calc_hf_from_ch4(cls, ch4_concs, ch4_record, year, ch4_hf_slopes, ch4_hf_fit_params, lag, use_ace_specific_slopes=False):
         # We need to calculate the strat. bdy. cond. for each data point in ch4_concs because it's important to have the
         # correct boundary condition since that is the intercept for the HF:CH4 slope. Originally I tried to use just an
         #
@@ -978,7 +978,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
             ch4_sbc_vec = ch4_record.conc_seasonal.reindex(tmp_index).interpolate(method='index').reindex(ch4_sbc_dates).dmf_mean
             sbc_ch4.loc[{'age': age}] = ch4_sbc_vec.to_numpy().reshape(-1, 1)
 
-        if year in ch4_hf_slopes.coords['year']:
+        if use_ace_specific_slopes and year in ch4_hf_slopes.coords['year']:
             slope = ch4_hf_slopes.sel(year=year)
         else:
             slope = mod_utils.hf_ch4_slope_fit(year, *ch4_hf_fit_params)
