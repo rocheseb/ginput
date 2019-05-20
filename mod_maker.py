@@ -118,7 +118,7 @@ def shell_error(msg, ecode=1):
 	sys.exit(ecode)
 
 
-def compute_h2o_dmf(qv,rmm):
+def compute_h2o_dmf(qv, rmm):
 	"""
 	compute h2o dry mole fraction from specific humidity
 	"""

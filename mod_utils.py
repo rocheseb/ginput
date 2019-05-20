@@ -328,7 +328,7 @@ def get_isotopes_file(isotopes_file=None, use_gggpath=False):
 
 
 def map_file_name(site_abbrev, obs_lat, obs_date):
-    return '{}{}_{}.map'.format(site_abbrev, format_lat(obs_lat), obs_date.strftime('%Y%m%d_%H%M'))
+    return '{}{}_{}.map'.format(site_abbrev, format_lat(obs_lat, prec=0), obs_date.strftime('%Y%m%d_%H%M'))
 
 
 def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tropopause_alt, strat_used_eqlat,
@@ -492,6 +492,50 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
             fobj.write('\n')
 
 
+def format_lon(lon, prec=2):
+    def to_str(lon):
+        ew = 'E' if lon > 0 else 'W'
+        fmt_str = '{{:.{}f}}{{}}'.format(prec)
+        return fmt_str.format(abs(lon), ew)
+
+    def to_float(lon):
+        if lon[-1] == 'E':
+            sign = 1
+        elif lon[-1] == 'W':
+            sign = -1
+        else:
+            raise ValueError('A longitude string must end in "E" or "W"')
+
+        return float(lon[:-1]) * sign
+
+    if isinstance(lon, str):
+        return to_float(lon)
+    else:
+        return to_str(lon)
+
+
+def format_lat(lat, prec=2):
+    def to_str(lat):
+        ns = 'N' if lat > 0 else 'S'
+        fmt_str = '{{:.{}f}}{{}}'.format(prec)
+        return fmt_str.format(abs(lat), ns)
+
+    def to_float(lat):
+        if lat[-1] == 'N':
+            sign = 1
+        elif lat[-1] == 'S':
+            sign = -1
+        else:
+            raise ValueError('A latitude string must end in "N" or "S"')
+
+        return float(lat[:-1]) * sign
+
+    if isinstance(lat, str):
+        return to_float(lat)
+    else:
+        return to_str(lat)
+
+
 def _hg_dir_helper(hg_dir):
     if hg_dir is None:
         hg_dir = os.path.dirname(__file__)
@@ -567,12 +611,6 @@ def _lrange(*args):
     if not isinstance(r, list):
         r = list(r)
     return r
-
-
-def format_lat(lat, prec=0):
-    fmt = '{{:.{}f}}{{}}'.format(prec)
-    direction = 'N' if lat >= 0 else 'S'
-    return fmt.format(abs(lat), direction)
 
 
 def round_to_zero(val):

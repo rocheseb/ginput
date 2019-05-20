@@ -15,8 +15,11 @@ import sys
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(_mydir, '..'))
+
 import mod_utils, ioutils, tccon_priors
 from ggg_logging import logger
+from backend_utils import read_ace_var, read_ace_date, read_ace_theta
+
 
 _tccon_top_alt = 65.0
 
@@ -100,9 +103,11 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     # Also have to filter for excessively high HF concentrations, or it will mess up the tropics. Generally HF doesn't
     # exceed 3 ppb and the ultra high values were all > 200 ppb, so 10 should leave all reasonable data and exclude
     # unreasonable data (this occurred in tropics 2005)
+    #
+    # Fill values in v3 are -999 so remove values below -900
     xx = ~np.isnan(ace_ch4) & ~np.isnan(ace_ch4_err) & (ace_ch4_err / ace_ch4 < 0.05) & ~np.isnan(ace_hf) \
-         & ~np.isnan(ace_hf_err) & (ace_hf_err / ace_hf < 0.05) & (ace_ch4 <= 2e-6) \
-         & (ace_alt < _tccon_top_alt) & (ace_ch4_qual == 0) & (ace_hf_qual == 0) & (ace_hf < 10e-9)
+         & ~np.isnan(ace_hf_err) & (ace_hf_err / ace_hf < 0.05) & (ace_ch4 < -900.0) & (ace_ch4 <= 2e-6) \
+         & (ace_hf < -900.0) & (ace_alt < _tccon_top_alt) & (ace_ch4_qual == 0) & (ace_hf_qual == 0) & (ace_hf < 10e-9)
 
     # Read in the early slopes from Washenfelder et al. 2003 (doi: 10.1029/2003GL017969), table S3.
     washenfelder_df = pd.read_csv(washenfelder_supp_table_file, header=2, sep=r'\s+')
@@ -415,47 +420,6 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, gas_record, tropopaus
     pbar.finish()
 
     return alt, gas_conc, theta
-
-
-def read_ace_var(nc_handle, varname, qflags):
-    data = nc_handle.variables[varname][:].filled(np.nan)
-    if qflags is not None:
-        data[qflags != 0] = np.nan
-    return data
-
-
-def read_ace_date(ace_nc_handle, out_type=dt.datetime):
-    """
-    Read datetimes from an ACE-FTS file
-
-    :param ace_nc_handle: the handle to a netCDF4 dataset for an ACE-FTS file. (Must have variables year, month, day,
-     and hour.)
-    :type ace_nc_handle: :class:`netCDF4.Dataset`
-
-    :param out_type: the type to return the dates as. May be any time that meets two criteria:
-
-        1. Must be able to be called as ``out_type(year, month, day)`` where year, month, and day are integers to
-           produce a datetime.
-        2. Must be able to be added to a :class:`datetime.timedelta`
-
-    :return: a numpy array of dates, as type ``out_type``.
-    :rtype: :class:`numpy.ndarray`
-    """
-    ace_years = ace_nc_handle.variables['year'][:].filled(np.nan)
-    ace_months = ace_nc_handle.variables['month'][:].filled(np.nan)
-    ace_days = ace_nc_handle.variables['day'][:].filled(np.nan)
-
-    ace_hours = ace_nc_handle.variables['hour'][:].filled(np.nan)
-    ace_hours = ace_hours.astype(np.float64)  # timedelta demands a 64-bit float, can't be 32-bit
-
-    dates = [out_type(y, m, d) + dt.timedelta(hours=h) for y, m, d, h in zip(ace_years, ace_months, ace_days, ace_hours)]
-    return np.array(dates)
-
-
-def read_ace_theta(ace_nc_handle, qflags=None):
-    temperature = read_ace_var(ace_nc_handle, 'temperature', qflags=qflags)
-    pressure = read_ace_var(ace_nc_handle, 'pressure', qflags=qflags) * 1013.25  # Pressure given in atm, need hPa
-    return mod_utils.calculate_potential_temperature(pressure, temperature)
 
 
 def _get_ace_date_range(ace_dates, freq='YS'):

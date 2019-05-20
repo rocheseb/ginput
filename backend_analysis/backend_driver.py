@@ -13,13 +13,10 @@ import geos_theta_lat as gtl
 
 _my_dir = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(_my_dir, '..'))
+from backend_utils import ACEFileError, find_ace_file
 from ggg_logging import logger
 
 _output_dir = os.path.abspath(os.path.join(_my_dir, '..', 'data'))
-
-
-class ACEFileError(Exception):
-    pass
 
 
 def create_lookup_files(ace_dir, geos_dir, backup_existing_files=True):
@@ -27,17 +24,6 @@ def create_lookup_files(ace_dir, geos_dir, backup_existing_files=True):
     _create_fch4_fn2o_lut(ace_dir, backup_existing_files=backup_existing_files)
     _create_hf_slopes_lut(ace_dir, backup_existing_files=backup_existing_files)
     #_create_geos_theta_vs_lat(geos_dir, backup_existing_files=backup_existing_files)
-
-
-def _find_ace_file(ace_dir, ace_specie):
-    ace_files = glob(os.path.join(ace_dir, '*.nc'))
-    matching_files = [f for f in ace_files if f.endswith('{}.nc'.format(ace_specie))]
-    if len(matching_files) < 1:
-        raise ACEFileError('Could not find an ACE file for specie "{}" in directory {}'.format(ace_specie, ace_dir))
-    elif len(matching_files) > 1:
-        raise ACEFileError('Found multiple ACE files for specie "{}" in directory {}'.format(ace_specie, ace_dir))
-    else:
-        return matching_files[0]
 
 
 def _backup_file(filename):
@@ -50,8 +36,8 @@ def _backup_file(filename):
 
 def _create_fch4_fn2o_lut(ace_dir, backup_existing_files=True):
     logger.important('Creating F(CH4) vs. F(N2O) lookup table from ACE data')
-    ace_n2o_file = _find_ace_file(ace_dir, 'N2O')
-    ace_ch4_file = _find_ace_file(ace_dir, 'CH4')
+    ace_n2o_file = find_ace_file(ace_dir, 'N2O')
+    ace_ch4_file = find_ace_file(ace_dir, 'CH4')
     save_file = os.path.join(_output_dir, 'n2o_ch4_acefts.nc')
 
     if backup_existing_files:
@@ -62,8 +48,8 @@ def _create_fch4_fn2o_lut(ace_dir, backup_existing_files=True):
 
 def _create_hf_slopes_lut(ace_dir, backup_existing_files=True):
     logger.important('Creating HF vs. CH4 slope lookup table from ACE data')
-    ace_ch4_file = _find_ace_file(ace_dir, 'CH4')
-    ace_hf_file = _find_ace_file(ace_dir, 'HF')
+    ace_ch4_file = find_ace_file(ace_dir, 'CH4')
+    ace_hf_file = find_ace_file(ace_dir, 'HF')
     washenfelder_file = os.path.join(_output_dir, 'washenfelder03_table_s3.txt')
     save_file = os.path.join(_output_dir, 'ch4_hf_slopes.nc')
 
