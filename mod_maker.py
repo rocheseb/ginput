@@ -1245,7 +1245,6 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 	start = time.time()
 	mod_dicts = dict()
 
-	import pdb; pdb.set_trace()
 	for date_ID,UTC_date in enumerate(select_dates):
 		mod_dicts[UTC_date] = dict()
 
