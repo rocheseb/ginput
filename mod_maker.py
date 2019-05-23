@@ -88,27 +88,20 @@ There is dictionary of sites with their respective lat/lon in tccon_sites.py, so
 import argparse
 import glob
 import os, sys
-from collections import OrderedDict
-import numpy as np
 import numpy.ma as ma
-from numpy import cos,sin,tan,arctan,arccos,arcsin,arctan2,deg2rad,rad2deg
 import pandas as pd
-from scipy.interpolate import interp1d, interp2d, RectSphereBivariateSpline, griddata
+from scipy.interpolate import interp1d, interp2d
 import netCDF4 # netcdf I/O
 import re # used to parse strings
 import time
 import netrc # used to connect to earthdata
-from datetime import datetime, timedelta
 from astropy.time import Time # this is essentialy like datetime, but with better methods for conversion of datetime to / from julian dates, can also be converted to datetime
 from pydap.cas.urs import setup_session # used to connect to the merra opendap servers
-from pydap.client import open_url
 import xarray
-from urllib2 import HTTPError
-import pylab as pl
-import pytz
 import warnings
 
 import mod_utils
+from mod_utils import gravity
 from slantify import * # code to make slant paths
 from tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites 
 
@@ -603,60 +596,6 @@ def querry_indices(dataset,site_lat,site_lon_180,box_lat_half_width,box_lon_half
 # ncep has geopotential height profiles, not merra(?, only surface), so I need to convert geometric heights to geopotential heights
 # the idl code uses a fixed radius for the radius of earth (6378.137 km), below the gravity routine of gsetup is used
 # also the surface geopotential height of merra is in units of m2 s-2, so it must be divided by surface gravity
-def gravity(gdlat,altit):
-	"""
-	copy/pasted from fortran routine comments
-	This is used to convert
-
-	Input Parameters:
-		gdlat       GeoDetric Latitude (degrees)
-		altit       Geometric Altitude (km)
-	
-	Output Parameter:
-		gravity     Effective Gravitational Acceleration (m/s2)
-		radius 		Radius of earth at gdlat
-	
-	Computes the effective Earth gravity at a given latitude and altitude.
-	This is the sum of the gravitational and centripital accelerations.
-	These are based on equation I.2.4-(17) in US Standard Atmosphere 1962
-	The Earth is assumed to be an oblate ellipsoid, with a ratio of the
-	major to minor axes = sqrt(1+con) where con=.006738
-	This eccentricity makes the Earth's gravititational field smaller at
-	the poles and larger at the equator than if the Earth were a sphere
-	of the same mass. [At the equator, more of the mass is directly
-	below, whereas at the poles more is off to the sides). This effect
-	also makes the local mid-latitude gravity field not point towards
-	the center of mass.
-	
-	The equation used in this subroutine agrees with the International
-	Gravitational Formula of 1967 (Helmert's equation) within 0.005%.
-	
-	Interestingly, since the centripital effect of the Earth's rotation
-	(-ve at equator, 0 at poles) has almost the opposite shape to the
-	second order gravitational field (+ve at equator, -ve at poles),
-	their sum is almost constant so that the surface gravity could be
-	approximated (.07%) by the simple expression g=0.99746*GM/radius^2,
-	the latitude variation coming entirely from the variation of surface
-	r with latitude. This simple equation is not used in this subroutine.
-	"""
-
-	d2r=3.14159265/180.0	# Conversion from degrees to radians
-	gm=3.9862216e+14  		# Gravitational constant times Earth's Mass (m3/s2)
-	omega=7.292116E-05		# Earth's angular rotational velocity (radians/s)
-	con=0.006738       		# (a/b)**2-1 where a & b are equatorial & polar radii
-	shc=1.6235e-03  		# 2nd harmonic coefficient of Earth's gravity field 
-	eqrad=6378178.0   		# Equatorial Radius (meters)
-
-	gclat=arctan(tan(d2r*gdlat)/(1.0+con))  # radians
-
-	radius=1000.0*altit+eqrad/np.sqrt(1.0+con*sin(gclat)**2)
-	ff=(radius/eqrad)**2
-	hh=radius*omega**2
-	ge=gm/eqrad**2                      # = gravity at Re
-
-	gravity=(ge*(1-shc*(3.0*sin(gclat)**2-1)/ff)/ff-hh*cos(gclat)**2)*(1+0.5*(sin(gclat)*cos(gclat)*(hh/ge+2.0*shc/ff**2))**2)
-
-	return gravity, radius
 
 def read_merradap(username,password,mode,site_lon_180,site_lat,gravity_at_lat,date,end_date,time_step,varlist,surf_varlist,muted):
 	"""
@@ -1080,9 +1019,9 @@ def GEOS_files(GEOS_path, start_date, end_date):
 	# all GEOS5-FPIT Np/Nx files and their dates. Use 'glob' to avoid listing other files (e.g. the download link list)
 	# in the directory. Whether glob.glob() and os.listdif() returns a sorted list is platform dependendent. Since the
 	# main mod_maker logic depends on the profile and surface file lists being in the same order, we need to sort them.
-	ncdf_list = sorted(glob.glob(os.path.join(GEOS_path, 'GEOS*.nc4')))
-	ncdf_list = np.array([os.path.basename(f) for f in ncdf_list])
-	ncdf_dates = np.array([datetime.strptime(elem.split('.')[-3], '%Y%m%d_%H%M') for elem in ncdf_list])
+	ncdf_list = np.array(sorted(glob.glob(os.path.join(GEOS_path, 'GEOS*.nc4'))))
+	ncdf_basenames = [os.path.basename(f) for f in ncdf_list]
+	ncdf_dates = np.array([mod_utils.datetime_from_geos_filename(elem) for elem in ncdf_basenames])
 
 	# just the one between the 'start_date' and 'end_date' dates
 	select_files = ncdf_list[(ncdf_dates>=start_date) & (ncdf_dates<end_date)]
@@ -1093,6 +1032,7 @@ def GEOS_files(GEOS_path, start_date, end_date):
 		sys.exit()
 
 	return select_files,select_dates
+
 
 def equivalent_latitude_functions_geos(GEOS_path, start_date=None, end_date=None, muted=False, **kwargs):
 	"""
@@ -1116,13 +1056,17 @@ def equivalent_latitude_functions_geos(GEOS_path, start_date=None, end_date=None
 	if not muted:
 		print '\nGenerating equivalent latitude functions for {} times'.format(len(select_dates))
 
+	return equivalent_latitude_functions_from_geos_files(select_files, select_dates, muted=muted)
+
+
+def equivalent_latitude_functions_from_geos_files(geos_np_files, geos_dates, muted=False):
 	# Use any file for stuff that is the same in all files
-	with netCDF4.Dataset(os.path.join(GEOS_path,select_files[0]),'r') as dataset:
+	with netCDF4.Dataset(geos_np_files[0], 'r') as dataset:
 		lat = dataset['lat'][:]
 		lat[180] = 0.0
 		lon = dataset['lon'][:]
 		pres = dataset['lev'][:]
-		ntim,nlev,nlat,nlon = dataset['EPV'].shape
+		ntim, nlev, nlat, nlon = dataset['EPV'].shape
 
 		# Get the area of each grid cell
 		lat_res = float(dataset.LatitudeResolution)
@@ -1131,39 +1075,43 @@ def equivalent_latitude_functions_geos(GEOS_path, start_date=None, end_date=None
 	area = mod_utils.calculate_area(lat, lon, lat_res, lon_res)
 
 	# pre-compute pressure coefficients for calculating potential temperature, this is the (Po/P)^(R/Cp) term
-	coeff = (1000.0/pres)**0.286
-	coeff_mat = np.zeros([nlev,nlat,nlon])
+	coeff = (1000.0 / pres) ** 0.286
+	coeff_mat = np.zeros([nlev, nlat, nlon])
 	for i in range(nlat):
 		for j in range(nlon):
-			coeff_mat[:,i,j] = coeff
-	
-	ntim = len(select_dates)
+			coeff_mat[:, i, j] = coeff
+
+	ntim = len(geos_dates)
 	nmin = [0.125]
 	func_dict = {}
 	total_start = time.time()
-	for date_ID,date in enumerate(select_dates):
+	for date_ID, date in enumerate(geos_dates):
 
 		start = time.time()
 		if not muted:
-			sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(date_ID+1,ntim,np.mean(nmin)*(ntim-date_ID)))
+			sys.stdout.write('\r\tDate {:4d} / {:4d} ; finish in about {:.1f} minutes'.format(date_ID + 1, ntim,
+																							  np.mean(nmin) * (
+																										  ntim - date_ID)))
 			sys.stdout.flush()
-		
-		with netCDF4.Dataset(os.path.join(GEOS_path,select_files[date_ID])) as dataset:
-			PT = (dataset['T'][0]*coeff_mat).data # Compute potential temperature
-			EPV = (dataset['EPV'][0].data)*1e6 # Potential vorticity in PVU = 1e-6 K . m2 / kg / s	
+
+		with netCDF4.Dataset(geos_np_files[date_ID]) as dataset:
+			PT = (dataset['T'][0] * coeff_mat).data  # Compute potential temperature
+			EPV = (dataset['EPV'][0].data) * 1e6  # Potential vorticity in PVU = 1e-6 K . m2 / kg / s
 
 		func_dict[date] = mod_utils.calculate_eq_lat(EPV, PT, area)
 
 		end = time.time()
-		nmin.append(int(end-start)/60.0)
-		# end of loop over dates
+		nmin.append(int(end - start) / 60.0)
+	# end of loop over dates
 
-	actual_time = (time.time()-total_start)/60.0
-	predicted_time = 0.125*ntim
+	actual_time = (time.time() - total_start) / 60.0
+	predicted_time = 0.125 * ntim
 	if not muted:
-		print '\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,actual_time)
+		print '\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,
+																									actual_time)
 
 	return func_dict
+
 
 def lat_lon_interp(data_old,lat_old,lon_old,lat_new,lon_new,IDs_list):
 	"""
@@ -1296,6 +1244,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 
 	start = time.time()
 	mod_dicts = dict()
+
 	for date_ID,UTC_date in enumerate(select_dates):
 		mod_dicts[UTC_date] = dict()
 
@@ -1306,7 +1255,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			print '\nNOW DOING date {:4d} / {} :'.format(date_ID+1,len(select_dates)),UTC_date.strftime("%Y-%m-%d %H:%M"),' UTC'
 			print '\t-Read global data ...'
 
-		with netCDF4.Dataset(os.path.join(GEOS_path,'Np',select_files[date_ID]),'r') as dataset:
+		with netCDF4.Dataset(select_files[date_ID],'r') as dataset:
 
 			for var in varlist:
 				# Taking dataset[var][0] is equivalent to dataset[var][0,:,:,:], which since there's only one time per
@@ -1340,7 +1289,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		new_lons = np.array([site_dict[site]['lon_180'] for site in site_dict])
 
 		SURF_DATA = {}
-		with netCDF4.Dataset(os.path.join(GEOS_path,'Nx',select_surf_files[date_ID]),'r') as dataset:
+		with netCDF4.Dataset(select_surf_files[date_ID],'r') as dataset:
 			for var in surf_varlist:
 				SURF_DATA[var] = dataset[var][0]
 
@@ -1402,7 +1351,6 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 		# restructure the data
 		temp_data = {}
 		for i,site in enumerate(site_dict.keys()):
-			gravity_at_site,r = gravity(site_dict[site]['lat'],site_dict[site]['alt']/1000.0)
 			temp_data[site] = {}
 			temp_data[site]['prof'] = {}
 			for var in INTERP_DATA:
@@ -1416,7 +1364,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 			temp_data[site]['surf'] = {}
 			for var in INTERP_SURF_DATA:
 				if var == 'H':
-					temp_data[site]['surf'][var] = INTERP_SURF_DATA[var][i][0] / gravity_at_site
+					temp_data[site]['surf'][var] = mod_utils.geopotential_height_to_altitude(INTERP_SURF_DATA[var][i][0], site_dict[site]['lat'], site_dict[site]['alt'] / 1000.0)
 				else:
 					temp_data[site]['surf'][var] = INTERP_SURF_DATA[var][i]
 		INTERP_DATA = temp_data
@@ -1740,7 +1688,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 		site_alt = site_dict[site_abbrv]['alt']
 	
 	rmm = 28.964/18.02	# Ratio of Molecular Masses (Dry_Air/H2O)
-	gravity_at_lat, earth_radius_at_lat = gravity(site_lat,site_alt/1000.0) # used in merra/fp mode
+	gravity_at_lat, earth_radius_at_lat = gravity(site_lat, site_alt / 1000.0) # used in merra/fp mode
 
 	if 'ncep' in mode:
 		DATA = read_ncep(ncdf_path,start_date.year)
