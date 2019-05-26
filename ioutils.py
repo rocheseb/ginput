@@ -129,21 +129,26 @@ def make_ncvar_helper(nc_handle, var_name, var_data, dims, **attrs):
     return var
 
 
-def add_creation_info(nc_handle, creation_note=None, creation_att_name='history'):
+def make_creation_info(nc_filename, creation_note=None):
     now = dt.datetime.now()
     commit_hash, branch, _ = mod_utils.hg_commit_info()
-    clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean(ignore_files=[nc_handle.filepath()]) else 'dirty'
+    clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean(ignore_files=[nc_filename]) else 'dirty'
     if creation_note is not None:
         description = 'Created by {note} on {date} (mercurial commit {commit} on branch {branch}, {cleanstate})'
     else:
         description = 'Created with commit {commit} on branch {branch} ({cleanstate}) on {date}'
 
-    description = description.format(note=creation_note, date=now, commit=commit_hash, branch=branch, cleanstate=clean_or_dirty)
+    description = description.format(note=creation_note, date=now, commit=commit_hash, branch=branch,
+                                     cleanstate=clean_or_dirty)
+    return description
 
+
+def add_creation_info(nc_handle, creation_note=None, creation_att_name='history'):
+    description = make_creation_info(nc_handle.filepath(), creation_note=creation_note)
     nc_handle.setncattr(creation_att_name, description)
 
 
-def add_dependent_file_hash(nc_handle, hash_att_name, dependent_file):
+def make_dependent_file_hash(dependent_file):
     hashobj = sha1()
     with open(dependent_file, 'rb') as fobj:
         block = fobj.read(4096)
@@ -151,4 +156,9 @@ def add_dependent_file_hash(nc_handle, hash_att_name, dependent_file):
             hashobj.update(block)
             block = fobj.read(4096)
 
-    nc_handle.setncattr(hash_att_name, hashobj.hexdigest())
+    return hashobj.hexdigest()
+
+
+def add_dependent_file_hash(nc_handle, hash_att_name, dependent_file):
+    hash_hex = make_dependent_file_hash(dependent_file)
+    nc_handle.setncattr(hash_att_name, hash_hex)

@@ -69,9 +69,9 @@ from scipy.optimize import minimize_scalar
 import xarray as xr
 
 # TODO: move all into package and use a proper relative import
-import mod_utils
-import ioutils
+import mod_utils, ioutils
 import mod_constants as const
+from ggg_logging import logger
 
 
 _data_dir = const.data_dir
@@ -99,6 +99,13 @@ class GasRecordInputMissingError(GasRecordError):
 class GasRecordInconsistentDimsError(GasRecordError):
     """
     Error when arrays in a gas record have different dimensions and are not supposed to
+    """
+    pass
+
+
+class GasRecordInputVerificationError(GasRecordError):
+    """
+    Error when the input could not be verified (i.e. if hashes don't match)
     """
     pass
 
@@ -138,7 +145,41 @@ class TraceGasTropicsRecord(object):
     """
     This class stores the Mauna Loa/Samoa average CO2 record and provides methods to sample it.
 
-    No arguments required for initialization.
+    Initialization arguments:
+
+    :param first_date: optional, the first date required in the concentration records. The actual first date will be
+     before this, as the age spectra calculation require ~30 years of data preceding each date, therefore the simple
+     time series records will be extended to ``first_date`` - 30 years. If not given, then 1 Jan 2000 is assumed
+     (meaning the actual first date will be 1 Jan 1970). The date will always be moved to the first of a month.
+    :type first_date: datetime-like
+
+    :param last_date: optional, the last date required in the concentration records. The date will always be moved to
+     the first of a month. If omitted, a date two years from today is used. Unlike ``first_date``, there is no
+     modification to account for the needs of the age spectra.
+    :type last_date: datetime-like
+
+    :param lag: optional, the lag between Mauna Loa/Samoa measurements and the stratospheric boundary condition. Default
+     is two months, i.e. the stratospheric boundary condition for a given date is assumed to be that measured at MLO/SMO
+     two months previously.
+    :type lag: timedelta-like
+
+    :param mlo_file: optional, the path to the Mauna Loa flask data file. Must be formatted as a NOAA monthly flask data
+     file, where the first line is "# f_header_lines: n" (n being the number of header lines) and the data being
+     organized in four columns (space separated): site, year, month, value.
+    :type mlo_file: str
+
+    :param smo_file: optional, the path to the Samoa flask data file. Same format as the MLO file required.
+    :type smo_file: str
+
+    :param force_strat_calculation: optional, set to ``True`` to force the stratospheric concentrations look up table
+     to be recalculated. Default is ``False``, which will read in the table from the corresponding netCDF file included
+     in this repo unless that file does not exist. The latter is much faster, but will not adjust for changes to the
+     input MLO/SMO files or the priors generating code.
+    :type force_strat_calculation: bool
+
+    :param save_strat: optional, set to ``False`` to avoid saving the stratospheric concentration lookup if it is
+     recalculated. Default is ``True``. This option has no effect if the stratospheric lookup table is read from the
+     netCDF file.
     """
 
     # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
@@ -158,6 +199,12 @@ class TraceGasTropicsRecord(object):
     # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
     _no_theta_coord = np.array([0.])
 
+    @classmethod
+    def get_strat_lut_file(cls):
+        # This needed to be a class method so that the _load_strat_arrays() could be a classmethod. Unfortunately,
+        # classproperties aren't a thing yet, so this remains a regular function.
+        return os.path.join(_data_dir, '{}_strat_lut.nc'.format(cls.gas_name))
+
     @property
     def strat_has_theta_dep(self):
         no_dep = [np.all(reg_arr.theta == self._no_theta_coord).item() for reg_arr in self.conc_strat.values()]
@@ -169,15 +216,38 @@ class TraceGasTropicsRecord(object):
             raise GasRecordInconsistentDimsError('Some regions have a theta dependence in their stratospheric lookup '
                                                  'table, some do not. This is not expected.')
 
-    def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None):
+    def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None,
+                 force_strat_calculation=False, save_strat=True):
         first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
+        self.mlo_file = mlo_file
+        self.smo_file = smo_file
         self.conc_seasonal = self.get_mlo_smo_mean(mlo_file, smo_file, first_date, last_date)
 
         # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
         # leave the latency
         self.conc_trend = self.conc_seasonal.rolling(self.months_avg_for_trend, center=True).mean().dropna().drop('interp_flag', axis=1)
 
-        self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
+        # For the stratosphere, we need a lookup table that contains concentrations for given dates and ages. (Some
+        # species may depend on additional variables, such as potential temperature.) This calculation involves
+        # convolving the age spectra with the concentration record, so can be quite time consuming. To speed things up,
+        # we usually load this table from a netCDF file, but if the prior code or the MLO/SMO files update, we'll need
+        # to regenerate that lookup table and save it again.
+        if force_strat_calculation or not os.path.exists(self.get_strat_lut_file()):
+            if not os.path.exists(self.get_strat_lut_file()):
+                logger.info('{} strat LUT file does not exist. Calculating LUT.'.format(self.gas_name))
+            else:
+                logger.info('Recalculating {} strat LUT as requested'.format(self.gas_name))
+
+            self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
+            if save_strat:
+                logger.important('Saving {} strat LUT file as "{}"'.format(self.gas_name, os.path.abspath(self.get_strat_lut_file())))
+                self._save_strat_arrays()
+        else:
+            # If we're loading the strat lookup table, we need to pass the MLO and SMO files to check their SHA1 hashes
+            # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
+            # generate the strat table stored in the netCDF file.
+            logger.info('Loading {} strat LUT'.format(self.gas_name))
+            self.conc_strat = self._load_strat_arrays(self.list_strat_dependent_files())
 
     @classmethod
     def _init_helper(cls, first_date, last_date, lag, mlo_file, smo_file):
@@ -204,8 +274,8 @@ class TraceGasTropicsRecord(object):
 
         files_none = [mlo_file is None, smo_file is None]
         if all(files_none):
-            mlo_file = 'ML_monthly_obs_{}.txt'.format(cls.gas_name)
-            smo_file = 'SMO_monthly_obs_{}.txt'.format(cls.gas_name)
+            mlo_file = os.path.join(_data_dir, 'ML_monthly_obs_{}.txt'.format(cls.gas_name))
+            smo_file = os.path.join(_data_dir, 'SMO_monthly_obs_{}.txt'.format(cls.gas_name))
         elif any(files_none):
             raise TypeError('Must give both MLO and SMO files or neither')
 
@@ -268,7 +338,7 @@ class TraceGasTropicsRecord(object):
         return time, delt, age, spectra
 
     @classmethod
-    def read_insitu_gas(cls, fpath, fname):
+    def read_insitu_gas(cls, full_file_path):
         """
         Read a trace gas record file. Assumes that the file is of monthly average concentrations.
 
@@ -282,7 +352,7 @@ class TraceGasTropicsRecord(object):
          be a timestamp of the measurment time.
         :rtype: :class:`pandas.DataFrame`
         """
-        full_file_path = os.path.join(fpath, fname)
+
         with open(full_file_path, 'r') as f:
             hlines = f.readline().rstrip().split(': ')[1]
 
@@ -328,8 +398,8 @@ class TraceGasTropicsRecord(object):
          to 1 for any months that had to be interpolated. Index by timestamp.
         :rtype: :class:`pandas.DataFrame`
         """
-        df_mlo = cls.read_insitu_gas(_data_dir, mlo_file)
-        df_smo = cls.read_insitu_gas(_data_dir, smo_file)
+        df_mlo = cls.read_insitu_gas(mlo_file)
+        df_smo = cls.read_insitu_gas(smo_file)
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
         df_combined = pd.DataFrame(df_combined[cls.gas_name].mean(axis=1), columns=['dmf_mean'])
 
@@ -648,6 +718,70 @@ class TraceGasTropicsRecord(object):
 
         return gas_conc
 
+    def _save_strat_arrays(self):
+        # We can't just merge the different region's stratospheric concentration DataArrays into a single dataset
+        # because that required that the arrays have the dimensions with the same names be the same, and the age
+        # coordinate is not. We'll need to convert the coordinates to region-specific names and save that dataset.
+        # We probably also want to write some extra attributes to the netCDF file, at least the mercurial commit
+        # of the code that created this file.
+        save_dict = dict()
+        for name, darray in self.conc_strat.items():
+            new_coords = [(name + '_' + dim, coord) for dim, coord in darray.coords.items()]
+            new_array = xr.DataArray(darray.data, coords=new_coords)
+            save_dict[name] = new_array
+
+        save_ds = xr.Dataset(save_dict)
+
+        # Add some extra attributes - we want to record how this was created (esp. the commit hash) as well as the
+        # SHA1 hashes of the MLO and SMO files so that we can verify that those haven't changed.
+        save_ds.attrs['history'] = ioutils.make_creation_info(self.get_strat_lut_file())
+        for att_name, file_path in self.list_strat_dependent_files().items():
+            save_ds.attrs[att_name] = ioutils.make_dependent_file_hash(file_path)
+        save_ds.to_netcdf(self.get_strat_lut_file())
+
+    @classmethod
+    def _load_strat_arrays(cls, dependent_files=None):
+        def check_hash(file_path, hash):
+            if file_path is None:
+                return
+
+            if hash != ioutils.make_dependent_file_hash(file_path):
+                raise GasRecordInputVerificationError('The SHA1 hash for the input file {} is not what was expected. '
+                                                      'This usually means that the file in question has been modified '
+                                                      'since the last time that the stratospheric concentration arrays '
+                                                      'were saved. If you are a GGG developer, you will likely just '
+                                                      'need to regenerate the strat files. If you are a regular GGG '
+                                                      'user, please file a bug report at https://gggbugs.gps.caltech.edu/')
+
+        dependent_files = dict() if dependent_files is None else dependent_files
+        strat_dict = dict()
+        with xr.open_dataset(cls.get_strat_lut_file()) as ds:
+            # First verify that the SHA1 hashes for the MLO and SMO match. If not, we should recalculate the strat array
+            # rather than use one calculated with old MLO/SMO data
+            for att_name, file_path in dependent_files.items():
+                check_hash(file_path, ds.attrs[att_name])
+
+            for name, darray in ds.items():
+                new_coords = [(dim.split('_')[1], coord) for dim, coord in darray.coords.items()]
+                strat_dict[name] = xr.DataArray(darray.data, coords=new_coords)
+
+        return strat_dict
+
+    def list_strat_dependent_files(self):
+        """
+        Return a dictionary describing the files that the stratospheric LUT depends on.
+
+        This dictionary will have the keys be the attribute names to use in the LUT netCDF file and the values be the
+        paths to the files that the LUT depends on. Each file's SHA1 hash will get stored in the netCDF file under
+        the global attribute named by its key.
+
+        For most trace gas records, this will be the Mauna Loa and Samoa flask data files. However, if certain
+        trace gas records depend on other files, this method should be overridden to return the proper dictionary.
+
+        :rtype: dict
+        """
+        return {'mlo_sha1': self.mlo_file, 'smo_sha1': self.smo_file}
+
     def get_strat_gas(self, date, ages, eqlat, theta=None, as_dataframe=False):
         """
         Get stratospheric gas concentration for a given profile
@@ -946,6 +1080,9 @@ class HFTropicsRecord(TraceGasTropicsRecord):
 
         return df_combined
 
+    def list_strat_dependent_files(self):
+        return {'ch4_sha1': CH4TropicsRecord.get_strat_lut_file()}
+
     @classmethod
     def _load_ch4_hf_slopes(cls):
         with xr.open_dataset(cls.ch4_hf_slopes_file) as nch:
@@ -1133,6 +1270,16 @@ class COTropicsRecord(TraceGasTropicsRecord):
 # Make the list of available gases' records
 _gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord,
                                         COTropicsRecord]}
+
+
+def regenerate_gas_strat_lut_files():
+    """
+    Driver function to regenerate the stratospheric concentration lookup tables for all of the gas records.
+
+    :return: None
+    """
+    for record in _gas_records.values():
+        record(force_strat_calculation=True, save_strat=True)
 
 
 def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict()):

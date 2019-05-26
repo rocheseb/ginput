@@ -589,7 +589,7 @@ def hg_is_commit_clean(hg_dir=None, ignore_untracked=True, ignore_files=tuple())
     def in_ignore(f):
         f = os.path.join(hg_root, f)
         for ignore in ignore_files:
-            if os.path.samefile(f, ignore):
+            if os.path.exists(ignore) and os.path.samefile(f, ignore):
                 return True
         return False
 
