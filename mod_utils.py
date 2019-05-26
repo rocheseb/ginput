@@ -8,6 +8,8 @@ Compatibility notes:
 from __future__ import print_function, division
 
 import datetime as dt
+
+import numpy
 from dateutil.relativedelta import relativedelta
 import netCDF4 as ncdf
 import numpy as np
@@ -15,6 +17,8 @@ from numpy import ma
 import os
 import pandas as pd
 import re
+
+from numpy.core._multiarray_umath import arctan, tan, sin, cos
 from scipy.interpolate import interp1d, interp2d
 import subprocess
 import sys
@@ -1049,6 +1053,12 @@ def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None):
     return geos_file_names, geos_file_dates
 
 
+def datetime_from_geos_filename(geos_filename):
+    geos_filename = os.path.basename(geos_filename)
+    date_str = re.search(r'\d{8}_\d{4}', geos_filename).group()
+    return dt.datetime.strptime(date_str, '%Y%m%d_%H%M')
+
+
 def mod_interpolation_legacy(z_grid, z_met, t_met, val_met, interp_mode=1, met_alt_geopotential=True):
     """
     Legacy interpolation for .mod file profiles onto the TCCON grid
@@ -1532,3 +1542,79 @@ def start_of_month(date_in, out_type=dt.date):
     :return: an instance of ``out_type`` set to day 1, 00:00:00 of the month of ``date_in``.
     """
     return out_type(year=date_in.year, month=date_in.month, day=1)
+
+
+def gravity(gdlat,altit):
+    """
+    copy/pasted from fortran routine comments
+    This is used to convert
+
+    Input Parameters:
+        gdlat       GeoDetric Latitude (degrees)
+        altit       Geometric Altitude (km)
+
+    Output Parameter:
+        gravity     Effective Gravitational Acceleration (m/s2)
+        radius 		Radius of earth at gdlat
+
+    Computes the effective Earth gravity at a given latitude and altitude.
+    This is the sum of the gravitational and centripital accelerations.
+    These are based on equation I.2.4-(17) in US Standard Atmosphere 1962
+    The Earth is assumed to be an oblate ellipsoid, with a ratio of the
+    major to minor axes = sqrt(1+con) where con=.006738
+    This eccentricity makes the Earth's gravititational field smaller at
+    the poles and larger at the equator than if the Earth were a sphere
+    of the same mass. [At the equator, more of the mass is directly
+    below, whereas at the poles more is off to the sides). This effect
+    also makes the local mid-latitude gravity field not point towards
+    the center of mass.
+
+    The equation used in this subroutine agrees with the International
+    Gravitational Formula of 1967 (Helmert's equation) within 0.005%.
+
+    Interestingly, since the centripital effect of the Earth's rotation
+    (-ve at equator, 0 at poles) has almost the opposite shape to the
+    second order gravitational field (+ve at equator, -ve at poles),
+    their sum is almost constant so that the surface gravity could be
+    approximated (.07%) by the simple expression g=0.99746*GM/radius^2,
+    the latitude variation coming entirely from the variation of surface
+    r with latitude. This simple equation is not used in this subroutine.
+    """
+
+    d2r=3.14159265/180.0	# Conversion from degrees to radians
+    gm=3.9862216e+14  		# Gravitational constant times Earth's Mass (m3/s2)
+    omega=7.292116E-05		# Earth's angular rotational velocity (radians/s)
+    con=0.006738       		# (a/b)**2-1 where a & b are equatorial & polar radii
+    shc=1.6235e-03  		# 2nd harmonic coefficient of Earth's gravity field
+    eqrad=6378178.0   		# Equatorial Radius (meters)
+
+    gclat=arctan(tan(d2r*gdlat)/(1.0+con))  # radians
+
+    radius=1000.0*altit+eqrad/np.sqrt(1.0+con*sin(gclat)**2)
+    ff=(radius/eqrad)**2
+    hh=radius*omega**2
+    ge=gm/eqrad**2                      # = gravity at Re
+
+    gravity=(ge*(1-shc*(3.0*sin(gclat)**2-1)/ff)/ff-hh*cos(gclat)**2)*(1+0.5*(sin(gclat)*cos(gclat)*(hh/ge+2.0*shc/ff**2))**2)
+
+    return gravity, radius
+
+
+def geopotential_height_to_altitude(gph, lat, alt):
+    """
+    Convert a geopotential height in m^2 s^-2 to meters
+
+    :param gph: geopotential height in m^2 s^-2.
+    :type gph: float
+
+    :param lat: geographic latitude (in degrees, south is negative)
+    :type lat: float
+
+    :param alt: altitude of the TCCON site in kilometers. If set to 0, will use gravity at the surface for the given
+     latitude.
+    :type alt: float
+
+    :return: the geopotential height converted to meters
+    """
+    gravity_at_site, _ = gravity(lat, alt)
+    return gph / gravity_at_site

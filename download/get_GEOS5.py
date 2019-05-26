@@ -1,16 +1,13 @@
 #!~/anaconda2/bin/python
  # -*- coding: utf-8 -*-
 from __future__ import print_function
+import argparse
 import os
 from datetime import datetime, timedelta
 import sys
-import urllib
-import requests
-import shutil
-import xarray
-import netrc
-from pydap.cas.urs import setup_session
-from subprocess import Popen,PIPE,CalledProcessError
+from subprocess import Popen, PIPE, CalledProcessError
+
+import download_utils as dlutils
 
 ####################
 # Code Description #
@@ -83,42 +80,54 @@ def URLlist_FPIT(start,end,timestep=timedelta(hours=3),outpath='',surf=False):
 			f.write(fmt.format(curdate.year,curdate.timetuple().tm_yday,datetime.strftime(curdate,'%Y%m%d'),curdate.hour))
 			curdate += timestep
 
+
+# Define this here so that we can reference it for the command line help and in the driver function
+_func_dict = {'FP':URLlist_FP, 'FPIT':URLlist_FPIT}
+
+
+def parse_args():
+	parser = argparse.ArgumentParser(description='Download GEOSFP or GEOSFP-IT reanalysis met data')
+	parser.add_argument('date_range', type=dlutils.parse_date_range_no_hm, help=dlutils.date_range_cl_help(False))
+	parser.add_argument('--mode', choices=list(_func_dict.keys()), default='FP',
+						help='Which GEOS product to get. The default is %(default)s. Note that to retrieve FP-IT data '
+							 'requires a subscription with NASA (https://gmao.gsfc.nasa.gov/GMAO_products/)')
+	parser.add_argument('--path', default='.', help='Where to download the GEOS data to. Default is %(default)s. Data '
+													'will be placed in Np and Nx subdirectories automatically created '
+													'in this directory.')
+	args = vars(parser.parse_args())
+
+	# Go ahead and separate out the two parts of the date range so this dictionary can be used directly for keyword
+	# arguments to the driver function
+	args['start'], args['end'] = args['date_range']
+	return args
+
+
+def driver(start, end, mode='FP', path='.'):
+	# get surface data
+	outpath = os.path.join(path, 'Nx')
+	if not os.path.exists(outpath):
+		print('Creating', outpath)
+		os.makedirs(outpath)
+	_func_dict[mode](start, end, surf=True, outpath=os.path.join(outpath, 'getFPIT.dat'))
+
+	for line in execute('wget -N -i getFPIT.dat'.split(), cwd=outpath):
+		print(line, end="")
+
+	# get profile data
+	outpath = os.path.join(path, 'Np')
+	if not os.path.exists(outpath):
+		print('Creating', outpath)
+		os.makedirs(outpath)
+	_func_dict[mode](start, end, surf=False, outpath=os.path.join(outpath, 'getFPIT.dat'))
+
+	for line in execute('wget -N -i getFPIT.dat'.split(), cwd=outpath):
+		print(line, end="")
+
+
 ########
 # Main #
 ########
 
 if __name__=="__main__":
-	argu = sys.argv
-
-	func_dict = {'FP':URLlist_FP,'FPIT':URLlist_FPIT}
-
-	argu = sys.argv
-
-	start = datetime.strptime(argu[1].split('-')[0],'%Y%m%d') # YYYYMMDD
-	end = datetime.strptime(argu[1].split('-')[1],'%Y%m%d') # YYYYMMDD
-
-	for arg in argu:
-		if 'mode=' in arg:
-			mode = arg.split('=')[1]
-		if 'path=' in arg:
-			path = arg.split('=')[1]
-
-	# surface data
-	outpath = os.path.join(path,'Nx')
-	if not os.path.exists(outpath):
-		print('Creating',outpath)
-		os.makedirs(outpath)
-	func_dict[mode](start,end,surf=True,outpath=os.path.join(outpath,'getFPIT.dat'))
-
-	for line in execute('wget -N -i getFPIT.dat'.split(),cwd=outpath):
-		print(line, end="")
-
-	# profile data
-	outpath = os.path.join(path,'Np')
-	if not os.path.exists(outpath):
-		print('Creating',outpath)
-		os.makedirs(outpath)
-	func_dict[mode](start,end,surf=False,outpath=os.path.join(outpath,'getFPIT.dat'))
-
-	for line in execute('wget -N -i getFPIT.dat'.split(),cwd=outpath):
-		print(line, end="")
+	arguments = parse_args()
+	driver(**arguments)
