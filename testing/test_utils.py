@@ -19,11 +19,14 @@ input_data_dir = os.path.join(_mydir, 'test_input_data')
 geos_fp_dir = os.path.join(input_data_dir, 'geosfp-it')
 geos_sha_file = os.path.join(geos_fp_dir, 'fp_hashes.sha1')
 mod_input_dir = os.path.join(input_data_dir, 'mod_files', 'fpit')
+vmr_input_dir = os.path.join(input_data_dir, 'vmr_files', 'fpit')
 
 output_data_dir = os.path.join(_mydir, 'test_output_data')
 mod_output_dir = os.path.join(output_data_dir, 'mod_files', 'fpit')
+vmr_output_dir = os.path.join(output_data_dir, 'vmr_files', 'fpit')
 
 test_date = dt.datetime(2018, 1, 1)
+test_site = 'oc'
 
 
 # Python 2/3 compatibility. Never use "input" in Py2 because it executes whatever input it receives as code
@@ -126,10 +129,25 @@ def iter_mod_file_pairs(base_dir, test_dir):
     site_dirs = sorted([os.path.basename(p) for p in glob(os.path.join(base_dir, '*')) if os.path.isdir(p)])
     for sdir in site_dirs:
         base_site_dir = os.path.join(base_dir, sdir, 'vertical')
-        all_base_site_files = sorted(glob(os.path.join(base_site_dir, '*.mod')))
+        test_site_dir = os.path.join(test_dir, sdir, 'vertical') if test_dir is not None else None
 
-        for base_file in all_base_site_files:
-            test_file = os.path.join(test_dir, sdir, 'vertical', os.path.basename(base_file))
+        for fpair in _iter_file_pairs('*.mod', base_site_dir, test_site_dir):
+            yield fpair
+
+
+def iter_vmr_file_pairs(base_dir, test_dir):
+    for fpair in _iter_file_pairs('*.vmr', base_dir, test_dir):
+        yield fpair
+
+
+def _iter_file_pairs(pattern, base_dir, test_dir):
+    all_base_site_files = sorted(glob(os.path.join(base_dir, pattern)))
+
+    for base_file in all_base_site_files:
+        if test_dir is None:
+            yield base_file
+        else:
+            test_file = os.path.join(test_dir, os.path.basename(base_file))
             if not os.path.exists(test_file):
                 raise InputDataMismatchError('Could not find a test file corresponding to the base file {}'
                                              .format(base_file))

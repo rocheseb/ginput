@@ -214,6 +214,11 @@ def read_mod_file(mod_file, as_dataframes=False):
     return out_dict
 
 
+def datetime_from_mod_filename(mod_file):
+    dstr = re.search(r'\d{8}_\d{4}Z', os.path.basename(mod_file)).group()
+    return dt.datetime.strptime(dstr, '%Y%m%d_%H%MZ')
+
+
 def read_map_file(map_file, as_dataframes=False, skip_header=False):
     """
     Read a .map file
@@ -438,6 +443,10 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
                 mapf.write('\n')
 
 
+def vmr_file_name(site_abbrev, obs_date):
+    return '{site}_{date}.vmr'.format(site=site_abbrev, date=obs_date.strftime('%Y%m%d_%H%M'))
+
+
 def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_alt, profile_gases, isotope_opts=None):
     """
     Write a .vmr file
@@ -494,6 +503,32 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
                     gas_conc = 0.0
                 fobj.write(gas_fmt.format(gas_conc))
             fobj.write('\n')
+
+
+def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True):
+    nheader = _get_num_header_lines(vmr_file)
+    header_data = dict()
+    with open(vmr_file, 'r') as fobj:
+        # Skip the line with the number of header lines and columns
+        fobj.readline()
+        for i in range(1, nheader-1):
+            line = fobj.readline()
+            const_name, const_val = [v.strip() for v in line.split(':')]
+            if lowercase_names:
+                const_name = const_name.lower()
+            header_data[const_name] = float(const_val)
+
+    data_table = pd.read_csv(vmr_file, sep='\s+', header=nheader-1)
+
+    if lowercase_names:
+        data_table.columns = [v.lower() for v in data_table]
+
+    if as_dataframs:
+        header_data = pd.DataFrame(header_data, index=[0])
+    else:
+        data_table = {k: v.to_numpy() for k, v in data_table.items()}
+
+    return {'scalar': header_data, 'profile': data_table}
 
 
 def format_lon(lon, prec=2):

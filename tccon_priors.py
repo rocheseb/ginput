@@ -1268,8 +1268,8 @@ class COTropicsRecord(TraceGasTropicsRecord):
 
 
 # Make the list of available gases' records
-_gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord,
-                                        COTropicsRecord]}
+gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord]}#,
+                                       #COTropicsRecord]}
 
 
 def regenerate_gas_strat_lut_files():
@@ -1278,7 +1278,7 @@ def regenerate_gas_strat_lut_files():
 
     :return: None
     """
-    for record in _gas_records.values():
+    for record in gas_records.values():
         record(force_strat_calculation=True, save_strat=True)
 
 
@@ -1903,12 +1903,48 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
 
 def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site_abbrevs='xx', write_maps=False,
-                                 **prior_kwargs):
+                                 write_vmrs=False, isotope_file_opts=None, **prior_kwargs):
+    """
+    Generate multiple TCCON priors or a file containing multiple gas concentrations
 
+    This function wraps :func:`generate_single_tccon_prior`  in order to generate priors for one or more gases for one
+    or more sites. The inputs ``mod_data``, ``obs_dates``, ``utc_offsets``, and ``site_abbrevs`` determine the number of
+    sites. Each of these must be either a single instance of the correct type or a collection of those types. Any of
+    them given as collections must have the same number of elements; those given as single instances will be used for
+    all profiles.
+
+    For example, say that you wanted to generate profiles for three days. ``mod_data`` and ``obs_dates`` would need to
+    be lists of paths to .mod files and Python datetimes, respectively, but ``utc_offsets`` and ``site_abbrevs`` could
+    be a single timedelta and string, respectively.
+
+    ``species`` can likewise be a single instance or a collection, but in either case will be applied to all
+    sites/times. This determines which species will have profiles generated.
+
+    :param mod_data: input to :func:`generate_single_tccon_prior`, see that function.
+
+    :param obs_dates:  input to :func:`generate_single_tccon_prior`, see that function.
+
+    :param utc_offsets:  input to :func:`generate_single_tccon_prior`, see that function.
+
+    :param species: either gas names as strings or instances of :class:`TraceGasTropicsRecord` that set up which gases'
+     profiles are created. If given as a list, then all species given will be generated for each site/time.
+    :type species: str, :class:`TraceGasTropicsRecord`, list(str), or list(:class:`TraceGasTropicsRecord`)
+
+    :param site_abbrevs:  input to :func:`generate_single_tccon_prior`, see that function.
+
+    :param write_maps: if ``False``, then .map files are not written. If truthy, then it must be a path to the directory
+     where the .map files are to be written.
+
+    :param write_vmrs: if ``False``, then .map files are not written. If truthy, then it must be a path to the directory
+     where the .map files are to be written.
+
+    :param prior_kwargs:
+    :return:
+    """
     num_profiles = max(np.size(inpt) for inpt in [mod_data, obs_dates, utc_offsets, site_abbrevs])
 
     def check_input(inpt, name, allowed_types):
-        type_err_msg = '{} must be either a collect or single instance of one of the types: {}'.format(
+        type_err_msg = '{} must be either a collection or single instance of one of the types: {}'.format(
             name, ', '.join(t.__name__ for t in allowed_types)
         )
         if np.ndim(inpt) > 1:
@@ -1923,8 +1959,23 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
             if not isinstance(inpt, allowed_types):
                 raise TypeError(type_err_msg)
             return [inpt] * num_profiles
+
+        return inpt
+
+    def parse_boollike_input(inpt):
+        if inpt:
+            return inpt, True
         else:
-            return inpt
+            return '', False
+
+    def get_scale_factor(unit):
+        unit = unit.lower()
+        if unit == 'ppm':
+            return 1e-6
+        elif unit == 'ppb':
+            return 1e-9
+        else:
+            raise ValueError('No conversion factor defined for "{}"'.format(unit))
 
     # Input checking. Make sure these are the right type and either the same size as each other or a single value. In
     # the latter case, replicate it. These will have one
@@ -1938,21 +1989,20 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
         species = [species]
 
     # if given species names, convert to the actual records.
-    species = [_gas_records[s]() if isinstance(s, str) else s for s in species]
+    species = [gas_records[s]() if isinstance(s, str) else s for s in species]
 
-    if write_maps:
-        maps_dir = write_maps
-        write_maps = True
-    else:
-        maps_dir = ''
+    maps_dir, write_maps = parse_boollike_input(write_maps)
+    vmrs_dir, write_vmrs = parse_boollike_input(write_vmrs)
 
     # MAIN LOOP #
     # Loop over the requested profiles, creating a prior for each gas requested. Check that the other variables are all
     # the same for each gas, then combine them to make a single .map file or dict for each profile
     ancillary_variables = ('Height', 'Temp', 'Pressure', 'PT', 'EL')
+    vmr_gases = dict()
     for iprofile in range(num_profiles):
         var_order = list(ancillary_variables)
         for ispecie, specie_record in enumerate(species):
+            gas_name = specie_record.gas_name
             var_order.append(specie_record.gas_name)
             specie_profile, specie_units, specie_constants = \
                 generate_single_tccon_prior(mod_data[iprofile], obs_dates[iprofile], utc_offsets[iprofile],
@@ -1969,16 +2019,24 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
                         raise RuntimeError('Got different vectors for {} for difference species'.format(ancvar))
 
                 # All good? Add the current specie concentration to the dicts
-                gas_name = specie_record.gas_name
                 profile_dict[gas_name] = specie_profile[gas_name]
                 units_dict[gas_name] = specie_units[gas_name]
 
+            # Record the profiles for the .vmr files, converted to dry mole fraction
+            vmr_gases[gas_name] = specie_profile[gas_name] * get_scale_factor(specie_units[gas_name])
+
         # Write the combined .map file for all the requested species
+        site_lat = specie_constants['site_lat']
         if write_maps:
-            map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], ))
+            map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], site_lat, obs_dates[iprofile]))
             mod_utils.write_map_file(map_name, variables=profile_dict, units=units_dict, var_order=var_order,
                                      **map_constants)
-
+        if write_vmrs:
+            vmr_name = os.path.join(vmrs_dir, mod_utils.vmr_file_name(site_abbrevs[iprofile], obs_dates[iprofile]))
+            mod_utils.write_vmr_file(vmr_name, tropopause_alt=specie_constants['tropopause_alt'],
+                                     profile_date=obs_dates[iprofile], profile_lat=site_lat,
+                                     profile_alt=specie_profile['Height'], profile_gases=vmr_gases,
+                                     isotope_opts=isotope_file_opts)
 
 ###########################################
 # FUNCTIONS FOR GENERATING GRIDDED PRIORS #
