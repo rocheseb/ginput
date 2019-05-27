@@ -12,15 +12,11 @@ sys.path.append(os.path.join(_mydir, '..'))
 import test_utils, mod_utils, tccon_priors
 from mod_maker import driver as mmdriver
 
-import pdb
-
 
 class TestModMaker(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        return
         # Get the GEOS FP/FP-IT data we need for the test if needed, check that the SHA1 sums are what is expected
-        #pdb.set_trace()
         test_utils.download_test_geos_data()
 
         # Run mod_maker for the standard test site
@@ -41,12 +37,10 @@ class TestModMaker(unittest.TestCase):
                                                   write_vmrs=test_utils.vmr_output_dir)
 
     def test_mod_files(self):
-        #pdb.set_trace()
         self._comparison_helper(test_utils.iter_mod_file_pairs, mod_utils.read_mod_file,
                                 test_utils.mod_input_dir, test_utils.mod_output_dir)
 
     def test_vmr_files(self):
-        pdb.set_trace()
         self._comparison_helper(test_utils.iter_vmr_file_pairs, mod_utils.read_vmr_file,
                                 test_utils.vmr_input_dir, test_utils.vmr_output_dir)
 

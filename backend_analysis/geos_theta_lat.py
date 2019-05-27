@@ -31,7 +31,7 @@ potential temperature becomes a poor vertical coordinate. In general, they note 
 chemical patterns.
 """
 
-from __future__ import print_function, division
+
 import netCDF4 as ncdf
 import numpy as np
 import os
@@ -549,9 +549,7 @@ def make_geos_lat_v_theta_climatology(year, geos_path, save_path, freq=pd.Timede
     if not by_hour:
         hours = (None,)
     else:
-        # careful in python 3 - this will return an iterator, so you would need to reset it if you needed to iterate
-        # over it again
-        hours = range(0, 24, 3)
+        hours = list(range(0, 24, 3))
 
     # The stats will be generated in several loops, one over time periods, and one over hours. As we finish each loop,
     # the lists from that loop will get concatenated into single arrays with a new first dimension.

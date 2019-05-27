@@ -9,7 +9,7 @@ Running this python code will run a test case (see the bottom of the code)
 import numpy as np
 from numpy import cos,sin,tan,arctan,arccos,arcsin,arctan2,deg2rad,rad2deg
 from datetime import datetime, timedelta
-import pylab as pl
+from matplotlib import pyplot as pl
 from mpl_toolkits.mplot3d import Axes3D
 import ephem
 from skyfield.api import load, utc
