@@ -55,7 +55,6 @@ site_dict = {
 				'ha':{'name':'Harwell','loc':'UK','lat':51.57133,'lon':341.10683,'alt':123},
 				'he':{'name':'Hefei','loc':'China','lat':31.9,'lon':117.17,'alt':34.5},
 				'yk':{'name':'Yekaterinburg','loc':'Russia','lat':57.03833,'lon':59.54500,'alt':0}, # needs alt update
-				'he':{'name':'Hefei','loc':'China','lat':31.9,'lon':117.17,'alt':34.5},
 				'zs':{'name':'Zugspitze','loc':'Germany','lat':47.42,'lon':10.98,'alt':34.5},
 				}
 
