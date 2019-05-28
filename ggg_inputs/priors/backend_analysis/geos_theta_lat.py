@@ -36,14 +36,12 @@ import netCDF4 as ncdf
 import numpy as np
 import os
 import pandas as pd
-import sys
+
+from ...common_utils.ioutils import make_ncdim_helper, make_ncvar_helper
+from ...common_utils import mod_utils
+from ...common_utils.mod_utils import ProgressBar
 
 _mydir = os.path.dirname(__file__)
-sys.path.append(os.path.join(_mydir, '..'))
-from ioutils import make_ncdim_helper, make_ncvar_helper
-import mod_utils
-from mod_utils import ProgressBar
-
 _theta_bin_edges = np.arange(220.0, 350.0, 2.0)
 _theta_bin_centers = (_theta_bin_edges[:-1] + _theta_bin_edges[1:])/2.0
 

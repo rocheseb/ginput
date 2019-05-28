@@ -1,4 +1,4 @@
-from __future__ import print_function, division
+from __future__ import print_function, division, absolute_import
 
 from collections import OrderedDict
 import datetime as dt
@@ -11,16 +11,13 @@ import re
 from scipy.optimize import curve_fit
 from statsmodels.robust.robust_linear_model import RLM
 from statsmodels.robust.norms import TukeyBiweight
-import sys
+
+from ...common_utils import mod_utils, ioutils
+from ...common_utils.ggg_logging import logger
+from .. import tccon_priors
+from .backend_utils import read_ace_var, read_ace_date, read_ace_theta
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
-sys.path.append(os.path.join(_mydir, '..'))
-
-import mod_utils, ioutils, tccon_priors
-from ggg_logging import logger
-from backend_utils import read_ace_var, read_ace_date, read_ace_theta
-
-
 _tccon_top_alt = 65.0
 
 

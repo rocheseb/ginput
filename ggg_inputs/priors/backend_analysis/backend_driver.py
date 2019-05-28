@@ -2,20 +2,16 @@ from __future__ import print_function, division
 
 import argparse
 import datetime as dt
-from glob import glob
 import os
 import sys
 
-import ace_fts_analysis as afa
-import geos_theta_lat as gtl
+from . import ace_fts_analysis as afa, geos_theta_lat as gtl
+from .backend_utils import ACEFileError, find_ace_file
+from ...common_utils.ggg_logging import logger
 
 # TODO: once I've programmed a dependency package, make this smart about what files it regenerates
 
 _my_dir = os.path.abspath(os.path.dirname(__file__))
-sys.path.append(os.path.join(_my_dir, '..'))
-from backend_utils import ACEFileError, find_ace_file
-from ggg_logging import logger
-
 _output_dir = os.path.abspath(os.path.join(_my_dir, '..', 'data'))
 
 

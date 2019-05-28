@@ -100,10 +100,10 @@ from pydap.cas.urs import setup_session # used to connect to the merra opendap s
 import xarray
 import warnings
 
-import mod_utils
-from mod_utils import gravity
-from slantify import * # code to make slant paths
-from tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites 
+from ..common_utils import mod_utils
+from ..common_utils.mod_utils  import gravity
+from .slantify import * # code to make slant paths
+from .tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites
 
 
 def shell_error(msg, ecode=1):

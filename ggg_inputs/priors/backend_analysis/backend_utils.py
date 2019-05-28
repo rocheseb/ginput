@@ -5,13 +5,11 @@ from glob import glob
 import numpy as np
 import os
 import re
-import sys
+
+from ...common_utils import mod_utils
+
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
-sys.path.append(os.path.join(_mydir, '..'))
-
-
-import mod_utils
 
 
 class ACEFileError(Exception):

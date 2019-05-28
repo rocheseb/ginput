@@ -23,8 +23,8 @@ from scipy.interpolate import interp1d, interp2d
 import subprocess
 import sys
 
-import mod_constants as const
-from ggg_logging import logger
+from . import mod_constants as const
+from .ggg_logging import logger
 
 _std_model_pres_levels = np.array([1000.0, 975.0, 950.0, 925.0, 900.0, 875.0, 850.0, 825.0, 800.0, 775.0, 750.0, 725.0,
                                    700.0, 650.0, 600.0, 550.0, 500.0, 450.0, 400.0, 350.0, 300.0, 250.0, 200.0, 150.0,

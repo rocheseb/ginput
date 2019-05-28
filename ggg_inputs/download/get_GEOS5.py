@@ -4,10 +4,9 @@ from __future__ import print_function
 import argparse
 import os
 from datetime import datetime, timedelta
-import sys
 from subprocess import Popen, PIPE, CalledProcessError
 
-import download_utils as dlutils
+from . import download_utils as dlutils
 
 ####################
 # Code Description #

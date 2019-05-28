@@ -5,7 +5,9 @@ import h5py
 import numpy as np
 
 
-import mod_utils, mod_maker, tccon_priors
+from ..common_utils import mod_utils
+from ..mod_maker import mod_maker
+from ..priors import tccon_priors
 
 
 # Values lower than this will be replaced with NaNs when reading in the resampled met data

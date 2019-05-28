@@ -9,4 +9,4 @@ middleworld_flag = 2
 overworld_flag = 3
 
 _mydir = os.path.dirname(__file__)
-data_dir = os.path.join(_mydir, 'data')
+data_dir = os.path.abspath(os.path.join(_mydir, '..', 'data'))

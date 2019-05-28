@@ -5,7 +5,7 @@ from hashlib import sha1
 import netCDF4 as ncdf
 import numpy as np
 
-import mod_utils
+from . import mod_utils
 
 
 def make_ncdim_helper(nc_handle, dim_name, dim_var, **attrs):

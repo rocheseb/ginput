@@ -1,16 +1,16 @@
 from __future__ import print_function, division
 import datetime as dt
-from glob import glob
 import numpy as np
 import os
-import sys
 import unittest
 
-_mydir = os.path.abspath(os.path.dirname(__file__))
-sys.path.append(os.path.join(_mydir, '..'))
+from . import test_utils
+from ..common_utils import mod_utils
+from ..priors import tccon_priors
+from ..mod_maker.mod_maker import driver as mmdriver
 
-import test_utils, mod_utils, tccon_priors
-from mod_maker import driver as mmdriver
+
+_mydir = os.path.abspath(os.path.dirname(__file__))
 
 
 class TestModMaker(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestModMaker(unittest.TestCase):
 
         # Run mod_maker for the standard test site
         mmdriver(test_utils.test_date, test_utils.test_date+dt.timedelta(days=1), test_utils.geos_fp_dir,
-                 save_path=test_utils.mod_output_dir, keep_latlon_prec=True, save_in_utc=True, site_abbrv=test_utils.test_site)
+                 save_path=test_utils.mod_output_top_dir, keep_latlon_prec=True, save_in_utc=True, site_abbrv=test_utils.test_site)
 
         # Instantiate the necessary trace gas records
         cls.all_records = {k: v() for k, v in tccon_priors.gas_records.items()}

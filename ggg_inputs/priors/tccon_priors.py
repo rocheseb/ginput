@@ -69,9 +69,8 @@ from scipy.optimize import minimize_scalar
 import xarray as xr
 
 # TODO: move all into package and use a proper relative import
-import mod_utils, ioutils
-import mod_constants as const
-from ggg_logging import logger
+from ..common_utils import mod_utils, ioutils, mod_constants as const
+from ..common_utils.ggg_logging import logger
 
 
 _data_dir = const.data_dir

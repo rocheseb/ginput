@@ -7,13 +7,9 @@ import os
 import shutil
 import sys
 
-_mydir = os.path.abspath(os.path.realpath(os.path.dirname(__file__)))
-# Add the paths to the mod maker and download utilities.
-# TODO: replace with proper relative imports when this is a package
-sys.path.append(os.path.abspath(os.path.join(_mydir, '..')))
-sys.path.append(os.path.abspath(os.path.join(_mydir, '..', 'download')))
+from ..download import get_GEOS5
 
-import get_GEOS5
+_mydir = os.path.abspath(os.path.realpath(os.path.dirname(__file__)))
 
 input_data_dir = os.path.join(_mydir, 'test_input_data')
 geos_fp_dir = os.path.join(input_data_dir, 'geosfp-it')
@@ -22,7 +18,8 @@ mod_input_dir = os.path.join(input_data_dir, 'mod_files', 'fpit')
 vmr_input_dir = os.path.join(input_data_dir, 'vmr_files', 'fpit')
 
 output_data_dir = os.path.join(_mydir, 'test_output_data')
-mod_output_dir = os.path.join(output_data_dir, 'mod_files', 'fpit')
+mod_output_top_dir = os.path.join(output_data_dir, 'mod_files')
+mod_output_dir = os.path.join(mod_output_top_dir, 'fpit')
 vmr_output_dir = os.path.join(output_data_dir, 'vmr_files', 'fpit')
 
 test_date = dt.datetime(2018, 1, 1)
