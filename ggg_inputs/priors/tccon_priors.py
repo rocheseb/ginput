@@ -1312,15 +1312,20 @@ def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict
         # Take advantage of mutable default arguments to cache the CLAMS data. The first time this function is called,
         # the dict will be empty, so the data will be loaded. The second time, since the dict will have been modified,
         # with all the data, we don't need to load it. This should hopefully speed up this part of the code.
-        clams = ncdf.Dataset(_clams_file, 'r')
-        clams_dat['eqlat'] = clams.variables['lat'][:]
-        clams_dat['theta'] = clams.variables['theta'][:]
-        clams_dat['doy'] = clams.variables['doy'][:]
-        clams_dat['age'] = clams.variables['age'][:]
+        with ncdf.Dataset(_clams_file, 'r') as clams:
+            clams_dat['eqlat'] = clams.variables['lat'][:]
+            clams_dat['theta'] = clams.variables['theta'][:]
+            clams_dat['doy'] = clams.variables['doy'][:]
 
-        clams_dat['eqlat_grid'], clams_dat['theta_grid'] = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
-        if clams_dat['eqlat_grid'].shape != clams_dat['age'].shape[1:] or clams_dat['theta_grid'].shape != clams_dat['age'].shape[1:]:
-            raise RuntimeError('Failed to create equivalent lat/theta grids the same shape as CLAMS age')
+            # The original CLAMS file provided by Arlyn only went up to 2000 K. At first we tried just using the top
+            # for greater potential temperatures, but that led to too-great N2O values at those levels. We now
+            # extrapolate using the three end points to calculate a slope of age vs. theta. This calculation takes some
+            # time, so we've added the extended age to the CLAMS file using backend_analysis.clams.modify_clams_file().
+            clams_dat['age'] = clams.variables['extended_age'][:]
+
+            clams_dat['eqlat_grid'], clams_dat['theta_grid'] = np.meshgrid(clams_dat['eqlat'], clams_dat['theta'])
+            if clams_dat['eqlat_grid'].shape != clams_dat['age'].shape[1:] or clams_dat['theta_grid'].shape != clams_dat['age'].shape[1:]:
+                raise RuntimeError('Failed to create equivalent lat/theta grids the same shape as CLAMS age')
 
     idoy = np.argwhere(clams_dat['doy'] == day_of_year).item()
 
@@ -1328,17 +1333,9 @@ def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict
     clams_points = np.array([[el, th] for el, th in zip(el_grid.flat, th_grid.flat)])
 
     # interp2d does not behave well here; it interpolates to points outside the range of eqlat/theta and gives a much
-    # noiser result.
+    # noisier result.
     age_interp = LinearNDInterpolator(clams_points, clams_dat['age'][idoy, :, :].flatten())
     prof_ages = np.array([age_interp(el, th).item() for el, th in zip(eq_lat, theta)])
-
-    # For simplicity, we're just going to clamp ages for theta > max theta in CLAMS to the age given at the top of the
-    # profile. In theory, this shouldn't matter too much since (a) CLAMS seems to approach an asymptote at the top of
-    # the stratosphere and (b) there's just not that much mass up there.
-    if not np.all(np.isnan(prof_ages)):
-        last_age = np.max(np.argwhere(~np.isnan(prof_ages)))
-        if last_age < prof_ages.size:
-            prof_ages[last_age+1:] = prof_ages[last_age]
 
     if as_timedelta:
         # The CLAMS ages are in years, but relativedeltas don't accept fractional years. Instead, separate the whole

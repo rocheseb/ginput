@@ -590,17 +590,21 @@ def hg_commit_info(hg_dir=None):
     # Get the last commit (-l 1) in the current branch (-f)
     summary = subprocess.check_output(['hg', 'log', '-f', '-l', '1'], cwd=hg_dir).splitlines()
     log_dict = dict()
+    # Since subprocess returns a bytes object (at least on Linux) rather than an encoded string object, all the strings
+    # below must be bytes, not unicode strings
     for line in summary:
-        splitline = line.split(':', 1)
+        splitline = line.split(b':', 1)
         if len(splitline) < 2:
             continue
         k, v = splitline
         log_dict[k.strip()] = v.strip()
 
-    parent = re.search(r'(?<=:)\w+', log_dict['changeset']).group()
-    branch = log_dict['branch']
-    parent_date = log_dict['date']
-    return parent, branch, parent_date
+    parent = re.search(b'(?<=:)\\w+', log_dict[b'changeset']).group()
+    # In Mercurial, if on the default branch, then log does not include a branch name in the output
+    branch = log_dict[b'branch'] if b'branch' in log_dict else b'default'
+    parent_date = log_dict[b'date']
+    # Convert to unicode strings to avoid them getting formatted as "b'abc'" or "b'default'" in unicode strings
+    return parent.decode('utf8'), branch.decode('utf8'), parent_date.decode('utf8')
 
 
 def hg_is_commit_clean(hg_dir=None, ignore_untracked=True, ignore_files=tuple()):
@@ -632,9 +636,11 @@ def hg_is_commit_clean(hg_dir=None, ignore_untracked=True, ignore_files=tuple())
                 return True
         return False
 
+    # Since subprocess returns a bytes object (at least on Linux) rather than an encoded string object, all the strings
+    # below must be bytes, not unicode strings
     for line in summary:
-        status, hg_file = [p.strip() for p in line.split(' ', 1)]
-        if ignore_untracked and status == '?':
+        status, hg_file = [p.strip() for p in line.split(b' ', 1)]
+        if ignore_untracked and status == b'?':
             pass
         elif in_ignore(hg_file):
             pass
@@ -658,6 +664,18 @@ def round_to_zero(val):
 
 
 def calculate_model_potential_temperature(temp, pres_levels=_std_model_pres_levels):
+    """
+    Calculate potental temperature for model output on fixed pressure levels.
+
+    :param temp: The absolute temperature (in K) on the model grid.
+    :type temp: array-like
+
+    :param pres_levels: the pressure levels that the temperature is defined on. Must be a 1D vector, i.e. all columns in
+     the model must be on the same pressure levels. A standard set of pressure for GEOS FP is the default.
+    :type pres_levels: vector-like
+
+    :return: the potential temperature
+    """
     if temp.ndim != 4:
         raise ValueError('temp expected to be 4D')
 
