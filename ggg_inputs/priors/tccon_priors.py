@@ -1314,7 +1314,7 @@ def get_clams_age(theta, eq_lat, day_of_year, as_timedelta=False, clams_dat=dict
         # with all the data, we don't need to load it. This should hopefully speed up this part of the code.
         with ncdf.Dataset(_clams_file, 'r') as clams:
             clams_dat['eqlat'] = clams.variables['lat'][:]
-            clams_dat['theta'] = clams.variables['theta'][:]
+            clams_dat['theta'] = clams.variables['extended_theta'][:]
             clams_dat['doy'] = clams.variables['doy'][:]
 
             # The original CLAMS file provided by Arlyn only went up to 2000 K. At first we tried just using the top
