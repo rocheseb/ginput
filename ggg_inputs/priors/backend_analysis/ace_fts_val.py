@@ -1,15 +1,13 @@
 from __future__ import print_function, division
 
-import backend_utils as butils
 import datetime as dt
 from glob import glob
 import netCDF4 as ncdf
 import numpy as np
 import os
-import sys
 
 from ...common_utils import mod_utils
-
+from . import backend_utils as butils
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
 

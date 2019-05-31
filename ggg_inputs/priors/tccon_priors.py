@@ -1191,10 +1191,13 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
     @staticmethod
     def calc_fn2o_from_age(age):
         def age_fxn(n2o):
-            # This equation relates N2O to age in Fig. 3 of Andrews et al. (JGR, 106, pp. 32295-32314). This was derived
-            # from the ATLAS spectrometer on board the ER-2 aircraft flying in the 1990s. (In the paper, age is called
-            # "CO2 lag".)
-            return 0.0581 * (313.0 - n2o) - 2.54e-4 * (313 - n2o) ** 2.0 + 4.41e-7 * (313.0 - n2o) ** 3.0
+            n2o_0 = 313
+            if n2o < 13:
+                m = 0.00730794
+                b = 3.60456149
+                return b + m * (n2o_0 - n2o)
+            else:
+                return 0.0540144 * (n2o_0 - n2o) - 1.981804e-4 * (n2o_0 - n2o) ** 2 + 2.751429e-7 * (n2o_0 - n2o) ** 3
 
         # Rather than try to invert this cubic function to get N2O in terms of age, we solve numerically for what value
         # of N2O gives the desired age. We apply some bounds to the minimization because this is about the range of
