@@ -103,6 +103,7 @@ def _parse_file_types(clinput):
     if len(bad_types) > 0:
         dlutils.eprint('The following file types are not allowed: {}. Allowed file types are: {}'
                        .format(', '.join(bad_types), ', '.format(_file_types)))
+    return types
 
 
 def parse_args():
@@ -125,7 +126,7 @@ def parse_args():
     return args
 
 
-def driver(start, end, mode='FP', path='.', filetypes=_file_types):
+def driver(start, end, mode='FP', path='.', filetypes=_file_types, **kwargs):
     for ftype in filetypes:
         outpath = os.path.join(path, _std_out_paths[ftype])
         if not os.path.exists(outpath):
