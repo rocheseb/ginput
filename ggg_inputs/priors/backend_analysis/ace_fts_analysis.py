@@ -21,6 +21,59 @@ _mydir = os.path.abspath(os.path.dirname(__file__))
 _tccon_top_alt = 65.0
 
 
+def _bin_centers(bins):
+    return bins[:-1] + np.diff(bins)/2
+
+
+_std_age_bins = np.arange(0.0, 10.0, 0.25)
+_std_age_bin_centers = _bin_centers(_std_age_bins)
+_std_frac_bins = np.arange(0.0, 1.05, 0.05)
+_std_frac_bin_centers = _bin_centers(_std_age_bins)
+_std_theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100), np.arange(1680, 3680, 200)])
+_std_theta_bin_centers = _bin_centers(_std_theta_bins)
+
+
+def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
+    logger.info('Instantiating N2O record')
+    #  It shouldn't matter if we recalculate the strat LUT or not since we're not using it here
+    n2o_record = tccon_priors.N2OTropicsRecord()
+
+    logger.info('Loading ACE data')
+    ace_alt, ace_fn2o, ace_theta = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', n2o_record,
+                                                                       tropopause_approach='theta')
+    with ncdf.Dataset(ace_n2o_file, 'r') as nch:
+        ace_lat = read_ace_var(nch, 'latitude', None)
+
+    with ncdf.Dataset(ace_age_file, 'r') as nch:
+        ace_age = nch.variables['age'][:].filled(np.nan)
+
+    logger.info('Binning F(N2O) vs. age and theta')
+    # Similar to the F(CH4) vs. F(N2O) approach, we ignore fill values, want only positive F(N2O) values, want to
+    # avoid the polar vortex (lat < 50, could use mod_utils.isvortex to be more careful) and want to stay within
+    # TCCON relevant altitudes
+    xx = ~np.isnan(ace_fn2o) & ~np.isnan(ace_age) & (ace_fn2o >= 0) & (np.abs(ace_lat[:, np.newaxis]) < 50) & \
+         (ace_alt[np.newaxis, :] < _tccon_top_alt)
+
+    age_bins = _std_age_bins
+    age_bin_centers = _bin_centers(age_bins)
+    theta_bins = _std_theta_bins
+    theta_bin_centers = _bin_centers(theta_bins)
+
+    # We're not going to worry about outliers initially
+    fn2o_means, fn2o_counts, fn2o_overall, theta_overall = _bin_z_vs_xy(ace_age, ace_theta, ace_fn2o, xx, age_bins, theta_bins)
+
+    # For each theta bin, fill in internal NaNs, then fill external
+    # NaNs assuming that the next youngest bin is the best representation
+    # at the beginning and the next oldest at the end. np.interp does
+    # this automatically
+    for i in range(fn2o_means.shape[1]):
+        not_nans = ~np.isnan(fn2o_means[:, i])
+        fn2o_means[~not_nans, i] = np.interp(age_bin_centers[~not_nans], age_bin_centers[not_nans], fn2o_means[not_nans, i])
+
+    _save_fn2o_lut(lut_save_file, fn2o_means, fn2o_counts, fn2o_overall, theta_overall, age_bin_centers, age_bins,
+                   theta_bin_centers, theta_bins)
+
+
 def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
 
     logger.info('Instantiating trace gas records')
@@ -45,24 +98,22 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
          (np.abs(ace_lat[:, np.newaxis]) < 50) & (ace_alt[np.newaxis, :] < _tccon_top_alt)
 
     # Define bins for F(N2O) and theta
-    fn2o_bins = np.arange(0.0, 1.05, 0.05)
-    fn2o_bin_centers = fn2o_bins[:-1] + np.diff(fn2o_bins) / 2
+    fn2o_bins = _std_frac_bins
+    fn2o_bin_centers = _std_frac_bin_centers
 
-    #theta_bins = np.concatenate([np.arange(380, 680, 20), np.arange(680, 1080, 50), np.arange(1080, 1680, 100)])
-    #theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100)])
-    theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100), np.arange(1680, 3680, 200)])
-    theta_bin_centers = theta_bins[:-1] + np.diff(theta_bins) / 2
+    theta_bins = _std_theta_bins
+    theta_bin_centers = _std_theta_bin_centers
 
     # Find outliers to avoid overly noisy relationships
     oo = _find_ch4_outliers(ace_fn2o, ace_fch4, fn2o_bins, xx)
 
     # Do the actual binning
-    fch4_means, fch4_counts, fch4_overall, theta_overall = _bin_fch4(ace_fn2o, ace_fch4, ace_theta, xx & oo,
-                                                                     theta_bins, fn2o_bins)
+    fch4_means, fch4_counts, fch4_overall, theta_overall = _bin_z_vs_xy(ace_fn2o, ace_theta, ace_fch4, xx & oo,
+                                                                        fn2o_bins, theta_bins)
 
     logger.info('Saving F(CH4):F(N2O) file')
     _save_fch4_lut(lut_save_file, fch4_means, fch4_counts, fch4_overall, theta_overall,
-                   fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins)
+                   fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins, ace_n2o_file)
 
 
 def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, lut_save_file, ch4=None):
@@ -180,33 +231,33 @@ def _find_ch4_outliers(ace_fn2o, ace_fch4, fn2o_bins, good_data):
     return oo
 
 
-def _bin_fch4(ace_fn2o, ace_fch4, ace_theta, good_data, theta_bins, fn2o_bins):
-    n_fn2o_bins = fn2o_bins.size - 1
-    n_theta_bins = theta_bins.size - 1
-    fch4_means = np.full([n_fn2o_bins, n_theta_bins], np.nan)
-    fch4_counts = np.zeros_like(fch4_means, dtype=np.int)
+def _bin_z_vs_xy(x, y, z, good_data, x_bins, y_bins):
+    n_x_bins = x_bins.size - 1
+    n_y_bins = y_bins.size - 1
+    x_means = np.full([n_x_bins, n_y_bins], np.nan)
+    x_counts = np.zeros_like(x_means, dtype=np.int)
 
-    for i, (tlow, thigh) in enumerate(zip(theta_bins[:-1], theta_bins[1:])):
-        zz = good_data & (ace_theta >= tlow) & (ace_theta < thigh)
-        n2o_sub = ace_fn2o[zz]
-        ch4_sub = ace_fch4[zz]
-        bin_inds = np.digitize(n2o_sub, fn2o_bins) - 1
+    for i, (tlow, thigh) in enumerate(zip(y_bins[:-1], y_bins[1:])):
+        aa = good_data & (y >= tlow) & (y < thigh)
+        x_sub = x[aa]
+        z_sub = z[aa]
+        bin_inds = np.digitize(x_sub, x_bins) - 1
 
-        for j in range(n_fn2o_bins):
+        for j in range(n_x_bins):
             jj = bin_inds == j
-            fch4_means[j, i] = np.nanmean(ch4_sub[jj])
-            fch4_counts[j, i] = np.sum(jj)
+            x_means[j, i] = np.nanmean(z_sub[jj])
+            x_counts[j, i] = np.sum(jj)
 
-    fch4_overall = np.full([n_fn2o_bins], np.nan)
-    theta_overall = np.full([n_fn2o_bins], np.nan)
-    bin_inds = np.digitize(ace_fn2o, fn2o_bins) - 1
+    z_overall = np.full([n_x_bins], np.nan)
+    y_overall = np.full([n_x_bins], np.nan)
+    bin_inds = np.digitize(x, x_bins) - 1
 
-    for j in range(n_fn2o_bins):
+    for j in range(n_x_bins):
         jj = (bin_inds == j) & good_data
-        fch4_overall[j] = np.nanmean(ace_fch4[jj])
-        theta_overall[j] = np.nanmean(ace_theta[jj])
+        z_overall[j] = np.nanmean(z[jj])
+        y_overall[j] = np.nanmean(y[jj])
 
-    return fch4_means, fch4_counts, fch4_overall, theta_overall
+    return x_means, x_counts, z_overall, y_overall
 
 
 def _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_ch4, ace_hf, ch4, xx, year, bin_fxn):
@@ -229,6 +280,39 @@ def _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_
 def _get_year_avg_ch4_sbc(year, ch4):
     tt = (ch4.conc_seasonal.index >= dt.datetime(year, 1, 1)) & (ch4.conc_seasonal.index < dt.datetime(year + 1, 1, 1))
     return ch4.conc_seasonal.dmf_mean[tt].mean()
+
+
+def _save_fn2o_lut(nc_filename, fn2o_means, fn2o_counts, fn2o_overall, theta_overall,
+                   age_bin_centers, age_bin_edges, theta_bin_centers, theta_bin_edges, ace_n2o_file):
+
+    with ncdf.Dataset(nc_filename, 'w') as nch:
+        age_dim = ioutils.make_ncdim_helper(nch, 'age', age_bin_centers,
+                                            description='Age of stratospheric air from the CLaMS model',
+                                            units='years')
+        ioutils.make_ncdim_helper(nch, 'age_bins', age_bin_edges,
+                                  description='Edges of age bins used when binning the F(N2O) data',
+                                  units='years')
+        theta_dim = ioutils.make_ncdim_helper(nch, 'theta', theta_bin_centers,
+                                              description='Potential temperature',
+                                              units='K')
+        ioutils.make_ncdim_helper(nch, 'theta_bins', theta_bin_edges,
+                                  description='Edges of potential temperature bins used when binning the F(N2O) data',
+                                  units='K')
+
+        ioutils.make_ncvar_helper(nch, 'fn2o', fn2o_means, (age_dim, theta_dim),
+                                  description='Mean value of F(N2O) (fraction of N2O remaining relative to the '
+                                              'stratospheric boundary condition) in the age/theta bin',
+                                  units='unitless')
+        ioutils.make_ncvar_helper(nch, 'fn2o_counts', fn2o_counts, (age_dim, theta_dim),
+                                  description='Number of F(N2O) observations in each age/theta bin',
+                                  units='number')
+        ioutils.make_ncvar_helper(nch, 'fn2o_overall', fn2o_overall, (age_dim,),
+                                  description='Mean value of F(N2O) for a given age bin, not separated by theta',
+                                  units='unitless')
+        ioutils.make_ncvar_helper(nch, 'theta_overall', theta_overall, (age_dim,),
+                                  description='Mean value of potential temperature in a given age bin',
+                                  units='K')
+        ioutils.add_dependent_file_hash(nch, 'ace_n2o_file_sha1', ace_n2o_file)
 
 
 def _save_fch4_lut(nc_filename, fch4_means, fch4_counts, fch4_overall, theta_overall,
@@ -435,9 +519,26 @@ def _get_ace_date_range(ace_dates, freq='YS'):
     return pd.date_range(start=dt.datetime(start_year, 1, 1), end=dt.datetime(end_year, 1, 1), freq=freq)
 
 
-def add_clams_age_to_file(ace_nc_file):
+def add_clams_age_to_file(ace_nc_file, save_nc_file=None):
+    """
+    Calculate CLaMS age for profiles in an ACE-FTS files. Save either to the given ACE file or a new file.
+
+    Note: this function does not calculate equivalent latitude for the ACE profiles before computing the age, it simply
+    uses the geographic latitude of the ACE profiles.
+
+    :param ace_nc_file: the ACE-FTS netCDF file to compute ages for.
+    :type ace_nc_file: str
+
+    :param save_nc_file: optional, if given a path to a file, the ages will be saved to this file (which is overwritten)
+     along with the altitude dimension. If not given (or ``None``), the ages are added to the file specified by
+     ``ace_nc_file``.
+    :type save_nc_file: str
+
+    :return: None
+    """
     with ncdf.Dataset(ace_nc_file, 'r') as nch:
         ace_lat = read_ace_var(nch, 'latitude', None)
+        ace_alt = read_ace_var(nch, 'altitude', None)
         ace_dates = read_ace_date(nch)
         ace_doy = np.array([mod_utils.day_of_year(d) + 1 for d in ace_dates])
         ace_theta = read_ace_theta(nch, None)
@@ -453,6 +554,16 @@ def add_clams_age_to_file(ace_nc_file):
 
     pbar.finish()
 
-    with ncdf.Dataset(ace_nc_file, 'a') as nch:
-        ioutils.make_ncvar_helper(nch, 'age', ace_ages, ['index', 'altitude'], units='years',
-                                  description='Age from the CLaMS model along the ACE profiles')
+    if save_nc_file is None:
+        logger.info('Added CLaMS age to input file: {}'.format(ace_nc_file))
+        with ncdf.Dataset(ace_nc_file, 'a') as nch:
+            ioutils.make_ncvar_helper(nch, 'age', ace_ages, ['index', 'altitude'], units='years',
+                                      description='Age from the CLaMS model along the ACE profiles')
+    else:
+        logger.info('Saving CLaMS age to new file: {}'.format(save_nc_file))
+        with ncdf.Dataset(save_nc_file, 'w') as nch:
+            index_dim = nch.createDimension('index', ace_ages.shape[0])
+            alt_dim = ioutils.make_ncdim_helper(nch, 'altitude', ace_alt, long_name='altitude',
+                                                description='Fixed altitude grid', units='km')
+            ioutils.make_ncvar_helper(nch, 'age', ace_ages, [index_dim, alt_dim], units='years', long_name='clams_age',
+                                      description='Age from the CLaMS model along the ACE profiles')
