@@ -1,5 +1,6 @@
 from __future__ import print_function, division
 import datetime as dt
+import sys
 
 
 _date_range_cl_help = 'The range of dates to get, in YYYYMMDD-YYYYMMDD format. The second date may be omitted, in ' \
@@ -7,6 +8,11 @@ _date_range_cl_help = 'The range of dates to get, in YYYYMMDD-YYYYMMDD format. T
                       'the range.'
 
 _date_range_cl_help_extra = 'Either date may also be given as YYYYMMDD_hhmm, where the hhmm are hours and minutes.'
+
+
+def eprint(msg, ecode=1):
+    print(msg, file=sys.stderr)
+    sys.exit(ecode)
 
 
 def date_range_cl_help(allow_hours_minutes=True):
