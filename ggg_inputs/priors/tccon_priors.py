@@ -1186,32 +1186,37 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.0
 
+    _ace_fn2o_file = os.path.join(_data_dir, 'ace_fn2o_lut.nc')
+
     @classmethod
     def get_frac_remaining_by_age(cls, ages):
-        fracs = np.array([cls.calc_fn2o_from_age(a) for a in ages])
-        return xr.DataArray(data=fracs[:, np.newaxis], coords=[('age', ages), ('theta', cls._no_theta_coord)])
+        def fill_nans(row_age, row):
+            # For each theta bin, fill in internal NaNs, then fill external
+            # NaNs assuming that the next youngest bin is the best representation
+            # at the beginning and the next oldest at the end. np.interp does
+            # this automatically so is actually easier than using the xarray interp
+            # methods.
+            nans = np.isnan(row)
+            row[nans] = np.interp(row_age[nans], row_age[~nans], row[~nans])
+            return row
 
-    @staticmethod
-    def calc_fn2o_from_age(age):
-        def age_fxn(n2o):
-            n2o_0 = 313
-            if n2o < 13:
-                m = 0.00730794
-                b = 3.60456149
-                return b + m * (n2o_0 - n2o)
-            else:
-                return 0.0540144 * (n2o_0 - n2o) - 1.981804e-4 * (n2o_0 - n2o) ** 2 + 2.751429e-7 * (n2o_0 - n2o) ** 3
+        with xr.open_dataset(cls._ace_fn2o_file) as dset:
+            fn2o_lut = dset['fn2o']
 
-        # Rather than try to invert this cubic function to get N2O in terms of age, we solve numerically for what value
-        # of N2O gives the desired age. We apply some bounds to the minimization because this is about the range of
-        # concentrations measured (technically that should stop around 50 ppbv on the lower bound, but we may need to go
-        # a little past that to get to the oldest air).
-        n2o_at_age = minimize_scalar(lambda x: abs(age_fxn(x) - age), method='bounded', bounds=(0.0, 320.0))
-        n2o_at_age = n2o_at_age.x  # extract the actual concentration from the minimization result
+            # Yes, this is filling in a different direction than the CH4 method. There it makes sense to extend along
+            # theta, because (a) we don't expect much data beyond the available theta range from ACE and (b) plotted
+            # against theta, the curves are flat parabolas, so a constant extrapolation is reasonable. Here, it makes
+            # sense to extrapolate along the age b/c the curves converge at higher theta, so choosing a neighboring
+            # age bin's curve should be a good approximation.
+            for i in range(fn2o_lut.theta.size):
+                fn2o_lut[{'theta': i}] = fill_nans(fn2o_lut.age, fn2o_lut.isel(theta=i))
 
-        # From the equation, 313 ppb N2O is clearly the age 0 concentration. We assume that that is the stratospheric
-        # boundary condition, and so the fraction of N2O remaining is the concentration divided by 313.
-        return n2o_at_age / 313.0
+            # ages is assumed to be a simple numpy array. We'll extrapolate in order to get the very youngest and oldest
+            # ages that might be just outside the bin centers. Just in case, fill in any NaNs along the theta dimension
+            # (was necessary for CH4, might not be here).
+            fn2o_lut = fn2o_lut.interp(age=ages, kwargs={'fill_value': 'extrapolate'}).interpolate_na('theta')
+
+        return fn2o_lut
 
     
 class CH4TropicsRecord(TraceGasTropicsRecord):
@@ -1244,7 +1249,7 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
         # Then get the relationship between F(N2O) and F(CH4) derived from ACE-FTS data. This lookup table was created
         # using `backend_analysis/ace_fts_analysis.make_fch4_fn2o_lookup_table()`.
         with xr.open_dataset(cls._fn2o_fch4_lut_file) as dset:
-            fch4_lut = dset.fch4
+            fch4_lut = dset['fch4']
 
             # Extrapolate out to all thetas before interpolating to F(N2O). If we don't do this first, then we'll lose
             # information at higher thetas. Say we need to interpolate to F(N2O) = 0.03 and the F(N2O) = 0.025 bin goes
@@ -1263,7 +1268,7 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
             # Fill in NaNs along each theta line
             fch4_lut = fch4_lut.interpolate_na('theta')
 
-            return fch4_lut
+        return fch4_lut
 
 
 class COTropicsRecord(TraceGasTropicsRecord):

@@ -62,14 +62,6 @@ def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
     # We're not going to worry about outliers initially
     fn2o_means, fn2o_counts, fn2o_overall, theta_overall = _bin_z_vs_xy(ace_age, ace_theta, ace_fn2o, xx, age_bins, theta_bins)
 
-    # For each theta bin, fill in internal NaNs, then fill external
-    # NaNs assuming that the next youngest bin is the best representation
-    # at the beginning and the next oldest at the end. np.interp does
-    # this automatically
-    for i in range(fn2o_means.shape[1]):
-        not_nans = ~np.isnan(fn2o_means[:, i])
-        fn2o_means[~not_nans, i] = np.interp(age_bin_centers[~not_nans], age_bin_centers[not_nans], fn2o_means[not_nans, i])
-
     _save_fn2o_lut(lut_save_file, fn2o_means, fn2o_counts, fn2o_overall, theta_overall, age_bin_centers, age_bins,
                    theta_bin_centers, theta_bins, ace_n2o_file)
 
