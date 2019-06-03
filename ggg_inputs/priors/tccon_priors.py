@@ -739,7 +739,7 @@ class TraceGasTropicsRecord(object):
         save_ds.to_netcdf(self.get_strat_lut_file())
 
     @classmethod
-    def _load_strat_arrays(cls, dependent_files=None):
+    def _load_strat_arrays(cls, dependent_files=None, lut_file=None):
         def check_hash(file_path, hash):
             if file_path is None:
                 return
@@ -754,7 +754,10 @@ class TraceGasTropicsRecord(object):
 
         dependent_files = dict() if dependent_files is None else dependent_files
         strat_dict = dict()
-        with xr.open_dataset(cls.get_strat_lut_file()) as ds:
+        if lut_file is None:
+            lut_file = cls.get_strat_lut_file()
+
+        with xr.open_dataset(lut_file) as ds:
             # First verify that the SHA1 hashes for the MLO and SMO match. If not, we should recalculate the strat array
             # rather than use one calculated with old MLO/SMO data
             for att_name, file_path in dependent_files.items():
