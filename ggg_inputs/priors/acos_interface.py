@@ -13,7 +13,7 @@ from ..priors import tccon_priors
 # Values lower than this will be replaced with NaNs when reading in the resampled met data
 _fill_val_threshold = -9e5
 # NaNs will be replaced with this value when writing the HDF5 file
-_fill_val = -99999
+_fill_val = -999999
 
 
 def acos_interface_main(met_resampled_file, geos_files, output_file):
@@ -143,12 +143,13 @@ def read_resampled_met(met_file):
         * "altitude" - the altitude profiles in km
         * "latitude" - the sounding latitudes in degrees (south is negative)
         * "trop_pressure" - the blended tropopause pressure in hPa
+        * "trop_temperature" - the blended tropopause temperature in K
         * "surf_gph" - surface geopotential height in m^2 s^-2
         * "surf_alt" - the surface altitude, derived from surface geopotential, in km
 
     :rtype: dict
     """
-    met_group = 'Meterology'
+    met_group = 'Meteorology'
     sounding_group = 'SoundingGeometry'
     var_dict = {'pv': [met_group, 'epv_profile_met'],
                 'temperature': [met_group, 'temperature_profile_met'],
@@ -157,6 +158,7 @@ def read_resampled_met(met_file):
                 'altitude': [sounding_group, 'height_profile_met'],
                 'latitude': [sounding_group, 'sounding_latitude'],
                 'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
+                'trop_temperature': [met_group, 'tropopause_temperature_met'],
                 'surf_gph': [met_group, 'gph_met']
                 }
     data_dict = dict()
@@ -179,13 +181,9 @@ def read_resampled_met(met_file):
     data_dict['altitude'] *= 1e-3  # in meters, need kilometers
     data_dict['trop_pressure'] *= 1e-2  # in Pa, need hPa
 
-    # surf_gph is geopotential height in m^2 s^-2. The conversion function will calculate the gravity for the OCO
-    # latitudes and the bottom altitude in the regular altitude profiles. This is the best approximation I could think
-    # of for what TCCON does, which is to calculate the gravity for the latitude and altitude of the TCCON site.
-    # Also need to convert the resulting altitude from meters to kilometers. The input altitude is needed in kilometers.
-    data_dict['surf_alt'] = 1e-3 * mod_utils.geopotential_height_to_altitude(
-        data_dict['surf_gph'], data_dict['latitude'], data_dict['altitude'][:, :, -1]/1000
-    )
+    # surf_gph is height derived from geopotential by divided by g0 = 9.80665 m/s^2 according to Chris O'Dell on
+    # 21 May 2019. We can use this as the surface altitude, just need to convert from meters to kilometers.
+    data_dict['surf_alt'] = 1e-3 * data_dict['surf_gph']
 
     return data_dict
 
@@ -215,7 +213,7 @@ def write_prior_h5(output_file, profile_variables, units):
 
             # Write the data
             var_unit = units[var_name]
-            dset = h5grp.create_dataset(var_name, data=var_data)
+            dset = h5grp.create_dataset(var_name, data=var_data, fillvalue=_fill_val)
             dset.attrs['units'] = var_unit
 
 
@@ -248,6 +246,7 @@ def _convert_acos_time_strings(time_string_array, format='datetime'):
 
     output_array = np.full([time_string_array.size], init_val)
     for idx, time_str in enumerate(time_string_array.flat):
+        time_str = time_str.decode('utf8')
         datetime_obj = dt.datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%S.%fZ')
         if format == 'datetime':
             output_array[idx] = datetime_obj
