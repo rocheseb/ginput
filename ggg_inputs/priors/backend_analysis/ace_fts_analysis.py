@@ -71,7 +71,7 @@ def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
         fn2o_means[~not_nans, i] = np.interp(age_bin_centers[~not_nans], age_bin_centers[not_nans], fn2o_means[not_nans, i])
 
     _save_fn2o_lut(lut_save_file, fn2o_means, fn2o_counts, fn2o_overall, theta_overall, age_bin_centers, age_bins,
-                   theta_bin_centers, theta_bins)
+                   theta_bin_centers, theta_bins, ace_n2o_file)
 
 
 def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
@@ -113,7 +113,7 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
 
     logger.info('Saving F(CH4):F(N2O) file')
     _save_fch4_lut(lut_save_file, fch4_means, fch4_counts, fch4_overall, theta_overall,
-                   fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins, ace_n2o_file)
+                   fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins)
 
 
 def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, lut_save_file, ch4=None):
