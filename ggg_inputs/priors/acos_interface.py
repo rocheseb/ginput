@@ -3,10 +3,11 @@ from __future__ import print_function, division
 import argparse
 import datetime as dt
 import h5py
-from itertools import repeat
+from itertools import repeat, product
 from multiprocessing import Pool
 import numpy as np
 
+import pdb
 
 from ..common_utils import mod_utils
 from ..common_utils.ggg_logging import logger, setup_logger
@@ -47,7 +48,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     datenum_array = met_data['datenums'].reshape(-1)
     eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files, nprocs=nprocs)
-    import pdb; pdb.set_trace()
+    pdb.set_trace()
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
 
@@ -58,37 +59,97 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     # keys in the output dictionaries from tccon_priors.generate_single_tccon_prior.
     var_mapping = {'co2_prior': co2_record.gas_name, 'altitude': 'Height', 'pressure': 'Pressure',
                    'equivalent_latitude': 'EL'}
-    profiles = {k: np.full(orig_shape, np.nan) for k in var_mapping}
-    units = {k: '' for k in var_mapping}
-    for i_sounding in range(orig_shape[0]):
-        logger.info('Processing set of soundings {}/{}'.format(i_sounding+1, orig_shape[0]))
-        for i_foot in range(orig_shape[1]):
-            mod_data = _construct_mod_dict(met_data, i_sounding, i_foot)
-            obs_date = met_data['dates'][i_sounding, i_foot]
-            if obs_date < dt.datetime(1993, 1, 1):
-                # In the test met file I was given, one set of soundings had a date set to 20 Dec 1992, while the rest
-                # where on 14 May 2017. Since the 1992 date is close to 999999 seconds before 1 Jan 1993 and the dates
-                # are in TAI93 time, I assume these are fill values.
-                logger.important('Date before 1993 ({}) found, assuming this is a fill value and skipping '
-                                 '(sounding group/footprint {}/{})'.format(obs_date, i_sounding+1, i_foot+1))
-                continue
 
-            priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
-                mod_data, obs_date, dt.timedelta(hours=0), co2_record,
-            )
-
-            # Convert the CO2 priors from ppm to dry mole fraction.
-            priors_dict[co2_record.gas_name] *= 1e-6
-            priors_units[co2_record.gas_name] = 'dmf'
-
-            for h5_var, tccon_var in var_mapping.items():
-                # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
-                profiles[h5_var][i_sounding, i_foot, :] = np.flipud(priors_dict[tccon_var])
-                # Yes this will get set every time but only needs set once. Can optimize later if it's slow.
-                units[h5_var] = priors_units[tccon_var]
+    if nprocs == 0:
+        profiles, units = _prior_serial(orig_shape=orig_shape, var_mapping=var_mapping, met_data=met_data,
+                                        co2_record=co2_record)
+    else:
+        profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, met_data=met_data,
+                                          co2_record=co2_record, nprocs=nprocs)
 
     # Write the priors to the file requested.
     write_prior_h5(output_file, profiles, units)
+
+
+def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping):
+    if i_foot == 0:
+        logger.info('Processing set of soundings {}'.format(i_sounding + 1))
+    profiles = {k: np.full_like(mod_data['profile']['Height'], np.nan) for k in var_mapping.keys()}
+    units = {k: '' for k in var_mapping.keys()}
+
+    if obs_date < dt.datetime(1993, 1, 1):
+        # In the test met file I was given, one set of soundings had a date set to 20 Dec 1992, while the rest
+        # where on 14 May 2017. Since the 1992 date is close to 999999 seconds before 1 Jan 1993 and the dates
+        # are in TAI93 time, I assume these are fill values.
+        logger.important('Date before 1993 ({}) found, assuming this is a fill value and skipping '
+                         '(sounding group/footprint {}/{})'.format(obs_date, i_sounding + 1, i_foot + 1))
+        return profiles, None
+
+    priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
+        mod_data, obs_date, dt.timedelta(hours=0), co2_record,
+    )
+
+    # Convert the CO2 priors from ppm to dry mole fraction.
+    priors_dict[co2_record.gas_name] *= 1e-6
+    priors_units[co2_record.gas_name] = 'dmf'
+
+    for h5_var, tccon_var in var_mapping.items():
+        # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
+        profiles[h5_var][i_foot, :] = np.flipud(priors_dict[tccon_var])
+        # Yes this will get set every time but only needs set once. Can optimize later if it's slow.
+        units[h5_var] = priors_units[tccon_var]
+
+    return profiles, units
+
+
+def _make_output_profiles_dict(orig_shape, var_mapping):
+    return {k: np.full(orig_shape, np.nan) for k in var_mapping}
+
+
+def _prior_serial(orig_shape, var_mapping, met_data, co2_record):
+    profiles = _make_output_profiles_dict(orig_shape, var_mapping)
+    units = None
+
+    for i_sounding in range(orig_shape[0]):
+        for i_foot in range(orig_shape[1]):
+            mod_data = _construct_mod_dict(met_data, i_sounding, i_foot)
+            obs_date = met_data['dates'][i_sounding, i_foot]
+
+            this_profiles, this_units = _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping)
+            for h5_var, h5_array in profiles.items():
+                h5_array[i_sounding] = this_profiles[h5_var]
+            if this_units is not None:
+                units = this_units
+
+    return profiles, units
+
+
+def _prior_parallel(orig_shape, var_mapping, met_data, co2_record, nprocs):
+    logger.info('Running CO2 prior calculation in parallel with {} processes'.format(nprocs))
+
+    # Need to prepare iterators of the sounding and footprint indices, as well as the individual met dictionaries
+    # and observation dates. We only want to pass the individual dictionary and date to each worker, not the whole
+    # met data, because that would probably be slow due to overhead. (Not tested however.)
+    sounding_inds, footprint_inds = [x for x in zip(*product(range(orig_shape[0], orig_shape[1])))]
+    mod_dicts = map(_construct_mod_dict, repeat(met_data), sounding_inds, footprint_inds)
+    obs_dates = [met_data['dates'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
+
+    with Pool(processes=nprocs) as pool:
+        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, mod_dicts, obs_dates, repeat(co2_record), repeat(var_mapping)))
+
+    pdb.set_trace()
+    # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
+    # the units dict or None if the prior calculation did not run. We need to combine the profiles into one array per
+    # variable and get one valid units dict
+    profiles = _make_output_profiles_dict(orig_shape, var_mapping)
+    units = None
+    for (these_profs, these_units), i_sounding, i_foot in zip(result, sounding_inds, footprint_inds):
+        if these_units is not None:
+            units = None
+        for h5var, h5array in profiles.items():
+            h5array[i_sounding, i_foot, :] = these_profs[h5var]
+
+    return profiles, units
 
 
 def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_datenums, geos_files, nprocs=0):
