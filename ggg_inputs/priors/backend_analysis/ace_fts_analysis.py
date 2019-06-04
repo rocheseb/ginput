@@ -201,12 +201,6 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
 
 
 def _find_ch4_outliers(ace_fn2o, ace_fch4, fn2o_bins, good_data):
-    # from https://stackoverflow.com/a/16562028
-    def isoutlier(data, m=2):
-        d = np.abs(data - np.median(data))
-        mdev = np.median(d)
-        s = d / mdev if mdev else 0.
-        return s >= m
 
     # Identify outliers in each F(N2O) bin. We're not binning by theta yet; we just want to find outliers in the dataset
     # as a whole right now. I chose m=5 since 5 sigma is the standard threshold in physics, even through we're using
@@ -218,7 +212,7 @@ def _find_ch4_outliers(ace_fn2o, ace_fch4, fn2o_bins, good_data):
     for b_ind in np.unique(bin_inds):
         bb = good_data & (bin_inds == b_ind)
         ch4_sub = ace_fch4[bb]
-        oo[bb] = ~isoutlier(ch4_sub, m=5)
+        oo[bb] = ~mod_utils.isoutlier(ch4_sub, m=5)
 
     return oo
 

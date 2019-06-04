@@ -1442,6 +1442,14 @@ def hf_ch4_slope_fit(yrs, a, b, c, t0):
     return a * np.exp(b*(yrs - t0)) + c
 
 
+# from https://stackoverflow.com/a/16562028
+def isoutlier(data, m=2):
+    d = np.abs(data - np.nanmedian(data))
+    mdev = np.nanmedian(d)
+    s = d / mdev if mdev else 0.
+    return s >= m
+
+
 def is_tropics(lat, doy, ages):
     return np.abs(lat) < 20.0
 
@@ -1595,6 +1603,17 @@ def start_of_month(date_in, out_type=dt.date):
     :return: an instance of ``out_type`` set to day 1, 00:00:00 of the month of ``date_in``.
     """
     return out_type(year=date_in.year, month=date_in.month, day=1)
+
+
+def relativedelta2string(rdelta):
+    parts = ('years', 'months', 'days', 'hours', 'minutes', 'seconds')
+    time_parts = []
+    for p in parts:
+        tp = getattr(rdelta, p)
+        if tp > 0:
+            time_parts.append('{} {}'.format(tp, p))
+
+    return ', '.join(time_parts)
 
 
 def gravity(gdlat,altit):

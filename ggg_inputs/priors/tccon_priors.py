@@ -109,6 +109,13 @@ class GasRecordInputVerificationError(GasRecordError):
     pass
 
 
+class GasRecordExtrapolationError(GasRecordError):
+    """
+    Error to raise if there's a problem with the extrapolation of the MLO/SMO records.
+    """
+    pass
+
+
 def _init_prof(profs, n_lev, n_profs=0):
     """
     Initialize arrays for various profiles.
@@ -194,6 +201,11 @@ class TraceGasTropicsRecord(object):
     _age_spectrum_data_dir = os.path.join(_data_dir, 'age_spectra')
     _age_spectrum_time_file = os.path.join(_age_spectrum_data_dir, 'time.txt')
     _default_sbc_lag = relativedelta(months=2)
+
+    # This sets the maximum degree of the polynomial used to fit and extend the MLO/SMO trends. Set to 1 to use linear,
+    # 2 for quadratic, etc.
+    _max_trend_poly_deg = 1
+    _max_safe_extrap_forward = relativedelta(years=5)
 
     # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
     _no_theta_coord = np.array([0.])
@@ -430,6 +442,10 @@ class TraceGasTropicsRecord(object):
         df_combined.loc[interpolated, 'interp_flag'] = 1
         df_combined.loc[extrapolated, 'interp_flag'] = 2
 
+        cls._extend_mlo_smo_mean(df_combined, 'forward')
+        cls._extend_mlo_smo_mean(df_combined, 'backward')
+        return df_combined
+
         # Almost there - handle the extrapolation. Only these values will have latency
         ex_inds = extrapolated.to_numpy().nonzero()[0]
         for i in ex_inds:
@@ -492,6 +508,87 @@ class TraceGasTropicsRecord(object):
         xx = gas_df.latency < 0
         gas_df.loc[xx, 'dmf_mean'] = smoothed_conc
         return gas_df
+
+    @classmethod
+    def _extend_mlo_smo_mean(cls, df, direction, nyears=5):
+        xx = np.flatnonzero(df.interp_flag < 2)
+        avg_period = relativedelta(years=nyears, months=-1)
+        if direction == 'forward':
+            last_date = df.index[xx[-1]]
+            first_date = last_date - avg_period
+            to_fill = slice(xx[-1]+1, None)
+        elif direction == 'backward':
+            first_date = df.index[xx[0]]
+            last_date = first_date + avg_period
+            to_fill = slice(None, xx[0])
+        else:
+            raise ValueError('direction must be "forward" or "backward"')
+
+        # Find the first non-extrapolated points, get the next or previous n years, detrend, and average them
+        dmf = df.dmf_mean[first_date:last_date]
+
+        # Fit with a quadratic to allow for nonlinear increase
+        x = dmf.index.to_julian_date().to_numpy()
+        y = dmf.to_numpy()
+        fit = np.polynomial.polynomial.Polynomial.fit(x, y, deg=cls._max_trend_poly_deg)
+
+        avg_dmf_detrended = np.nanmean((y - fit(x)).reshape(-1, 12), axis=0)
+        months = dmf.index.month.to_numpy().reshape(-1, 12)
+        if not np.isclose(months - months[0, :], 0).all():
+            raise RuntimeError('Something went wrong while extending the MLO/SMO record - the months array was not '
+                               'reshaped to have the same month in every row of one column.')
+        months = months[0, :]
+
+        # Now, avg_dmf_detrended is the different in concentration from the quadratic fit. So, for every point to be
+        # extrapolated, find out what the fit thinks the concentration should be then add the seasonal offset for that
+        # month
+        delta_dmf_by_month = pd.DataFrame({'dmf_mean': avg_dmf_detrended}, index=months)
+        extrap_dates = df.index[to_fill]
+        delta_dmf = delta_dmf_by_month.reindex(extrap_dates.month).to_numpy().squeeze()
+        extrap_julian_dates = extrap_dates.to_julian_date().to_numpy()
+
+        cls._check_extrap_fit(df, fit, extrap_julian_dates, direction)
+
+        df.loc[to_fill, 'dmf_mean'] = fit(extrap_julian_dates) + delta_dmf
+
+    @classmethod
+    def _check_extrap_fit(cls, df, fit, extrap_julian_dates, direction):
+        """
+        Verify that any extrapolation of the MLO/SMO record was successful.
+
+        This method will be called just before extrapolating values in _extend_mlo_smo_mean. It should be overridden in
+        any child classes that want to verify the extrapolation. If there is a problem, the method should raise a
+        :class:`GasRecordExtrapolationError`.
+
+        The default implementation checks that the fit is positive for all extrapolated dates and issues a warning if
+        the program is trying to implement farther into the future than is advisable.
+
+        :param fit: the numpy polynomial fit that will be used to extend the record.
+        :type fit: :class:`numpy.polynomial.polynomial.Polynomial`
+
+        :param extrap_julian_dates: Julian dates that will be extrapolated to. Julian date in this case refers to the
+         dates returned by the ``to_julian_date`` method on :class:`pandas.DatetimeIndex` objects.
+        :type extrap_julian_dates: array-like
+
+        :param direction: string indicating whether extrapolation is going "forward" or "backward"
+        :type direction: str
+
+        :return: None
+        :raises GasRecordExtrapolationError: if it detects any problem with the extrapolation.
+        """
+
+        if np.any(fit(extrap_julian_dates) < 0):
+            raise GasRecordExtrapolationError('Extrapolation for {} would result in negative concentrations'.format(cls.gas_name))
+
+        xx = df.interp_flag < 2
+        last_date = df.index[xx].max()
+        last_safe_jdate = (last_date + cls._max_safe_extrap_forward).to_julian_date()
+        if np.any(extrap_julian_dates > last_safe_jdate):
+            logger.warning('Trying to extrapolate to a date more than {time} after the end of the MLO/SMO record '
+                           '({end}). Likely okay, but consider updating the MLO/SMO {gas} record if possible.'
+                           .format(time=mod_utils.relativedelta2string(cls._max_safe_extrap_forward), end=last_date,
+                                   gas=cls.gas_name))
+
 
     @staticmethod
     def _calc_monthly_gas(df, year, month, limit_extrapolation_to=None):
@@ -1179,6 +1276,28 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
+
+    _max_trend_poly_deg = 2
+
+    @classmethod
+    def _check_extrap_fit(cls, df, fit, extrap_julian_dates, direction):
+        TraceGasTropicsRecord._check_extrap_fit(df, fit, extrap_julian_dates, direction)
+        # The input fit does not have its coefficients unscaled (which numpy does for numeric stability). We need to
+        # return the coefficients to their native values in order to compare the derivatives against the julian dates.
+        fit = fit.convert()
+
+        # First check that the fit is concave up - that matches the larger trend
+        if fit.deriv(2).coef.item() < 0:
+            raise GasRecordExtrapolationError('CO2 extrapolation fit is not concave up')
+
+        # Then make sure that we're not trying to extrapolate to any dates before the minimum in the quadratic,
+        # that would give a weird result
+        zero_jdate = np.polynomial.polynomial.polyroots(fit.deriv().coef).item()
+        zero_datestr = pd.to_datetime(zero_jdate, origin='julian', unit='D').strftime('%Y-%m-%d')
+        if np.any(extrap_julian_dates < zero_jdate):
+            raise GasRecordExtrapolationError('CO2 extrapolation attempting to go back before the minimum in the '
+                                              'quadratic ({}). This would result in CO2 increasing as we go back in '
+                                              'time, which is incorrect.'.format(zero_datestr))
 
 
 class N2OTropicsRecord(TraceGasTropicsRecord):

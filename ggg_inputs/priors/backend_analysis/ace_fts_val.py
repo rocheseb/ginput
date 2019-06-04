@@ -179,7 +179,22 @@ def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_v
         ace_lats = butils.read_ace_var(nch, 'latitude', None)
         ace_alts = butils.read_ace_var(nch, 'altitude', None)
         ace_qflags = butils.read_ace_var(nch, 'quality_flag', None)
-        ace_profiles = butils.read_ace_var(nch, ace_var, ace_qflags)
+        if ace_var == 'theta':
+            ace_profiles = butils.read_ace_theta(nch, ace_qflags)
+        else:
+            try:
+                ace_profiles = butils.read_ace_var(nch, ace_var, ace_qflags)
+            except IndexError:
+                # If trying to read a 1D variable, then we can't quality filter b/c the quality flags are 2D. But 1D
+                # variables are always coordinates, so they don't need filtering.
+                ace_profiles = butils.read_ace_var(nch, ace_var, None)
+
+    # Expand the ACE var if 1D
+    if ace_profiles.ndim == 1:
+        if ace_profiles.size == ace_qflags.shape[0]:
+            ace_profiles = np.tile(ace_profiles.reshape(-1, 1), [1, ace_qflags.shape[1]])
+        else:
+            ace_profiles = np.tile(ace_profiles.reshape(1, -1), [ace_qflags.shape[0], 1])
 
     n_profs = np.size(lon)
     n_out_levels = np.shape(alt)[1] if interp_to_alt else np.size(ace_alts)
