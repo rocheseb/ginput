@@ -44,7 +44,7 @@ def modify_clams_file():
         nhwrite.history = creation_description
 
 
-def _extend_clams_age(age, theta_vec, end_theta=5000.0, use_median=False):
+def _extend_clams_age(age, theta_vec, end_theta=7500.0, use_median=False):
     def calc_slopes(theta, age):
         return (age[1] - age[0]) / (theta[1] - theta[0])
 
