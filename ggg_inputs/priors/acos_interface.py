@@ -3,6 +3,8 @@ from __future__ import print_function, division
 import argparse
 import datetime as dt
 import h5py
+from itertools import repeat
+from multiprocessing import Pool
 import numpy as np
 
 
@@ -18,7 +20,7 @@ _fill_val_threshold = -9e5
 _fill_val = -999999
 
 
-def acos_interface_main(met_resampled_file, geos_files, output_file):
+def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     """
     The primary interface to create CO2 priors for the ACOS algorithm
 
@@ -43,7 +45,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file):
     pv_array = met_data['pv'].reshape(-1, nlevels)
     theta_array = met_data['theta'].reshape(-1, nlevels)
     datenum_array = met_data['datenums'].reshape(-1, nlevels)
-    eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files)
+    eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files, nprocs=nprocs)
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
 
@@ -86,7 +88,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file):
     write_prior_h5(output_file, profiles, units)
 
 
-def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_datenums, geos_files):
+def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_datenums, geos_files, nprocs=0):
     """
     Compute equivalent latitudes for a collection of OCO soundings
 
@@ -122,19 +124,44 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     # This part is going to be slow. We need to use the interpolators to get equivalent latitude profiles for each
     # sounding for the two times on either side of the sounding time, then do a further linear interpolation to
     # the actual sounding time.
+    if nprocs == 0:
+        return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns)
+    else:
+        return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs=nprocs)
+
+
+def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
+    logger.debug('Calculating eq. lat. {}'.format(idx))
+    i_last_geos = _find_helper(geos_datenums <= datenum, order='last')
+    i_next_geos = _find_helper(geos_datenums > datenum, order='first')
+
+    last_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_last_geos])
+    next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
+
+    # Interpolate between the two times by calculating a weighted average of the two profiles based on the sounding
+    # time. This avoids another for loop over all levels.
+    weight = (datenum - geos_datenums[i_last_geos]) / (geos_datenums[i_next_geos] - geos_datenums[i_last_geos])
+    return weight * last_el_profile + (1 - weight) * next_el_profile
+
+
+def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns):
+    sounding_eqlat = np.full_like(sounding_pv, np.nan)
+
+    # This part is going to be slow. We need to use the interpolators to get equivalent latitude profiles for each
+    # sounding for the two times on either side of the sounding time, then do a further linear interpolation to
+    # the actual sounding time.
     for idx, (pv_vec, theta_vec, datenum) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums)):
-        i_last_geos = _find_helper(geos_datenums <= datenum, order='last')
-        i_next_geos = _find_helper(geos_datenums > datenum, order='first')
-
-        last_el_profile = _make_el_profile(sounding_pv[i_last_geos], sounding_theta[i_last_geos], eqlat_fxns[i_last_geos])
-        next_el_profile = _make_el_profile(sounding_pv[i_next_geos], sounding_theta[i_next_geos], eqlat_fxns[i_next_geos])
-
-        # Interpolate between the two times by calculating a weighted average of the two profiles based on the sounding
-        # time. This avoids another for loop over all levels.
-        weight = (datenum - geos_datenums[i_last_geos]) / (geos_datenums[i_next_geos] - geos_datenums[i_last_geos])
-        sounding_eqlat[idx] = weight * last_el_profile + (1 - weight)*next_el_profile
+        sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums)
 
     return sounding_eqlat
+
+
+def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs):
+    with Pool(processes=nprocs) as pool:
+        result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta, sounding_datenums,
+                                                 repeat(eqlat_fxns), repeat(geos_datenums)))
+
+    return np.array(result)
 
 
 def read_resampled_met(met_file):
@@ -421,6 +448,7 @@ def parse_args():
                                                                'this is given. NOTE: Python errors are not captured by '
                                                                'the logging machinery and so will still print to '
                                                                'stderr.')
+    parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use in parallelization')
 
     return vars(parser.parse_args())
 
