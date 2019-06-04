@@ -37,6 +37,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     :return: None
     """
+    import pdb; pdb.set_trace()
     met_data = read_resampled_met(met_resampled_file)
 
     # Reshape the met data from (soundings, footprints, levels) to (profiles, level)
@@ -44,7 +45,8 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     nlevels = orig_shape[-1]
     pv_array = met_data['pv'].reshape(-1, nlevels)
     theta_array = met_data['theta'].reshape(-1, nlevels)
-    datenum_array = met_data['datenums'].reshape(-1, nlevels)
+
+    datenum_array = met_data['datenums'].reshape(-1)
     eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files, nprocs=nprocs)
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
@@ -119,11 +121,11 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     eqlat_fxns = mod_maker.equivalent_latitude_functions_from_geos_files(geos_files, geos_utc_times)
     # it will be easier to work with this as a list of the interpolators in the right order.
     eqlat_fxns = [eqlat_fxns[k] for k in geos_utc_times]
-    sounding_eqlat = np.full_like(sounding_pv, np.nan)
 
     # This part is going to be slow. We need to use the interpolators to get equivalent latitude profiles for each
     # sounding for the two times on either side of the sounding time, then do a further linear interpolation to
     # the actual sounding time.
+
     if nprocs == 0:
         return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns)
     else:
@@ -195,7 +197,7 @@ def read_resampled_met(met_file):
                 'temperature': [met_group, 'temperature_profile_met'],
                 'pressure': [met_group, 'vector_pressure_levels_met'],
                 'date_strings': [sounding_group, 'sounding_time_string'],
-                'altitude': [sounding_group, 'height_profile_met'],
+                'altitude': [met_group, 'height_profile_met'],
                 'latitude': [sounding_group, 'sounding_latitude'],
                 'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
                 'trop_temperature': [met_group, 'tropopause_temperature_met'],
@@ -204,17 +206,20 @@ def read_resampled_met(met_file):
     data_dict = dict()
     with h5py.File(met_file, 'r') as h5obj:
         for out_var, (group_name, var_name) in var_dict.items():
+            logger.debug('Reading {}/{}'.format(group_name, var_name))
             tmp_data = h5obj[group_name][var_name][:]
             # TODO: verify that -999999 is the only fill value used with Chris/Albert
-            tmp_data[tmp_data < _fill_val_threshold] = np.nan
+            if np.issubdtype(tmp_data.dtype, np.number):
+                tmp_data[tmp_data < _fill_val_threshold] = np.nan
+            data_dict[out_var] = tmp_data
 
     # Potential temperature needs to be calculated, the date strings need to be converted, and the potential temperature
     # needs scaled to units of PVU
 
     # pressure in the met file is in Pa, need hPa for the potential temperature calculation
-    data_dict['pressure'] *= 100  # convert from Pa to hPa
+    data_dict['pressure'] *= 0.01  # convert from Pa to hPa
     data_dict['theta'] = mod_utils.calculate_potential_temperature(data_dict['pressure'], data_dict['temperature'])
-    data_dict['dates'] - _convert_acos_time_strings(data_dict['date_strings'], format='datetime')
+    data_dict['dates'] = _convert_acos_time_strings(data_dict['date_strings'], format='datetime')
     data_dict['datenums'] = _convert_acos_time_strings(data_dict['date_strings'], format='datenum')
     data_dict['pv'] *= 1e6
 
