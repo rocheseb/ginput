@@ -37,7 +37,6 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     :return: None
     """
-    import pdb; pdb.set_trace()
     met_data = read_resampled_met(met_resampled_file)
 
     # Reshape the met data from (soundings, footprints, levels) to (profiles, level)
@@ -48,6 +47,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     datenum_array = met_data['datenums'].reshape(-1)
     eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files, nprocs=nprocs)
+    import pdb; pdb.set_trace()
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
 
@@ -82,7 +82,8 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
             priors_units[co2_record.gas_name] = 'dmf'
 
             for h5_var, tccon_var in var_mapping.items():
-                profiles[h5_var][i_sounding, i_foot, :] = priors_dict[tccon_var]
+                # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
+                profiles[h5_var][i_sounding, i_foot, :] = np.flipud(priors_dict[tccon_var])
                 # Yes this will get set every time but only needs set once. Can optimize later if it's slow.
                 units[h5_var] = priors_units[tccon_var]
 
@@ -134,8 +135,12 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
 
 def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
     logger.debug('Calculating eq. lat. {}'.format(idx))
-    i_last_geos = _find_helper(geos_datenums <= datenum, order='last')
-    i_next_geos = _find_helper(geos_datenums > datenum, order='first')
+    try:
+        i_last_geos = _find_helper(geos_datenums <= datenum, order='last')
+        i_next_geos = _find_helper(geos_datenums > datenum, order='first')
+    except IndexError as err:
+        logger.important('Sounding {}: could not find GEOS file by time. Assuming fill value for time'.format(idx))
+        return np.full_like(pv_vec, np.nan)
 
     last_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_last_geos])
     next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
@@ -152,6 +157,7 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums,
     # This part is going to be slow. We need to use the interpolators to get equivalent latitude profiles for each
     # sounding for the two times on either side of the sounding time, then do a further linear interpolation to
     # the actual sounding time.
+    logger.info('Running eq. lat. calculation in serial')
     for idx, (pv_vec, theta_vec, datenum) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums)):
         sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums)
 
@@ -159,6 +165,7 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums,
 
 
 def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs):
+    logger.info('Running eq. lat. calculation in parallel with {} processes'.format(nprocs))
     with Pool(processes=nprocs) as pool:
         result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta, sounding_datenums,
                                                  repeat(eqlat_fxns), repeat(geos_datenums)))
@@ -385,6 +392,8 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
      necessary for the creation of TCCON CO2 priors. This dictionary must have the following entries:
 
         * "el" - equivalent latitude profile in degrees
+        * "temperature" - temperature profile in K
+        * "pressure" - pressure profile in hPa
         * "theta" - potential temperature profile in K
         * "altitude" - altitude profile in km
         * "latitude" - scalar value defining the sounding latitude
@@ -410,6 +419,8 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
     # whether the variable is 3D ("profile"), 2D ("scalar") or fixed ("constant") and the second is the actual variable
     # name. Note that these must match the expected structure of a .mod file EXACTLY.
     var_mapping = {'el': ['profile', 'EL'],
+                   'temperature': ['profile', 'Temperature'],
+                   'pressure': ['profile', 'Pressure'],
                    'theta': ['profile', 'PT'],
                    'altitude': ['profile', 'Height'],
                    'surf_alt': ['scalar', 'Height'],  # need to read in
@@ -422,8 +433,12 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
 
     for acos_var, (mod_group, mod_var) in var_mapping.items():
         # For 3D vars this slicing will create a vector. For 2D vars, it will create a scalar
-        mod_dict[mod_group][mod_var] = acos_data_dict[acos_var][i_sounding, i_foot]
-
+        tmp_val = acos_data_dict[acos_var][i_sounding, i_foot]
+        # The profile variables need flipped b/c for ACOS they are arranged space-to-surface,
+        # but the TCCON code expects surface-to-space
+        if mod_group == 'profile':
+            tmp_val = np.flipud(tmp_val)
+        mod_dict[mod_group][mod_var] = tmp_val
     return mod_dict
 
 
