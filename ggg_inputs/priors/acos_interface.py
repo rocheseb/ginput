@@ -1,11 +1,13 @@
 from __future__ import print_function, division
 
+import argparse
 import datetime as dt
 import h5py
 import numpy as np
 
 
 from ..common_utils import mod_utils
+from ..common_utils.ggg_logging import logger, setup_logger
 from ..mod_maker import mod_maker
 from ..priors import tccon_priors
 
@@ -50,13 +52,23 @@ def acos_interface_main(met_resampled_file, geos_files, output_file):
 
     # The keys here define the variable names that will be used in the HDF file. The values define the corresponding
     # keys in the output dictionaries from tccon_priors.generate_single_tccon_prior.
-    var_mapping = {'co2_prior': co2_record.gas_name, 'altitude': 'Height', 'pressure': 'Pressure'}
+    var_mapping = {'co2_prior': co2_record.gas_name, 'altitude': 'Height', 'pressure': 'Pressure',
+                   'equivalent_latitude': 'EL'}
     profiles = {k: np.full(orig_shape, np.nan) for k in var_mapping}
     units = {k: '' for k in var_mapping}
     for i_sounding in range(orig_shape[0]):
+        logger.info('Processing set of soundings {}/{}'.format(i_sounding+1, orig_shape[0]))
         for i_foot in range(orig_shape[1]):
             mod_data = _construct_mod_dict(met_data, i_sounding, i_foot)
             obs_date = met_data['dates'][i_sounding, i_foot]
+            if obs_date < dt.datetime(1993, 1, 1):
+                # In the test met file I was given, one set of soundings had a date set to 20 Dec 1992, while the rest
+                # where on 14 May 2017. Since the 1992 date is close to 999999 seconds before 1 Jan 1993 and the dates
+                # are in TAI93 time, I assume these are fill values.
+                logger.important('Date before 1993 ({}) found, assuming this is a fill value and skipping '
+                                 '(sounding group/footprint {}/{})'.format(obs_date, i_sounding+1, i_foot+1))
+                continue
+
             priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
                 mod_data, obs_date, dt.timedelta(hours=0), co2_record,
             )
@@ -67,6 +79,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file):
 
             for h5_var, tccon_var in var_mapping.items():
                 profiles[h5_var][i_sounding, i_foot, :] = priors_dict[tccon_var]
+                # Yes this will get set every time but only needs set once. Can optimize later if it's slow.
                 units[h5_var] = priors_units[tccon_var]
 
     # Write the priors to the file requested.
@@ -380,3 +393,47 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
         mod_dict[mod_group][mod_var] = acos_data_dict[acos_var][i_sounding, i_foot]
 
     return mod_dict
+
+
+def parse_args():
+    def comma_list(argin):
+        return tuple([a.strip() for a in argin.split(',')])
+
+    parser = argparse.ArgumentParser(description='Command line interface to generate CO2 priors for the ACOS algorithm')
+    parser.add_argument('geos_files', type=comma_list, help='Comma-separated list of paths to the GEOS FP or FP-IT '
+                                                            'files that cover the times of the soundings. For example, '
+                                                            'if the soundings span 0100Z to 0200Z on 2018-01-01, '
+                                                            'then the GEOS files for 2018-01-01 0000Z and 0300Z must '
+                                                            'be listed. If the soundings span 0230Z to 0330Z, then the '
+                                                            'GEOS files for 2018-01-01 0000Z, 0300Z, and 0600Z must '
+                                                            'be listed.')
+    parser.add_argument('met_resampled_file', help='The path to the HDF5 file containing the GEOS meteorology sampled '
+                                                   'at the satellite soundings')
+    parser.add_argument('output_file', help='The filename to give the output HDF5 file containing the CO2 profiles and '
+                                            'any additional variables. Note that this path will be overwritten without '
+                                            'any warning.')
+    parser.add_argument('-v', '--verbose', dest='log_level', default=0, action='count',
+                        help='Increase logging verbosity')
+    parser.add_argument('-q', '--quiet', dest='log_level', const=-1, action='store_const',
+                        help='Silence all logging except warnings and critical messages')
+    parser.add_argument('-l', '--log-file', default=None, help='Use this to define a path for logging messages to be '
+                                                               'stored in. Log messages are still printed to stdout if '
+                                                               'this is given. NOTE: Python errors are not captured by '
+                                                               'the logging machinery and so will still print to '
+                                                               'stderr.')
+
+    return vars(parser.parse_args())
+
+
+def main():
+    args = parse_args()
+
+    log_level = args.pop('log_level')
+    log_file = args.pop('log_file')
+    setup_logger(log_file=log_file, level=log_level)
+
+    acos_interface_main(**args)
+
+
+if __name__ == '__main__':
+    main()
