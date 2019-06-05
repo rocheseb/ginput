@@ -121,7 +121,7 @@ def _prior_serial(orig_shape, var_mapping, met_data, co2_record):
 
             this_profiles, this_units = _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping)
             for h5_var, h5_array in profiles.items():
-                h5_array[i_sounding] = this_profiles[h5_var]
+                h5_array[i_sounding, i_foot, :] = this_profiles[h5_var]
             if this_units is not None:
                 units = this_units
 
