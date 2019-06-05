@@ -96,7 +96,7 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir):
     geos_dates = set([dtime.strptime(re.search(r'\d{8}', f).group(), '%Y%m%d') for f in geos_files])
 
     for (dates, lon, lat) in zip(acdates, aclons, aclats):
-        start_date, end_date = [dtime.strptime(d, '%Y%m%d') for d in dates.split('-')[0]]
+        start_date, end_date = [dtime.strptime(d, '%Y%m%d') for d in dates.split('-')]
         if start_date not in geos_dates:
             print('Cannot run {}, no GEOS data'.format(start_date))
             continue
@@ -163,15 +163,15 @@ def make_priors(prior_dir, mod_dir, gas_name):
             tccon_priors.generate_single_tccon_prior(f, obs_date, utc_offset, gas_rec, write_map=this_out_dir, use_eqlat_strat=True)
 
 
-def driver(download, makemod, makepriors, site_file, geos_dir, mod_top_dir, prior_top_dir, gas_name):
+def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name):
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
     if download:
-        download_geos(acdates, geos_dir)
+        download_geos(acdates, geos_top_dir)
     else:
         print('Not downloading GEOS data')
 
     if makemod:
-        make_mod_files(acdates, aclons, aclats, geos_dir, mod_top_dir)
+        make_mod_files(acdates, aclons, aclats, geos_top_dir, mod_top_dir)
     else:
         print('Not making .mod files')
 
@@ -222,8 +222,6 @@ def main():
         info_dict = read_info_file(info_file)
 
     args.update(info_dict)
-    print(args)
-    return
     driver(**args)
 
 
