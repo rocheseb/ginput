@@ -1273,8 +1273,8 @@ def interp_to_tropopause_height(theta, altitude, theta_trop):
     else:
         last_decr = np.max(np.nonzero(decr_theta)[0]) + 1
     if altitude[last_decr] > 3:
-        print('Warning: decreasing potential temperature found above 3 km ({} km). This might cause an erroneously high '
-              'tropopause height.'.format(altitude[last_decr]))
+        logger.important('Decreasing potential temperature found above 3 km ({} km). This might cause an erroneously high '
+                         'tropopause height.'.format(altitude[last_decr]))
 
     # Do the interpolation with just the altitudes where theta is monotonically increasing.
     return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()

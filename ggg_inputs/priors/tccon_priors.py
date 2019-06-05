@@ -1574,7 +1574,7 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
 
         # Find the locations both north and south of the observation lat that have the smallest difference in theta
         theta_diff = np.abs(theta - obs_theta)
-        south_min_ind = np.argmin(theta_diff[:start])
+        south_min_ind = np.argmin(theta_diff[:start+1])
         south_dtheta = theta_diff[south_min_ind]
         south_dlat = np.abs(lat[south_min_ind] - obs_lat)
         north_min_ind = np.argmin(theta_diff[start:]) + start
@@ -1601,7 +1601,12 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
         theta_v_lat_file = os.path.join(const.data_dir, 'GEOS_FPIT_lat_vs_theta_2018_500-700hPa.nc')
         with ncdf.Dataset(theta_v_lat_file, 'r') as nch:
             _theta_v_lat['theta'] = nch.variables['theta_mean'][:].squeeze()
-            _theta_v_lat['lat'] = nch.variables['latitude_mean'][:].squeeze()
+            lat_tmp = nch.variables['latitude_mean'][:].squeeze()
+            # Sometimes lats near 0 get read in as very small non-zero numbers. This causes a 
+            # problem later when we select all lats in one hemisphere since the equator needs
+            # to be in both hemispheres for this to work
+            lat_tmp[np.abs(lat_tmp) < 0.001] = 0.0
+            _theta_v_lat['lat'] = lat_tmp
             _theta_v_lat['times'] = nch.variables['times'][:]
             _theta_v_lat['times_units'] = nch.variables['times'].units
             _theta_v_lat['times_calendar'] = nch.variables['times'].calendar
@@ -1848,6 +1853,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
 
     prof_gas[xx_overworld], _ = gas_record.get_strat_gas(retrieval_date, age_of_air_years[xx_overworld],
                                                          prof_eqlat[xx_overworld], prof_theta[xx_overworld])
+    
     # TODO: decide how to calculate the latency for the CO2 profiles now that age spectra are used. Options:
     #   1. Convolve the latency as well
     #   2. Give the latency just for the retrieval date (possible with the two-month lag)

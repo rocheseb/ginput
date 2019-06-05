@@ -7,8 +7,6 @@ from itertools import repeat, product
 from multiprocessing import Pool
 import numpy as np
 
-import pdb
-
 from ..common_utils import mod_utils
 from ..common_utils.ggg_logging import logger, setup_logger
 from ..mod_maker import mod_maker
@@ -48,7 +46,6 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     datenum_array = met_data['datenums'].reshape(-1)
     eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files, nprocs=nprocs)
-    pdb.set_trace()
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
 
@@ -84,10 +81,17 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
         logger.important('Date before 1993 ({}) found, assuming this is a fill value and skipping '
                          '(sounding group/footprint {}/{})'.format(obs_date, i_sounding + 1, i_foot + 1))
         return profiles, None
+    elif np.all(np.isnan(mod_data['profile']['Height'])):
+        logger.important('Profile at sounding group/footprint {}/{} is all fill values, not calculating prior'
+                         .format(i_sounding + 1, i_foot + 1))
+        return profiles, None
 
-    priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
-        mod_data, obs_date, dt.timedelta(hours=0), co2_record,
-    )
+    try:
+        priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
+            mod_data, obs_date, dt.timedelta(hours=0), co2_record,
+        )
+    except Exception as err:
+        raise err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding, i_foot))
 
     # Convert the CO2 priors from ppm to dry mole fraction.
     priors_dict[co2_record.gas_name] *= 1e-6
@@ -95,7 +99,7 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
 
     for h5_var, tccon_var in var_mapping.items():
         # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
-        profiles[h5_var][i_foot, :] = np.flipud(priors_dict[tccon_var])
+        profiles[h5_var] = np.flipud(priors_dict[tccon_var])
         # Yes this will get set every time but only needs set once. Can optimize later if it's slow.
         units[h5_var] = priors_units[tccon_var]
 
@@ -130,14 +134,13 @@ def _prior_parallel(orig_shape, var_mapping, met_data, co2_record, nprocs):
     # Need to prepare iterators of the sounding and footprint indices, as well as the individual met dictionaries
     # and observation dates. We only want to pass the individual dictionary and date to each worker, not the whole
     # met data, because that would probably be slow due to overhead. (Not tested however.)
-    sounding_inds, footprint_inds = [x for x in zip(*product(range(orig_shape[0], orig_shape[1])))]
+    sounding_inds, footprint_inds = [x for x in zip(*product(range(orig_shape[0]), range(orig_shape[1])))]
     mod_dicts = map(_construct_mod_dict, repeat(met_data), sounding_inds, footprint_inds)
     obs_dates = [met_data['dates'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
 
     with Pool(processes=nprocs) as pool:
         result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, mod_dicts, obs_dates, repeat(co2_record), repeat(var_mapping)))
 
-    pdb.set_trace()
     # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
     # the units dict or None if the prior calculation did not run. We need to combine the profiles into one array per
     # variable and get one valid units dict
@@ -145,7 +148,7 @@ def _prior_parallel(orig_shape, var_mapping, met_data, co2_record, nprocs):
     units = None
     for (these_profs, these_units), i_sounding, i_foot in zip(result, sounding_inds, footprint_inds):
         if these_units is not None:
-            units = None
+            units = these_units
         for h5var, h5array in profiles.items():
             h5array[i_sounding, i_foot, :] = these_profs[h5var]
 
@@ -212,6 +215,29 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
     return weight * last_el_profile + (1 - weight) * next_el_profile
 
 
+def _eqlat_clip(el):
+    def trim(bool_ind, replacement_val):
+        if np.any(bool_ind):
+            # nanmax can't take an empty array so we have to make sure that
+            # bool_ind has at least one true value
+            maxdiff = np.nanmax(np.abs(el[bool_ind] - replacement_val))
+            el[bool_ind] = replacement_val
+            return maxdiff
+        else:
+            return 0.0
+
+    xx1 = el < -90.0
+    xx2 = el > 90.0
+
+    max_below = trim(xx1, -90.0)
+    max_above = trim(xx2, 90.0)
+    n_outside = xx1.sum() + xx2.sum()
+
+    if n_outside > 0:
+        logger.warning('{} equivalent latitudes were outside the range [-90,90] (max difference {}). They have been clipped to [-90,90].'
+                       .format(n_outside, max(max_below, max_above))) 
+
+
 def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns):
     sounding_eqlat = np.full_like(sounding_pv, np.nan)
 
@@ -222,6 +248,7 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums,
     for idx, (pv_vec, theta_vec, datenum) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums)):
         sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums)
 
+    _eqlat_clip(sounding_eqlat)
     return sounding_eqlat
 
 
@@ -231,7 +258,9 @@ def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenum
         result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta, sounding_datenums,
                                                  repeat(eqlat_fxns), repeat(geos_datenums)))
 
-    return np.array(result)
+    sounding_eqlat = np.array(result)
+    _eqlat_clip(sounding_eqlat)
+    return sounding_eqlat
 
 
 def read_resampled_met(met_file):
