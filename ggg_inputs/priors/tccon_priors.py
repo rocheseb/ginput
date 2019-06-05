@@ -1939,6 +1939,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
     z_surf = mod_file_data['scalar']['Height']
     z_met = mod_file_data['profile']['Height']
+    p_met = mod_file_data['profile']['Pressure']
     theta_met = mod_file_data['profile']['PT']
     eq_lat_met = mod_file_data['profile']['EL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
 
@@ -1950,9 +1951,11 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     theta_trop_met = mod_utils.calculate_potential_temperature(p_trop_met, t_trop_met)
 
     # The age-of-air calculation used for the tropospheric trace gas profile calculation needs the tropopause altitude.
-    # Assume that potential temperature varies linearly with altitude to calculate that, use the potential temperature
-    # of the tropopause to ensure consistency between the two parts of the profile.
-    z_trop_met = mod_utils.interp_to_tropopause_height(theta_met, z_met, theta_trop_met)
+    # Previously we'd tried finding this by interpolating to the tropopause potential temperature, in order to be
+    # consistent about defining the strat/trop separation by potential temperature. However, potential temperature
+    # does not always behave in a manner that makes interpolating to it straightforward (e.g. it crosses the tropopause
+    # theta 0 or >1 times) so we just use pressure now.
+    z_trop_met = mod_utils.mod_interpolation_new(p_trop_met, p_met, z_met, 'log-lin')
     if z_trop_met < np.nanmin(z_met):
         raise RuntimeError('Tropopause altitude calculated to be below the bottom of the profile. Something has '
                            'gone horribly wrong.')

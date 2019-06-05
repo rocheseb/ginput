@@ -1240,46 +1240,6 @@ def mod_interpolation_new(z_grid, z_met, vals_met, interp_mode='linear'):
     return vals_grid
 
 
-def interp_to_tropopause_height(theta, altitude, theta_trop):
-    """
-    Given the potential temperature at the tropopause, find the altitude that corresponds to that tropopause.
-
-    :param theta: a vector of potential temperatures
-    :type theta: :class:`numpy.ndarray`
-
-    :param altitude: a vector of altitudes corresponding to ``theta``.
-    :type altitude: :class:`numpy.ndarray`
-
-    :param theta_trop: the potential temperature at the tropopause.
-    :type theta_trop: float
-
-    :return: the altitude of the tropopause
-
-    Note: this function recognizes that interpolation in the .mod files can result in boundary layer theta that
-    increases towards the surface and, in some cases, cross the tropopause potential temperature. To avoid accidentally
-    finding a tropopause altitude in the boundary layer, only looks for the tropopause potential temperature in the part
-    of the theta vector that is monotonically increasing. As a check, this prints a warning if the last level with
-    decreasing theta is above 3 km above sea level. Seeing this message does not necessarily mean there is a problem,
-    just that you may want to double check that theta profile.
-    """
-    # Find the last point where theta is decreasing. It should be increasing consistently above the boundary layer
-    # This prevents interpolating to a weirdly low tropopause if the boundary layer somehow contains the potential
-    # temperature of the tropopause (sometimes happens if it's extrapolated to the surface)
-
-    # np.nonzero returns a tuple, the first element is an array of indices where diff(theta) < 0
-    decr_theta = np.diff(theta) < 0
-    if not np.any(decr_theta):
-        last_decr = 0
-    else:
-        last_decr = np.max(np.nonzero(decr_theta)[0]) + 1
-    if altitude[last_decr] > 3:
-        logger.important('Decreasing potential temperature found above 3 km ({} km). This might cause an erroneously high '
-                         'tropopause height.'.format(altitude[last_decr]))
-
-    # Do the interpolation with just the altitudes where theta is monotonically increasing.
-    return mod_interpolation_new(theta_trop, theta[last_decr:], altitude[last_decr:], interp_mode='linear').item()
-
-
 def calc_wmo_tropopause(temperature, altitude, limit_to=(5., 18.), raise_error=True):
     """
     Find the tropopause altitude using the WMO definition
