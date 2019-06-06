@@ -64,6 +64,12 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
         profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, met_data=met_data,
                                           co2_record=co2_record, nprocs=nprocs)
 
+    # Add latitude and longitude to the priors file
+    profiles['sounding_longitude'] = met_data['longitude']
+    units['sounding_longitude'] = 'degrees_east'
+    profiles['sounding_latitude'] = met_data['latitude']
+    units['sounding_latitude'] = 'degrees_north'
+
     # Write the priors to the file requested.
     write_prior_h5(output_file, profiles, units)
 
@@ -296,6 +302,7 @@ def read_resampled_met(met_file):
                 'date_strings': [sounding_group, 'sounding_time_string'],
                 'altitude': [met_group, 'height_profile_met'],
                 'latitude': [sounding_group, 'sounding_latitude'],
+                'longitude': [sounding_group, 'sounding_longitude'],
                 'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
                 'trop_temperature': [met_group, 'tropopause_temperature_met'],
                 'surf_gph': [met_group, 'gph_met']
