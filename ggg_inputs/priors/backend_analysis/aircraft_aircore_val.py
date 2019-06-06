@@ -203,6 +203,47 @@ def rmse2(diff_values):
     return np.sqrt(np.nanmean((diff_values)**2.0))
 
 
+def iter_prior_pairs(prior_root_1, prior_root_2, return_type='dict'):
+    """
+    Iterate over pairs of prior .map files
+
+    Iterates over .map files under ``prior_root_1`` which should have subdirectories by date, lat, and lon. Finds the
+    corresponding file under ``prior_root_2``. Yields pairs of these files in a format determined by ``return_type``.
+
+    :param prior_root_1: the directory with the first set of .map files
+    :type prior_root_1: str
+
+    :param prior_root_2: the directory with the first set of .map files
+    :type prior_root_2: str
+
+    :param return_type: how to return the .map files. Options are "path" (just return the file paths), "dict" (read the
+     .map files in as dictionaries), or "df"/"dataframe" (read the .map files in as dataframes).
+    :type return_type: str
+
+    :return: iterable over .map pairs
+    :raises IOError: if it cannot find a file from ``prior_root_1`` in ``prior_root_2``.
+    """
+    for prior_dir_1 in glob(os.path.join(prior_root_1, '*')):
+        dir_basename = os.path.basename(prior_dir_1.rstrip('/'))
+        prior_dir_2 = os.path.join(prior_root_2, dir_basename)
+        if not os.path.isdir(prior_dir_2):
+            raise IOError('Cannot find {} in {}'.format(dir_basename, prior_root_2))
+
+        for prior_file_1 in glob(os.path.join(prior_dir_1, '*.map')):
+            file_basename = os.path.basename(prior_file_1)
+            prior_file_2 = os.path.join(prior_dir_2, file_basename)
+            if not os.path.isfile(prior_file_2):
+                raise IOError('Cannot find {} in {}'.format(file_basename, prior_dir_2))
+
+            if return_type == 'path':
+                yield prior_file_1, prior_file_2
+            elif return_type in ['dict', 'df', 'dataframe']:
+                as_df = return_type in ['df', 'dataframe']
+                prior_dat_1 = mod_utils.read_map_file(prior_file_1, as_dataframes=as_df)
+                prior_dat_2 = mod_utils.read_map_file(prior_file_2, as_dataframes=as_df)
+                yield prior_dat_1, prior_dat_2
+
+
 def iter_matched_data(data_root, data_type, prof_type, ret_filenames=False, include_filenames=False, skip_missing_map=True,
                       years=None, months=None):
     def idl_maps_file(lon, ew, lat, ns, date_time):
