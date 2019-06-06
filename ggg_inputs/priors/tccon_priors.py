@@ -53,6 +53,7 @@ pp. 32295-32314). For gases other than CO2, chemical loss or production in the s
 
 from __future__ import print_function, division
 
+from collections import OrderedDict
 from contextlib import closing
 import ctypes
 import datetime as dt
@@ -927,19 +928,25 @@ class TraceGasTropicsRecord(object):
         # We only want to interpolate dimensions that an actual effect on the lookup table. So if the theta dimension
         # has length 1, we can't interpolate along that dimension. Put any vectors interpolating along to get the
         # interpolation to return a 1D vector rather than a ND array. See xarray docs on advanced interpolation
-        # (http://xarray.pydata.org/en/stable/interpolation.html#advanced-interpolation)
-        interp_dims = {'date': date, 'age': xr.DataArray(ages, dims='level')}
+        # (http://xarray.pydata.org/en/stable/interpolation.html#advanced-interpolation). Use an ordered dictionary so
+        # interpolation happens in the same order all the time.
+        interp_dims = OrderedDict([('date', date), ('age', xr.DataArray(ages, dims='level'))])
         if self.strat_has_theta_dep:
             interp_dims['theta'] = xr.DataArray(theta, dims='level')
 
         for region in self.age_spec_regions:
             region_arr = self.conc_strat[region]
-            # We need to extrapolate because the theta bins are defined as bin centers, so the bottom bin theta is ~415
-            # K which doesn't quite get down to 380 K. Extrapolation on the other side *should* have the effect of just
-            # extrapolating a constant value because the lookup table is already designed to be flat on theta on that
-            # side. Extrapolation isn't supported in ND interpolation (apparently) so we have to do it as a second
-            # interpolation
-            gas_by_region[region] = region_arr.interp(method='linear', **interp_dims).interpolate_na('level', fill_value='extrapolate')
+            # We need to extrapolate because there can be ages outside those defined in the strat table or thetas just
+            # outside the bin center. We can't extrapolate in multiple dimensions, so we need to iterate over the dims
+            # and do each separately. It's better to do that that to handle extrapolation at the end once we have the
+            # profile because if we did that we lose the trend along each physical dimension. For example, if age in the
+            # last bin is just out of the range in the strat table and has a big jump from the bin below, extrapolating
+            # the CO2 profile would lose the decrease at the top because the profile below could be flat, while
+            # extrapolating along the age dimension captures the fact that the age is actually lower at the top.
+            tmp_arr = region_arr
+            for dim_name, dim_coords in interp_dims.items():
+                tmp_arr = tmp_arr.interp(method='linear', kwargs={'fill_value': 'extrapolate'}, **{dim_name: dim_coords})
+            gas_by_region[region] = tmp_arr
 
         gas_conc = gas_by_region['midlat']
         doy = mod_utils.day_of_year(date) + 1  # most of the code from Arlyn Andrews assumes Jan 1 -> DOY = 1
