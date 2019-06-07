@@ -697,6 +697,29 @@ def calculate_potential_temperature(pres, temp):
     return temp * (1000/pres) ** 0.286
 
 
+def convert_geos_eta_coord(delp):
+    dp_shape = np.array(delp.shape)
+    try:
+        i_ax = np.flatnonzero(dp_shape == 72).item()
+    except ValueError:
+        raise ValueError('delp is either missing its 72 level dimension or has multiple dimensions with length 72')
+
+    # From pg. 7 of the GEOS FP document (https://gmao.gsfc.nasa.gov/GMAO_products/documents/GEOS_5_FP_File_Specification_ON4v1_2.pdf)
+    # the top pressure is always 0.01 hPa. Since the columns are space-to-surface, we add the cumulative sum to get the
+    # level bottom pressure, then take the average along that axis to get the middle pressure
+    level_shape = dp_shape.copy()
+    level_shape[:i_ax] = 1
+    top_p = 0.01
+    top_p_slice = np.full(level_shape, top_p)
+    p_edge = top_p + np.cumsum(delp, axis=i_ax)
+    p_edge = np.concatenate([top_p_slice, p_edge], axis=i_ax)
+
+    # Move the vertical axis to the front to do the averaging so we can just always average along the first dimension
+    p_edge = np.rollaxis(p_edge, i_ax, 0)
+    p_mid = 0.5 * (p_edge[:-1] + p_edge[1:])
+    return np.rollaxis(p_mid, 0, i_ax)
+
+
 def _construct_grid(*part_defs):
     """
     Helper function to construct coordinates for a 1D grid
@@ -1110,6 +1133,11 @@ def datetime_from_geos_filename(geos_filename):
     geos_filename = os.path.basename(geos_filename)
     date_str = re.search(r'\d{8}_\d{4}', geos_filename).group()
     return dt.datetime.strptime(date_str, '%Y%m%d_%H%M')
+
+
+def is_geos_on_native_grid(geos_filename):
+    with ncdf.Dataset(geos_filename, 'r') as nch:
+        return nch['lev'].size == 72
 
 
 def mod_interpolation_legacy(z_grid, z_met, t_met, val_met, interp_mode=1, met_alt_geopotential=True):

@@ -71,7 +71,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     units['sounding_latitude'] = 'degrees_north'
 
     # Write the priors to the file requested.
-    write_prior_h5(output_file, profiles, units)
+    write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
 
 
 def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping):
@@ -189,7 +189,15 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     geos_utc_times = [mod_utils.datetime_from_geos_filename(f) for f in geos_files]
     geos_datenums = np.array([datetime2datenum(d) for d in geos_utc_times])
 
-    eqlat_fxns = mod_maker.equivalent_latitude_functions_from_geos_files(geos_files, geos_utc_times)
+    on_native_grid = [mod_utils.is_geos_on_native_grid(f) for f in geos_files]
+
+    if all(on_native_grid):
+        eqlat_fxns = mod_maker.equivalent_latitude_functions_from_native_geos_files(geos_files, geos_utc_times)
+    elif not any(on_native_grid):
+        eqlat_fxns = mod_maker.equivalent_latitude_functions_from_geos_files(geos_files, geos_utc_times)
+    else:
+        raise RuntimeError('Received a mixture of GEOS files on native 72 level grid and non-native grid. This '
+                           'is not supported.')
     # it will be easier to work with this as a list of the interpolators in the right order.
     eqlat_fxns = [eqlat_fxns[k] for k in geos_utc_times]
 
@@ -345,7 +353,7 @@ def read_resampled_met(met_file):
     return data_dict
 
 
-def write_prior_h5(output_file, profile_variables, units):
+def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_file):
     """
     Write the CO2 priors to and HDF5 file.
 
@@ -362,6 +370,8 @@ def write_prior_h5(output_file, profile_variables, units):
     :return: none, writes to file on disk.
     """
     with h5py.File(output_file, 'w') as h5obj:
+        h5obj.attrs['geos_files'] = ','.join(geos_files)
+        h5obj.attrs['resampler_file'] = resampler_file
         h5grp = h5obj.create_group('priors')
         for var_name, var_data in profile_variables.items():
             # Replace NaNs with numeric fill values

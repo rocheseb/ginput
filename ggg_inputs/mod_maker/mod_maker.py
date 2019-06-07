@@ -102,6 +102,7 @@ import warnings
 
 from ..common_utils import mod_utils
 from ..common_utils.mod_utils  import gravity
+from ..common_utils.ggg_logging import logger
 from .slantify import * # code to make slant paths
 from .tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites
 
@@ -1075,6 +1076,7 @@ def equivalent_latitude_functions_from_geos_files(geos_np_files, geos_dates, mut
     area = mod_utils.calculate_area(lat, lon, lat_res, lon_res)
 
     # pre-compute pressure coefficients for calculating potential temperature, this is the (Po/P)^(R/Cp) term
+    # TODO: test replacement with mod_utils potential temperature function
     coeff = (1000.0 / pres) ** 0.286
     coeff_mat = np.zeros([nlev, nlat, nlon])
     for i in range(nlat):
@@ -1109,6 +1111,30 @@ def equivalent_latitude_functions_from_geos_files(geos_np_files, geos_dates, mut
     if not muted:
         print('\nPredicted to finish in {:.1f} minutes\nActually finished in {:.1f} minutes'.format(predicted_time,
                                                                                                     actual_time))
+
+    return func_dict
+
+
+def equivalent_latitude_functions_from_native_geos_files(geos_nv_files, geos_dates, muted=False):
+    func_dict = dict()
+    for idx, (geos_file, date) in enumerate(zip(geos_nv_files, geos_dates)):
+        with netCDF4.Dataset(geos_file, 'r') as dataset:
+            logger.info('Calculating equivalent latitudes for {}/{} GEOS files'.format(idx+1, len(geos_nv_files)))
+            lat = dataset['lat'][:]
+            lat[np.abs(lat) < 0.001] = 0.0
+            lon = dataset['lon'][:]
+            pres = mod_utils.convert_geos_eta_coord(dataset['DELP'][0])
+            EPV = dataset['EPV'][0] * 1e6
+            PT = mod_utils.calculate_potential_temperature(pres, dataset['T'][0])
+
+            # Get the area of each grid cell
+            lat_res = float(dataset.LatitudeResolution)
+            lon_res = float(dataset.LongitudeResolution)
+            area = mod_utils.calculate_area(lat, lon, lat_res, lon_res)
+
+        # The native 72-level geos files are ordered space-to-surface. The equivalent latitude calculation *may* be okay
+        # with that, but I felt it was safer to just go ahead and flip them.
+        func_dict[date] = mod_utils.calculate_eq_lat(np.flip(EPV, axis=0), np.flip(PT, axis=0), area)
 
     return func_dict
 
