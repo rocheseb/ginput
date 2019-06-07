@@ -24,6 +24,7 @@ import subprocess
 import sys
 
 from . import mod_constants as const
+from .mod_constants import days_per_year
 from .ggg_logging import logger
 
 _std_model_pres_levels = np.array([1000.0, 975.0, 950.0, 925.0, 900.0, 875.0, 850.0, 825.0, 800.0, 775.0, 750.0, 725.0,
@@ -341,7 +342,7 @@ def map_file_name(site_abbrev, obs_lat, obs_date):
 
 
 def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tropopause_alt, strat_used_eqlat,
-                   variables, units, var_order=None):
+                   variables, units, var_order=None, req_all_vars=False, converters=None):
     """
     Create a .map file
 
@@ -378,15 +379,28 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
     :type units: dict(str: str)
 
     :param var_order: optional, if given, a sequence of the keys in ``variables`` and ``units`` that defines what order
-     they are to be written to the .map file. If ``variables`` is an OrderedDict, then this is not necessary.
+     they are to be written to the .map file. If ``variables`` is an OrderedDict, then this is not necessary. May omit
+     keys from ``variables`` to skip writing those variables.
     :type var_order: sequence(str)
+
+    :param req_all_vars: optional, set to ``True`` to require that all keys in ``variables`` are contained in
+     ``var_order``.
+    :type req_all_vars: bool
+
+    :param converters: optional, a dictionary defining converter functions for different inputs. The keys must be keys
+     in ``variables`` and the values functions that accept one input, which will be a single value from that variable
+     (not the whole vector), and return a scalar numeric output.
+    :type converters: dict
 
     :return: None
     """
+    def no_convert(val):
+        return val
+
     # variables and units must have the same keys
     if var_order is None:
         var_order = list(variables.keys())
-    if set(var_order) != set(variables.keys()) or set(var_order) != set(units.keys()):
+    if req_all_vars and (set(var_order) != set(variables.keys()) or set(var_order) != set(units.keys())):
         raise ValueError('variables and units must be dictionaries with the same keys, and both must match the '
                          'keys in var_order (if given)')
 
@@ -399,6 +413,11 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
             raise ValueError('All values in variables must have the same shape. {badvar} has a different shape '
                              '({badshape}) than {chkvar} ({chkshape})'.format(badvar=k, badshape=np.shape(v),
                                                                               chkvar=k1, chkshape=size_check))
+
+    converters = dict() if converters is None else converters
+    for k in var_order:
+        if k not in converters:
+            converters[k] = no_convert
 
     header_lines = []
     # Header line 2: file name (no path)
@@ -437,7 +456,7 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
 
         # Finally write the values.
         for i in range(size_check):
-            formatted_values = ['{:.6G}'.format(variables[k][i]) for k in var_order]
+            formatted_values = ['{:.6G}'.format(converters[k](variables[k][i])) for k in var_order]
             mapf.write(','.join(formatted_values))
             if i < size_check - 1:
                 mapf.write('\n')
@@ -720,6 +739,7 @@ def convert_geos_eta_coord(delp):
     level_shape[:i_ax+1] = 1
     top_p = 0.01
     top_p_slice = np.full(level_shape, top_p)
+
     delp = delp * 0.01  # assume input is in Pa, want hPa
     p_edge = top_p + np.cumsum(delp, axis=i_ax)
     p_edge = np.concatenate([top_p_slice, p_edge], axis=i_ax)
@@ -727,7 +747,7 @@ def convert_geos_eta_coord(delp):
     # Move the vertical axis to the front to do the averaging so we can just always average along the first dimension
     p_edge = np.rollaxis(p_edge, i_ax, 0)
     p_mid = 0.5 * (p_edge[:-1] + p_edge[1:])
-    return np.rollaxis(p_mid, 0, i_ax)
+    return np.rollaxis(p_mid, i_ax, 0)
 
 
 def _construct_grid(*part_defs):
@@ -1478,7 +1498,10 @@ def date_to_decimal_year(date_in):
     :return: the decimal year
     :rtype: float
     """
-    return date_in.year + date_to_frac_year(date_in)
+    if date_in is not None:
+        return date_in.year + date_to_frac_year(date_in)
+    else:
+        return np.nan
 
 
 def day_of_year(date_in):
@@ -1501,7 +1524,7 @@ def date_to_frac_year(date_in):
     :return: the fractional year
     :rtype: float
     """
-    return day_of_year(date_in) / 365.25  # since there's about and extra quarter of a day per year that gives us leap years
+    return day_of_year(date_in) / days_per_year  # since there's about and extra quarter of a day per year that gives us leap years
 
 
 def frac_year_to_doy(yr_in):
@@ -1517,7 +1540,7 @@ def frac_year_to_doy(yr_in):
     :return: the number of days since 1 Jan
     :rtype: float
     """
-    return yr_in * 365.25
+    return yr_in * days_per_year
 
 
 def frac_years_to_reldelta(frac_year, allow_nans=True):
@@ -1548,11 +1571,25 @@ def frac_years_to_reldelta(frac_year, allow_nans=True):
         raise ValueError('NaNs not permitted in frac_year. Either remove them, or set `allow_nans=True`')
     age_years = np.floor(frac_year)
     age_fracs = np.mod(frac_year, 1)
-    rdels = [relativedelta(years=y, days=365.25 * d) if not (np.isnan(y) or np.isnan(d)) else np.nan for y, d in zip(age_years, age_fracs)]
+    rdels = [relativedelta(years=y, days=days_per_year * d) if not (np.isnan(y) or np.isnan(d)) else np.nan for y, d in zip(age_years, age_fracs)]
     if return_scalar:
         rdels = rdels[0]
 
     return rdels
+
+
+def timedelta_to_frac_year(timedelta):
+    """
+    Convert a concrete timedelta to fractional years
+
+    :param timedelta: the timedelta to convert
+    :type timedelta: :class:`datetime.timedelta`
+
+    :return: the time delta as a fraction of years, assuming 365.25 days per year.
+    :rtype: float
+    """
+
+    return timedelta.total_seconds() / (days_per_year * 24 * 3600)
 
 
 def decimal_year_to_date(dec_year, date_type=dt.datetime):

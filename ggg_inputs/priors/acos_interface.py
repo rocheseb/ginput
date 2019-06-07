@@ -6,6 +6,7 @@ import h5py
 from itertools import repeat, product
 from multiprocessing import Pool
 import numpy as np
+import os
 
 from ..common_utils import mod_utils
 from ..common_utils.ggg_logging import logger, setup_logger
@@ -17,6 +18,7 @@ from ..priors import tccon_priors
 _fill_val_threshold = -9e5
 # NaNs will be replaced with this value when writing the HDF5 file
 _fill_val = -999999
+_string_fill = 'N/A'
 
 
 def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
@@ -54,8 +56,9 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     # The keys here define the variable names that will be used in the HDF file. The values define the corresponding
     # keys in the output dictionaries from tccon_priors.generate_single_tccon_prior.
-    var_mapping = {'co2_prior': co2_record.gas_name, 'altitude': 'Height', 'pressure': 'Pressure',
-                   'equivalent_latitude': 'EL'}
+    var_mapping = {'co2_prior': co2_record.gas_name, 'co2_record_latency': 'mean_latency', 'equivalent_latitude': 'EL',
+                   'gas_record_date': 'gas_date', 'atmospheric_stratum': 'atm_stratum',
+                   'altitude': 'Height', 'pressure': 'Pressure'}
 
     if nprocs == 0:
         profiles, units = _prior_serial(orig_shape=orig_shape, var_mapping=var_mapping, met_data=met_data,
@@ -69,6 +72,11 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     units['sounding_longitude'] = 'degrees_east'
     profiles['sounding_latitude'] = met_data['latitude']
     units['sounding_latitude'] = 'degrees_north'
+
+    # Also need to convert the entry dates into strings to write to HDF 5.
+    profiles['air_strat_entry_date'] = np.array([_string_fill if d is None else d.strftime('%Y-%m-%d') for d in profiles['air_strat_entry_date']])
+    # And update the stratum unit to be more description
+    units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
 
     # Write the priors to the file requested.
     write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
@@ -369,17 +377,24 @@ def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_
     :return: none, writes to file on disk.
     """
     with h5py.File(output_file, 'w') as h5obj:
-        h5obj.attrs['geos_files'] = ','.join(geos_files)
-        h5obj.attrs['resampler_file'] = resampler_file
+        h5obj.attrs['geos_files'] = ','.join(os.path.abspath(f) for f in geos_files)
+        h5obj.attrs['resampler_file'] = os.path.abspath(resampler_file)
         h5grp = h5obj.create_group('priors')
         for var_name, var_data in profile_variables.items():
             # Replace NaNs with numeric fill values
-            filled_data = var_data.copy()
-            filled_data[np.isnan(filled_data)] = _fill_val
+            if np.issubdtype(var_data.dtype, np.number):
+                filled_data = var_data.copy()
+                filled_data[np.isnan(filled_data)] = _fill_val
+                this_fill_val = _fill_val
+            elif np.issubdtype(var_data.dtype, np.unicode_):
+                filled_data = var_data.copy()
+                this_fill_val = _string_fill
+            else:
+                raise NotImplementedError('No method to handle fill values for data type "{}" implemented'.format(var_data.dtype))
 
             # Write the data
             var_unit = units[var_name]
-            dset = h5grp.create_dataset(var_name, data=var_data, fillvalue=_fill_val)
+            dset = h5grp.create_dataset(var_name, data=filled_data, fillvalue=this_fill_val)
             dset.attrs['units'] = var_unit
 
 
