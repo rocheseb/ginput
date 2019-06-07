@@ -203,6 +203,14 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
         return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs=nprocs)
 
 
+def time_weight_from_datetime(acos_datetime, prev_geos_datetime, next_geos_datetime):
+    return time_weight(datetime2datenum(acos_datetime), datetime2datenum(prev_geos_datetime), datetime2datenum(next_geos_datetime))
+
+
+def time_weight(acos_datenum, prev_geos_datenum, next_geos_datenum):
+    return (acos_datenum - prev_geos_datenum) / (next_geos_datenum - prev_geos_datenum)
+
+
 def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
     logger.debug('Calculating eq. lat. {}'.format(idx))
     try:
@@ -217,7 +225,7 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
 
     # Interpolate between the two times by calculating a weighted average of the two profiles based on the sounding
     # time. This avoids another for loop over all levels.
-    weight = (datenum - geos_datenums[i_last_geos]) / (geos_datenums[i_next_geos] - geos_datenums[i_last_geos])
+    weight = time_weight(datenum, geos_datenums[i_last_geos], geos_datenums[i_next_geos])
     return weight * last_el_profile + (1 - weight) * next_el_profile
 
 
