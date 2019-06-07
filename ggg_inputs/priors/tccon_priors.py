@@ -611,101 +611,6 @@ class TraceGasTropicsRecord(object):
                            .format(time=mod_utils.relativedelta2string(cls._max_safe_extrap_forward), end=last_date,
                                    gas=cls.gas_name))
 
-
-    @staticmethod
-    def _calc_monthly_gas(df, year, month, limit_extrapolation_to=None):
-        """
-        Get gas concentration for a specific month, extrapolating if necessary.
-
-        :param year: what year to query
-        :type year: int
-
-        :param month: what month to query
-        :type year: int
-
-        :param deseasonalize: set to ``True`` to use the concentration record with the seasonal record smoothed out.
-         Default is ``False``, which keeps the seasonal record.
-        :type deseasonalize: bool
-
-        :param limit_extrapolation_to: a date beyond which not to extrapolate
-        :type limit_extrapolation_to: a datetime-like object
-
-        :return: the concentration value for this month, and a dictionary with keys "flag" and "latency". "latency" will
-         be the number of years that the concentration value had to be extrapolated. Flag will be one of:
-
-         * 0 = data read directly from record
-         * 1 = data had to be extrapolated
-         * 2 = requested date was before the start of the record
-         * 3 = requested date was after the date set by ``limit_extrapolation_to``
-         * 4 = unanticipated error occured.
-
-        :rtype: float, dict
-        """
-
-        years_extrap = 0
-        day = 1
-        fillval = np.nan
-        target_date = pd.Timestamp(year, month, day)
-
-        if limit_extrapolation_to is None:
-            # 100 years should be sufficiently far as to be effectively no limit
-            limit_extrapolation_to = relativedelta(years=100)
-
-        first_available_date = df.index.min()
-        last_available_date = df.index.max()
-        first_allowed_date = first_available_date - limit_extrapolation_to
-        last_allowed_date = last_available_date + limit_extrapolation_to
-
-        if target_date < first_allowed_date or target_date > last_allowed_date:
-            flag = 2
-            val = fillval
-        elif (target_date >= first_available_date) & (target_date <= last_available_date):
-
-            flag = 0
-            #print('Reading data from file...')
-            # As of pandas version 0.24.1, df.dmf_mean[target_date] was ~10x faster than
-            # df.loc[target_date]['dmf_mean']
-            val = df.dmf_mean[target_date]
-
-        else:
-            if target_date < first_available_date:
-                sign = -1
-            else:
-                sign = 1
-            flag = 1
-            nyear = 5 * sign
-            #print('Date outside available time period... extrapolating!')
-
-            # Need to find the most recent year that we have data for this month
-
-            latest_date = target_date
-            while latest_date > last_available_date or latest_date < first_available_date:
-                latest_date -= relativedelta(years=1*sign)
-                years_extrap += 1*sign
-
-            # Get the most nearest nyears concentrations for this month in the record. Set the initial value
-            # to the last of those.
-            prev_year = [y for y in reversed(range(years_extrap, nyear + years_extrap, sign))]
-
-            prev_date = [pd.Timestamp(year - item, month, day) for item in prev_year]
-            prev_gas = df.loc[prev_date, 'dmf_mean'].values
-
-            val = df.loc[latest_date]['dmf_mean']
-            for start_yr in range(0, years_extrap, sign):
-                # For each year we need to extrapolate, calculate the growth rate as the average of the growth
-                # rate over five years. This should help smooth out any El Nino effects, which would tend to
-                # cause unusual growth rates.
-                growth = np.diff(prev_gas).mean()
-                val += growth
-
-                # Now that we have the extrapolated value, update the last 5 concentration values to include it and
-                # remove the earliest one so that we have updated concentration values for the next time through the
-                # loop.
-                prev_gas = np.append(prev_gas, val)
-                prev_gas = np.delete(prev_gas, 0)
-
-        return val, {'flag': flag, 'latency': years_extrap}
-
     @staticmethod
     def _make_lagged_df(df, lag):
         # Apply the requested lag by adding it to the dates that make up the index of the input data frame. Adding it
@@ -935,8 +840,11 @@ class TraceGasTropicsRecord(object):
 
         # Calculate the latency
         age_rdeltas = mod_utils.frac_years_to_reldelta(ages)
-        ancillary_dict['air_entry_dates'] = np.array([pd.Timestamp(date - a) for a in age_rdeltas])
-        ancillary_dict['latency'] = self.get_latency_by_date(ancillary_dict['air_entry_dates'])
+        # We need to subtract the lag, because we're looking up against dates that have been already shifted forward
+        # by that lag. That is, the age 0 air in the strat table for 1 Mar 2019 corresponds to the MLO/SMO record from
+        # 1 Jan 2019.
+        ancillary_dict['gas_record_dates'] = np.array([pd.Timestamp(date - a - self.sbc_lag) for a in age_rdeltas])
+        ancillary_dict['latency'] = self.get_latency_by_date(ancillary_dict['gas_record_dates'])
 
         if theta is None:
             # make it an array just to make the input checking easier
@@ -1820,7 +1728,7 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
 
 
 def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, gas_record,
-                    profs_latency=None, prof_aoa=None, prof_world_flag=None, prof_entry_date=None):
+                    profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
     """
     Add the stratospheric trace gas to a TCCON prior profile
 
@@ -1863,7 +1771,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
     profs_latency = _init_prof(profs_latency, n_lev)
     prof_aoa = _init_prof(prof_aoa, n_lev)
     prof_world_flag = _init_prof(prof_world_flag, n_lev)
-    prof_entry_date = _init_prof(prof_entry_date, n_lev, fill_val=None)
+    gas_record_dates = _init_prof(gas_record_dates, n_lev, fill_val=None)
 
     # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
     # restrict to >= 380 K later.
@@ -1884,7 +1792,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
                                                                         prof_eqlat[xx_overworld], prof_theta[xx_overworld])
 
     profs_latency[xx_overworld] = strat_extra_info['latency']
-    prof_entry_date[xx_overworld] = strat_extra_info['air_entry_dates']
+    gas_record_dates[xx_overworld] = strat_extra_info['gas_record_dates']
     # Last we need to fill in the "middleworld" between the tropopause and 380 K. The simplest way to do it is to
     # assume that at the tropopause the CO2 is equal to the lagged MLO/SAM record and interpolate linearly in theta
     # space between that and the first > 380 level.
@@ -1900,7 +1808,8 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
     prof_gas[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, gas_endpoints)
     prof_world_flag[xx_middleworld] = const.middleworld_flag
 
-    return prof_gas, {'latency': profs_latency, 'entry_date': prof_entry_date, 'age_of_air': prof_aoa, 'stratum': prof_world_flag}
+    return prof_gas, {'latency': profs_latency, 'gas_record_dates': gas_record_dates, 'age_of_air': prof_aoa,
+                      'stratum': prof_world_flag}
 
 
 def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentration_record, site_abbrev='xx',
@@ -2037,7 +1946,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     # temperature (the "middleworld").
     _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, theta_trop_met,
                                          concentration_record, profs_latency=latency_profs,
-                                         prof_world_flag=stratum_flag, prof_entry_date=gas_date_prof)
+                                         prof_world_flag=stratum_flag, gas_record_dates=gas_date_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
 
     # Finally prepare the output, writing a .map file if needed.

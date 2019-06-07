@@ -13,7 +13,7 @@ from ..common_utils.ggg_logging import logger, setup_logger
 from ..mod_maker import mod_maker
 from ..priors import tccon_priors
 
-
+_acos_tstring_fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
 # Values lower than this will be replaced with NaNs when reading in the resampled met data
 _fill_val_threshold = -9e5
 # NaNs will be replaced with this value when writing the HDF5 file
@@ -59,13 +59,19 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     var_mapping = {'co2_prior': co2_record.gas_name, 'co2_record_latency': 'mean_latency', 'equivalent_latitude': 'EL',
                    'gas_record_date': 'gas_date', 'atmospheric_stratum': 'atm_stratum',
                    'altitude': 'Height', 'pressure': 'Pressure'}
+    # This dictionary defines extra type information to create the output arrays. _make_output_profiles_dict uses it.
+    # The keys should match those in var_mapping; any key from var_mapping that isn't in this one gets the default
+    # output array (with shape orig_shape and fill value np.nan). Each value in this dict must be a two-element tuple;
+    # the first is the desired shape, the second the fill value (which also sets the type). Any values of -1 in the
+    # shape get replaced with the corresponding value from orig_shape.
+    var_type_info = {'gas_record_date': (orig_shape, None)}
 
     if nprocs == 0:
-        profiles, units = _prior_serial(orig_shape=orig_shape, var_mapping=var_mapping, met_data=met_data,
-                                        co2_record=co2_record)
+        profiles, units = _prior_serial(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
+                                        met_data=met_data, co2_record=co2_record)
     else:
-        profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, met_data=met_data,
-                                          co2_record=co2_record, nprocs=nprocs)
+        profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
+                                          met_data=met_data, co2_record=co2_record, nprocs=nprocs)
 
     # Add latitude and longitude to the priors file
     profiles['sounding_longitude'] = met_data['longitude']
@@ -74,7 +80,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     units['sounding_latitude'] = 'degrees_north'
 
     # Also need to convert the entry dates into strings to write to HDF 5.
-    profiles['air_strat_entry_date'] = np.array([_string_fill if d is None else d.strftime('%Y-%m-%d') for d in profiles['air_strat_entry_date']])
+    profiles['gas_record_date'] = _convert_to_acos_time_strings(profiles['gas_record_date'])
     # And update the stratum unit to be more description
     units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
 
@@ -120,12 +126,22 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
     return profiles, units
 
 
-def _make_output_profiles_dict(orig_shape, var_mapping):
-    return {k: np.full(orig_shape, np.nan) for k in var_mapping}
+def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
+    prof_dict = dict()
+    for k in var_mapping:
+        if k not in var_type_info:
+            shape = orig_shape
+            fill_val = np.nan
+        else:
+            new_shape, fill_val = var_type_info[k]
+            shape = [o if n == -1 else n for o, n in zip(orig_shape, new_shape)]
+
+        prof_dict[k] = np.full(shape, fill_val)
+    return prof_dict
 
 
-def _prior_serial(orig_shape, var_mapping, met_data, co2_record):
-    profiles = _make_output_profiles_dict(orig_shape, var_mapping)
+def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
+    profiles = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
     units = None
 
     for i_sounding in range(orig_shape[0]):
@@ -142,7 +158,7 @@ def _prior_serial(orig_shape, var_mapping, met_data, co2_record):
     return profiles, units
 
 
-def _prior_parallel(orig_shape, var_mapping, met_data, co2_record, nprocs):
+def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record, nprocs):
     logger.info('Running CO2 prior calculation in parallel with {} processes'.format(nprocs))
 
     # Need to prepare iterators of the sounding and footprint indices, as well as the individual met dictionaries
@@ -158,7 +174,7 @@ def _prior_parallel(orig_shape, var_mapping, met_data, co2_record, nprocs):
     # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
     # the units dict or None if the prior calculation did not run. We need to combine the profiles into one array per
     # variable and get one valid units dict
-    profiles = _make_output_profiles_dict(orig_shape, var_mapping)
+    profiles = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
     units = None
     for (these_profs, these_units), i_sounding, i_foot in zip(result, sounding_inds, footprint_inds):
         if these_units is not None:
@@ -428,7 +444,7 @@ def _convert_acos_time_strings(time_string_array, format='datetime'):
     output_array = np.full([time_string_array.size], init_val)
     for idx, time_str in enumerate(time_string_array.flat):
         time_str = time_str.decode('utf8')
-        datetime_obj = dt.datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%S.%fZ')
+        datetime_obj = dt.datetime.strptime(time_str, _acos_tstring_fmt)
         if format == 'datetime':
             output_array[idx] = datetime_obj
         elif format == 'datenum':
@@ -437,6 +453,11 @@ def _convert_acos_time_strings(time_string_array, format='datetime'):
             raise NotImplementedError('No conversion method defined for format == "{}"'.format(format))
 
     return np.reshape(output_array, time_string_array.shape)
+
+
+def _convert_to_acos_time_strings(datetime_array):
+    datestring_array = np.array(['N/A' if d is None else d.strftime(_acos_tstring_fmt) for d in datetime_array.flat])
+    return datestring_array.reshape(datetime_array.shape)
 
 
 def datetime2datenum(datetime_obj):
