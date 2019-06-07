@@ -190,7 +190,6 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     geos_datenums = np.array([datetime2datenum(d) for d in geos_utc_times])
 
     on_native_grid = [mod_utils.is_geos_on_native_grid(f) for f in geos_files]
-
     if all(on_native_grid):
         eqlat_fxns = mod_maker.equivalent_latitude_functions_from_native_geos_files(geos_files, geos_utc_times)
     elif not any(on_native_grid):
