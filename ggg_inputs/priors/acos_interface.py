@@ -88,10 +88,14 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
 
 
-def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping):
+def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping, var_type_info):
     if i_foot == 0:
         logger.info('Processing set of soundings {}'.format(i_sounding + 1))
-    profiles = {k: np.full_like(mod_data['profile']['Height'], np.nan) for k in var_mapping.keys()}
+
+    profiles = dict()
+    for k in var_mapping.keys():
+        fill_val = var_type_info[k][1] if k in var_type_info else np.nan
+        profiles[k] = np.full_like(mod_data['profile']['Height'], fill_val)
     units = {k: '' for k in var_mapping.keys()}
 
     if obs_date < dt.datetime(1993, 1, 1):
@@ -149,7 +153,8 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
             mod_data = _construct_mod_dict(met_data, i_sounding, i_foot)
             obs_date = met_data['dates'][i_sounding, i_foot]
 
-            this_profiles, this_units = _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping)
+            this_profiles, this_units = _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record,
+                                                      var_mapping, var_type_info)
             for h5_var, h5_array in profiles.items():
                 h5_array[i_sounding, i_foot, :] = this_profiles[h5_var]
             if this_units is not None:
@@ -169,7 +174,8 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
     obs_dates = [met_data['dates'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
 
     with Pool(processes=nprocs) as pool:
-        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, mod_dicts, obs_dates, repeat(co2_record), repeat(var_mapping)))
+        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, mod_dicts, obs_dates,
+                                                 repeat(co2_record), repeat(var_mapping), repeat(var_type_info)))
 
     # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
     # the units dict or None if the prior calculation did not run. We need to combine the profiles into one array per
