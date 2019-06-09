@@ -8,7 +8,7 @@ from multiprocessing import Pool
 import numpy as np
 import os
 
-from ..common_utils import mod_utils
+from ..common_utils import mod_utils, ioutils
 from ..common_utils.ggg_logging import logger, setup_logger
 from ..mod_maker import mod_maker
 from ..priors import tccon_priors
@@ -138,6 +138,9 @@ def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
             fill_val = np.nan
         else:
             new_shape, fill_val = var_type_info[k]
+            if len(new_shape) > len(orig_shape):
+                raise NotImplementedError('Shapes in var_type_info with more dimensions that in orig_shape are not '
+                                          'yet implemented.')
             shape = [o if n == -1 else n for o, n in zip(orig_shape, new_shape)]
 
         prof_dict[k] = np.full(shape, fill_val)
@@ -401,6 +404,7 @@ def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_
     with h5py.File(output_file, 'w') as h5obj:
         h5obj.attrs['geos_files'] = ','.join(os.path.abspath(f) for f in geos_files)
         h5obj.attrs['resampler_file'] = os.path.abspath(resampler_file)
+        h5obj.attrs['creation_info'] = ioutils.make_creation_info(output_file, 'acos_interface.acos_interface_main')
         h5grp = h5obj.create_group('priors')
         for var_name, var_data in profile_variables.items():
             # Replace NaNs with numeric fill values

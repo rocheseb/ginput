@@ -4,6 +4,7 @@ import datetime as dt
 from hashlib import sha1
 import netCDF4 as ncdf
 import numpy as np
+from subprocess import CalledProcessError
 
 from . import mod_utils
 
@@ -129,26 +130,75 @@ def make_ncvar_helper(nc_handle, var_name, var_data, dims, **attrs):
     return var
 
 
-def make_creation_info(nc_filename, creation_note=None):
-    now = dt.datetime.now()
-    commit_hash, branch, _ = mod_utils.hg_commit_info()
-    clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean(ignore_files=[nc_filename]) else 'dirty'
-    if creation_note is not None:
-        description = 'Created by {note} on {date} (mercurial commit {commit} on branch {branch}, {cleanstate})'
-    else:
-        description = 'Created with commit {commit} on branch {branch} ({cleanstate}) on {date}'
+def make_creation_info(filename, creation_note=None):
+    """
+    Create a string describing the creation of a stored file.
 
-    description = description.format(note=creation_note, date=now, commit=commit_hash, branch=branch,
-                                     cleanstate=clean_or_dirty)
+    This is intended to create a string attribute that describes how a file containing look up tables or other
+    derived information for the GGG retrieval. The string will include the date the file was generated and, provided
+    the Mercurial repository is intact, the commit hash that generated the file.
+
+    :param filename: the path to the file that is being created. Its status will be ignored when determining if the
+     Mercurial commit is clean or not.
+    :type filename: str
+
+    :param creation_note: A short string describing how the file was created. If given, it will be inserted into the
+     string as "Created by {note} on {date}". Typically this will indicate what function created the file.
+    :type creation_note: str
+
+    :return: the description string
+    :rtype: str
+    """
+    now = dt.datetime.now()
+    try:
+        commit_hash, branch, _ = mod_utils.hg_commit_info()
+        clean_or_dirty = 'clean' if mod_utils.hg_is_commit_clean(ignore_files=[filename]) else 'dirty'
+    except CalledProcessError:
+        if creation_note is not None:
+            description = 'Created by {note} on {date} (could not acquire Mercurial commit information)'
+        else:
+            description = 'Created on {date} (could not acquire Mercurial commit information)'
+        description = description.format(note=creation_note, date=now)
+    else:
+        if creation_note is not None:
+            description = 'Created by {note} on {date} (mercurial commit {commit} on branch {branch}, {cleanstate})'
+        else:
+            description = 'Created with commit {commit} on branch {branch} ({cleanstate}) on {date}'
+
+        description = description.format(note=creation_note, date=now, commit=commit_hash, branch=branch,
+                                         cleanstate=clean_or_dirty)
     return description
 
 
 def add_creation_info(nc_handle, creation_note=None, creation_att_name='history'):
+    """
+    Add a creation note to a netCDF file.
+
+    :param nc_handle: a handle to the netCDF4 dataset to add the attribute to.
+    :type nc_handle: :class:`netCDF4.Dataset`
+
+    :param creation_note: see the same named parameter in :func:`make_creation_info`.
+    :type creation_note: str
+
+    :param creation_att_name: what attribute to store the creation information as.
+    :type creation_att_name: str
+
+    :return: None
+    """
     description = make_creation_info(nc_handle.filepath(), creation_note=creation_note)
     nc_handle.setncattr(creation_att_name, description)
 
 
 def make_dependent_file_hash(dependent_file):
+    """
+    Create an SHA1 hash of a file.
+
+    :param dependent_file: the path to the file to hash.
+    :type dependent_file: str
+
+    :return: the SHA1 hash
+    :rtype: str
+    """
     hashobj = sha1()
     with open(dependent_file, 'rb') as fobj:
         block = fobj.read(4096)
@@ -160,5 +210,23 @@ def make_dependent_file_hash(dependent_file):
 
 
 def add_dependent_file_hash(nc_handle, hash_att_name, dependent_file):
+    """
+    Add an SHA1 hash of another file as an attribute to a netCDF file.
+
+    This is intended to create an attribute that list the SHA1 hash of a file that the netCDF file being created
+    depends on.
+
+    :param nc_handle: a handle to the netCDF4 dataset to add the attribute to.
+    :type nc_handle: :class:`netCDF4.Dataset`
+
+    :param hash_att_name: the name to give the attribute that will store the hash. It is recommended to include the
+     substring "sha1" so that it is clear what hash function was used.
+    :type hash_att_name: str
+
+    :param dependent_file: the file to generate the hash of.
+    :type dependent_file: str
+
+    :return: None
+    """
     hash_hex = make_dependent_file_hash(dependent_file)
     nc_handle.setncattr(hash_att_name, hash_hex)
