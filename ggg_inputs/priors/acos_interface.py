@@ -18,7 +18,7 @@ _acos_tstring_fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
 _fill_val_threshold = -9e5
 # NaNs will be replaced with this value when writing the HDF5 file
 _fill_val = -999999
-_string_fill = 'N/A'
+_string_fill = b'N/A'
 
 
 def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
@@ -95,7 +95,7 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
     profiles = dict()
     for k in var_mapping.keys():
         fill_val = var_type_info[k][1] if k in var_type_info else np.nan
-        profiles[k] = np.full_like(mod_data['profile']['Height'], fill_val)
+        profiles[k] = np.full(mod_data['profile']['Height'].shape, fill_val)
     units = {k: '' for k in var_mapping.keys()}
 
     if obs_date < dt.datetime(1993, 1, 1):
@@ -408,7 +408,7 @@ def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_
                 filled_data = var_data.copy()
                 filled_data[np.isnan(filled_data)] = _fill_val
                 this_fill_val = _fill_val
-            elif np.issubdtype(var_data.dtype, np.unicode_):
+            elif np.issubdtype(var_data.dtype, np.string_):
                 filled_data = var_data.copy()
                 this_fill_val = _string_fill
             else:
@@ -462,7 +462,10 @@ def _convert_acos_time_strings(time_string_array, format='datetime'):
 
 
 def _convert_to_acos_time_strings(datetime_array):
-    datestring_array = np.array(['N/A' if d is None else d.strftime(_acos_tstring_fmt) for d in datetime_array.flat])
+    # h5py doesn't accept fixed length unicode strings. So we need to convert 
+    # the default unicode literal returned by strftime into a bytes string that
+    # numpy will interpret as a simple ASCII type.
+    datestring_array = np.array([_string_fill if d is None else d.strftime(_acos_tstring_fmt).encode('utf8') for d in datetime_array.flat])
     return datestring_array.reshape(datetime_array.shape)
 
 

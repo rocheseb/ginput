@@ -16,7 +16,6 @@ _output_dir = os.path.abspath(os.path.join(_my_dir, '..', 'data'))
 
 
 def create_lookup_files(ace_dir, geos_dir, backup_existing_files=True):
-    import pdb; pdb.set_trace()
     _create_fch4_fn2o_lut(ace_dir, backup_existing_files=backup_existing_files)
     _create_hf_slopes_lut(ace_dir, backup_existing_files=backup_existing_files)
     #_create_geos_theta_vs_lat(geos_dir, backup_existing_files=backup_existing_files)

@@ -197,7 +197,6 @@ def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_dateti
     next_datenum = aci.datetime2datenum(next_datetime)
     acos_datenums = np.array([aci.datetime2datenum(d) for d in acos_datetimes])
 
-    import pdb; pdb.set_trace()
     weights = aci.time_weight(acos_datenums, last_datenum, next_datenum)
     weights = weights.reshape(-1, 1)
     # allow broadcasting to expand the weights

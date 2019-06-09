@@ -1932,7 +1932,6 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     latency_profs = np.full((n_lev,), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
-    import pdb; pdb.set_trace()
     # gas_prof is modified in-place
     _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, z_prof, z_surf, z_trop_met, concentration_record,
                                        pres_grid=p_prof, theta_grid=theta_prof, use_theta_eqlat=use_eqlat_trop,

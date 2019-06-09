@@ -1337,7 +1337,6 @@ def calc_wmo_tropopause(temperature, altitude, limit_to=(5., 18.), raise_error=T
     alt_half = alt_half[zz]
 
     # Iterate over the levels. If the lapse rate is < 2 K/km, check that it remains there over the next 2 kilometers
-    import pdb; pdb.set_trace()
     for k, (gamma, alt) in enumerate(zip(lapse, alt_half)):
         if gamma < 2.0:
             step = 0.1
