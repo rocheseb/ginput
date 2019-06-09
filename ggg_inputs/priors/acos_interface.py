@@ -89,6 +89,38 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
 
 def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping, var_type_info):
+    """
+    Underlying function that generates individual prior profiles in serial and parallel mode
+
+    :param i_sounding: the sounding group index (first dimension) within the data array that's being generated.
+    :type i_sounding: int
+
+    :param i_foot: the footprint index (second dimension).
+    :type i_foot: int
+
+    :param mod_data: the dictionary representing the profile's met data, structure as a model data dictionary for the
+     TCCON code.
+    :type mod_data: dict
+
+    :param obs_date: the date and time of the observation corresponding to this profile
+    :type obs_date: datetime-like
+
+    :param co2_record: the MLO/SMO CO2 record class instance
+    :type co2_record: :class:`ggg_inputs.priors.tccon_priors.CO2TropicsRecord`
+
+    :param var_mapping: a dictionary mapping the TCCON variable names in the output dict from the TCCON code to the
+     variable names desired for the ACOS code. The ACOS names are the keys, the TCCON names the values.
+    :type var_mapping: dict
+
+    :param var_type_info: a dictionary with extra information about the type of the output arrays. See
+     :func:`_make_output_profiles_dict` for a full description.
+    :type var_type_info: dict
+
+    :return: dictionaries of profiles (and ancillary data) and units. Profiles will hold the data arrays of the ACOS
+     variables and units will hold strings defining the units of those arrays, as returned by the TCCON code. Both will
+     have the same keys as ``var_mapping``
+    :rtype: dict, dict
+    """
     if i_foot == 0:
         logger.info('Processing set of soundings {}'.format(i_sounding + 1))
 
@@ -131,6 +163,34 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
 
 
 def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
+    """
+    Initialize the dictionary to store the output ACOS variables.
+
+    :param orig_shape: The original shape of the 3D ACOS variables (sounding group, footprints, levels).
+    :type orig_shape: tuple(int)
+
+    :param var_mapping: a dictionary mapping the TCCON variable names in the output dict from the TCCON code to the
+     variable names desired for the ACOS code. The ACOS names are the keys, the TCCON names the values.
+    :type var_mapping: dict
+
+    :param var_type_info: a dictionary with extra information about the type of the output arrays. Its keys must also
+     be keys in ``var_mapping``. Each value is a two element tuple:
+
+        * The first element must be a tuple or list that describes the desired shape of the output array for this
+          variable. Any elements that are -1 are replaced by the corresponding element in ``orig_shape``.
+        * The second element must be the fill value to initialize the array with. This will also implicitly set the
+          array's data type.
+
+    .. caution::
+       At present, the shapes defined in ``var_type_info`` may have fewer dimensions than ``orig_shape`` but not more.
+       Attempting to pass such a shape will result in a ``NotImplementedError`` being raised. This has not been
+       implemented simply because it has not yet been necessary.
+
+    :type var_type_info: dict
+
+    :return: the profiles dictionary, with arrays initialized with their respective fill values.
+    :rtype: dict
+    """
     prof_dict = dict()
     for k in var_mapping:
         if k not in var_type_info:
@@ -148,6 +208,19 @@ def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
 
 
 def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
+    """
+    Generate the priors, running in serial mode.
+
+    See :func:`_prior_helper` for help on all other inputs not listed here.
+
+    :param met_data: the dictionary of met data read from the resampler .h5 file with equivalent latitude added as the
+     "el" variable.
+    :type met_data: dict
+
+    :return: profiles and units dictionaries; profiles contains the actual data, units strings describing the units of
+     each array.
+    :rtype: dict, dict
+    """
     profiles = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
     units = None
 
@@ -167,6 +240,22 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
 
 
 def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record, nprocs):
+    """
+    Generate the priors, running in parallel mode.
+
+    See :func:`_prior_helper` for help on all other inputs not listed here.
+
+    :param met_data: the dictionary of met data read from the resampler .h5 file with equivalent latitude added as the
+     "el" variable.
+    :type met_data: dict
+
+    :param nprocs: the number of processors to use to run the code.
+    :type nprocs: int
+
+    :return: profiles and units dictionaries; profiles contains the actual data, units strings describing the units of
+     each array.
+    :rtype: dict, dict
+    """
     logger.info('Running CO2 prior calculation in parallel with {} processes'.format(nprocs))
 
     # Need to prepare iterators of the sounding and footprint indices, as well as the individual met dictionaries
@@ -244,14 +333,78 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
 
 
 def time_weight_from_datetime(acos_datetime, prev_geos_datetime, next_geos_datetime):
+    """
+    Calculate the time weighting from datetime-like objects.
+
+    :param acos_datetime: the date/time of the ACOS sounding
+    :type acos_datetime: datetime-like
+
+    :param prev_geos_datetime: the date/time of the GEOS FP file that comes before the ACOS sounding
+    :type prev_geos_datetime: datetime-like
+
+    :param next_geos_datetime: the date/time of the GEOS FP file that comes after the ACOS sounding
+    :type next_geos_datetime: datetime-like
+
+    :return: the weight, w, such that the profile for the ACOS time would be :math:`w*p1 + (1-w)*p2`, where p1 and p2
+     are the profiles at the GEOS times before and after the sounding, respectively.
+    :rtype: float
+    """
     return time_weight(datetime2datenum(acos_datetime), datetime2datenum(prev_geos_datetime), datetime2datenum(next_geos_datetime))
 
 
 def time_weight(acos_datenum, prev_geos_datenum, next_geos_datenum):
+    """
+    Calculate the time weighting from date numbers.
+
+    In this context, a date number is any representation of a date time as a integer- or float-like value. Typically,
+    this will be a value returned by :func:`datetime2datenum` but any similar numeric value will do, so long as all
+    inputs are consistent.
+
+    :param acos_datenum: the date/time of the ACOS sounding as a number
+    :type acos_datenum: int or float
+
+    :param prev_geos_datenum: the date/time of the GEOS FP file that comes before the ACOS sounding as a number
+    :type prev_geos_datenum: int or float
+
+    :param next_geos_datenum: the date/time of the GEOS FP file that comes after the ACOS sounding as a number
+    :type next_geos_datenum: int or float
+
+    :return: the weight, w, such that the profile for the ACOS time would be :math:`w*p1 + (1-w)*p2`, where p1 and p2
+     are the profiles at the GEOS times before and after the sounding, respectively.
+    :rtype: float
+    """
     return (acos_datenum - prev_geos_datenum) / (next_geos_datenum - prev_geos_datenum)
 
 
 def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
+    """
+    Internal function that carries out the equivalent latitude calculation while running in either serial or parallel
+
+    :param idx: the sounding index (assuming the 3D met arrays were reshaped to soundings-by-levels)
+    :type idx: int
+
+    :param pv_vec: the potential vorticity vector for this sounding, in PVU (10^-6 K m^2 kg^-1 s^-1)
+    :type pv_vec: 1D :class:`numpy.ndarray`
+
+    :param theta_vec: the potential temperature vector for this sounding, in K
+    :type theta_vec: 1D :class:`numpy.ndarray`
+
+    :param datenum: a numeric representation of the date/time of this sounding, typically created by
+     :func:`datetime2datenum`.
+    :type datenum: int or float
+
+    :param eqlat_fxns: the collection of equivalent latitude interpolators, must be in the same order as
+     ``geos_datenums``.
+    :type eqlat_fxns: list(:class:`scipy.interpolate.interpolate.interp2d`)
+
+    :param geos_datenums: the date numbers (see ``datenum``) for the GEOS FP files that bracket this sounding. Should
+     be >= 2 and must be ordered the same as ``eqlat_fxns``, so that ``eqlat_fxns[0]`` the the equivalent latitude
+     interpolator for ``geos_datenums[0]`` and so on.
+    :type geos_datenums: list(float)
+
+    :return: the equivalent latitude profile, interpolated in time and space to the sounding
+    :rtype: :class:`numpy.ndarray`
+    """
     logger.debug('Calculating eq. lat. {}'.format(idx))
     try:
         i_last_geos = _find_helper(geos_datenums <= datenum, order='last')
@@ -270,6 +423,14 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
 
 
 def _eqlat_clip(el):
+    """
+    Restrict equivalent latitude to [-90, 90]
+
+    :param el: the equivalent latitude array.
+    :type el: :class:`numpy.ndarray`
+
+    :return: None. Modifies ``el`` in-place.
+    """
     def trim(bool_ind, replacement_val):
         if np.any(bool_ind):
             # nanmax can't take an empty array so we have to make sure that
@@ -293,6 +454,31 @@ def _eqlat_clip(el):
 
 
 def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns):
+    """
+    Calculate equivalent latitude running in serial mode.
+
+    :param sounding_pv: the array of potential vorticity in PVU (10^-6 K m^2 kg^-1 s^-1). Must have dimensions
+     soundings-by-levels.
+    :type sounding_pv: :class:`numpy.ndarray`
+
+    :param sounding_theta: the array of potential temperature in K. Must have same dimensions as ``sounding_theta``.
+    :type sounding_theta: :class:`numpy.ndarray`
+
+    :param sounding_datenums: the vector of date numbers for each sounding. Must be 1D with length equal to the number
+     of soundings. Datenumbers may be any representation of date as an in or float, as long as it is consistent with
+     ``geos_datenums``, however typically this is the result of :func:`datetime2datenum`.
+    :type sounding_datenums: 1D :class:`numpy.ndarray` or equivalent
+
+    :param geos_datenums: a vector of date numbers corresponding to the GEOS files that provided the ``eqlat_fxns``.
+     Must have the same order as ``eqlat_fxns``.
+    :type geos_datenums: 1D :class:`numpy.ndarray` or equivalent.
+
+    :param eqlat_fxns: a list of equivalent latitude interpolators for the date/times specified by ``geos_datenums``.
+    :type eqlat_fxns: list(:class:`scipy.interpolate.interpolate.interp2d`)
+
+    :return: an array of equivalent latitudes for the soundings (dimensions soundings-by-levels).
+    :rtype: :class:`numpy.ndarray`
+    """
     sounding_eqlat = np.full_like(sounding_pv, np.nan)
 
     # This part is going to be slow. We need to use the interpolators to get equivalent latitude profiles for each
@@ -307,6 +493,14 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums,
 
 
 def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs):
+    """
+    Calculate equivalent latitude running in parallel mode.
+
+    :param nprocs: the number of processors to use.
+    :type nprocs: int
+
+    See :func:`_eqlat_serial` for the other parameters and return type.
+    """
     logger.info('Running eq. lat. calculation in parallel with {} processes'.format(nprocs))
     with Pool(processes=nprocs) as pool:
         result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta, sounding_datenums,
@@ -335,9 +529,9 @@ def read_resampled_met(met_file):
         * "datenums" - the sounding date/time as a floating point number (see :func:`datetime2datenum`)
         * "altitude" - the altitude profiles in km
         * "latitude" - the sounding latitudes in degrees (south is negative)
+        * "longitude" - the sounding longitudes in degrees (west is negative)
         * "trop_pressure" - the blended tropopause pressure in hPa
         * "trop_temperature" - the blended tropopause temperature in K
-        * "surf_gph" - surface geopotential height in m^2 s^-2
         * "surf_alt" - the surface altitude, derived from surface geopotential, in km
 
     :rtype: dict
@@ -380,7 +574,7 @@ def read_resampled_met(met_file):
 
     # surf_gph is height derived from geopotential by divided by g0 = 9.80665 m/s^2 according to Chris O'Dell on
     # 21 May 2019. We can use this as the surface altitude, just need to convert from meters to kilometers.
-    data_dict['surf_alt'] = 1e-3 * data_dict['surf_gph']
+    data_dict['surf_alt'] = 1e-3 * data_dict.pop('surf_gph')
 
     return data_dict
 
@@ -466,6 +660,15 @@ def _convert_acos_time_strings(time_string_array, format='datetime'):
 
 
 def _convert_to_acos_time_strings(datetime_array):
+    """
+    Convert datetimes to ACOS-style time strings
+
+    :param datetime_array: an array of datetime-like objects
+    :type datetime_array: :class:`numpy.ndarray`
+
+    :return: an array of datetime strings
+    :rtype: :class:`numpy.ndarray`
+    """
     # h5py doesn't accept fixed length unicode strings. So we need to convert 
     # the default unicode literal returned by strftime into a bytes string that
     # numpy will interpret as a simple ASCII type.
