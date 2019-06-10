@@ -1,3 +1,12 @@
+"""
+This module serves as the interface between the OCO/GOSAT code and the TCCON prior generator.
+
+Usual GGG users will not need to concern themselves with this file. GGG developers will want to ensure that this module
+is still able to generate equivalent latitudes and CO2 priors from the TCCON prior and mod_maker code.
+
+If you wish to call this code from within other python code, the function :func:`acos_interface_main` is the entry
+point. A command line interface is also provided
+"""
 from __future__ import print_function, division
 
 import argparse
@@ -18,6 +27,8 @@ _acos_tstring_fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
 _fill_val_threshold = -9e5
 # NaNs will be replaced with this value when writing the HDF5 file
 _fill_val = -999999
+# This will be used as a fill value for strings. It must be bytes b/c HDF5s do not accept fixed length unicode strings
+# so we use fixed length ASCII strings.
 _string_fill = b'N/A'
 
 
@@ -808,11 +819,18 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
     return mod_dict
 
 
-def parse_args():
+def parse_args(parser=None):
     def comma_list(argin):
         return tuple([a.strip() for a in argin.split(',')])
 
-    parser = argparse.ArgumentParser(description='Command line interface to generate CO2 priors for the ACOS algorithm')
+    description = 'Command line interface to generate CO2 priors for the ACOS algorithm'
+    if parser is None:
+        i_am_main = True
+        parser = argparse.ArgumentParser(description=description)
+    else:
+        i_am_main = False
+        parser.description = description
+
     parser.add_argument('geos_files', type=comma_list, help='Comma-separated list of paths to the GEOS FP or FP-IT '
                                                             'files that cover the times of the soundings. For example, '
                                                             'if the soundings span 0100Z to 0200Z on 2018-01-01, '
@@ -828,25 +846,27 @@ def parse_args():
     parser.add_argument('-v', '--verbose', dest='log_level', default=0, action='count',
                         help='Increase logging verbosity')
     parser.add_argument('-q', '--quiet', dest='log_level', const=-1, action='store_const',
-                        help='Silence all logging except warnings and critical messages')
-    parser.add_argument('-l', '--log-file', default=None, help='Use this to define a path for logging messages to be '
-                                                               'stored in. Log messages are still printed to stdout if '
-                                                               'this is given. NOTE: Python errors are not captured by '
-                                                               'the logging machinery and so will still print to '
-                                                               'stderr.')
+                        help='Silence all logging except warnings and critical messages. Note: some messages that do '
+                             'not use the standard logger will also not be silenced.')
     parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use in parallelization')
 
-    return vars(parser.parse_args())
+    if i_am_main:
+        return vars(parser.parse_args())
+    else:
+        # if not main, no need to return, modified in-place. Will be called by exterior command line interface function.
+        parser.set_defaults(driver_fxn=cl_driver)
+
+
+def cl_driver(**args):
+    log_level = args.pop('log_level')
+    setup_logger(level=log_level)
+
+    acos_interface_main(**args)
 
 
 def main():
     args = parse_args()
-
-    log_level = args.pop('log_level')
-    log_file = args.pop('log_file')
-    setup_logger(log_file=log_file, level=log_level)
-
-    acos_interface_main(**args)
+    cl_driver(**args)
 
 
 if __name__ == '__main__':
