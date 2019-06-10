@@ -215,7 +215,7 @@ class TraceGasTropicsRecord(object):
 
     # This sets the maximum degree of the polynomial used to fit and extend the MLO/SMO trends. Set to 1 to use linear,
     # 2 for quadratic, etc.
-    _max_trend_poly_deg = 1
+    _max_trend_poly_deg = 2
     _max_safe_extrap_forward = relativedelta(years=5)
 
     # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
@@ -1164,7 +1164,10 @@ class HFTropicsRecord(TraceGasTropicsRecord):
         return df_combined
 
     def list_strat_dependent_files(self):
-        return {'ch4_sha1': CH4TropicsRecord.get_strat_lut_file()}
+        # Need to add the code files here, but not any MLO/SMO files so we can't just call the super method
+        dep_dict = deepcopy(_code_dep_files)
+        dep_dict.update({'ch4_sha1': CH4TropicsRecord.get_strat_lut_file()})
+        return dep_dict
 
     @classmethod
     def _load_ch4_hf_slopes(cls):
@@ -1326,6 +1329,8 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'ch4'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.012
+
+    _max_trend_poly_deg = 1
 
     _fn2o_fch4_lut_file = os.path.join(_data_dir, 'n2o_ch4_acefts.nc')
 
