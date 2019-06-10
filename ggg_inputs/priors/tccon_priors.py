@@ -55,6 +55,7 @@ from __future__ import print_function, division
 
 from collections import OrderedDict
 from contextlib import closing
+from copy import deepcopy
 import ctypes
 import datetime as dt
 from dateutil.relativedelta import relativedelta
@@ -66,13 +67,19 @@ import os
 import pandas as pd
 import re
 from scipy.interpolate import LinearNDInterpolator
-from scipy.optimize import minimize_scalar
 import xarray as xr
 
-# TODO: move all into package and use a proper relative import
 from ..common_utils import mod_utils, ioutils, mod_constants as const
 from ..common_utils.ggg_logging import logger
 
+# _code_dep_modules should list any imported modules that you want to check if they've changed when decided whether to
+# recalculate the strat LUTs. This module will be added on its own after. _code_dep_files should always be generated
+# from _code_dep_modules; the latter is what is actually used to calculate the dependencies.
+_code_dep_modules = (mod_utils, ioutils, const)
+_code_dep_files = {f.__name__.split('.')[-1] + '_sha1': os.path.abspath(f.__file__) for f in _code_dep_modules}
+# Add this module. Make sure to avoid storing the name as "__main__" so just always use the file name minus the
+# extension
+_code_dep_files[os.path.splitext(os.path.basename(__file__))[0]] = os.path.abspath(__file__)
 
 _data_dir = const.data_dir
 _clams_file = os.path.join(_data_dir, 'clams_age_clim_scaled.nc')
@@ -181,15 +188,15 @@ class TraceGasTropicsRecord(object):
     :param smo_file: optional, the path to the Samoa flask data file. Same format as the MLO file required.
     :type smo_file: str
 
-    :param force_strat_calculation: optional, set to ``True`` to force the stratospheric concentrations look up table
-     to be recalculated. Default is ``False``, which will read in the table from the corresponding netCDF file included
-     in this repo unless that file does not exist. The latter is much faster, but will not adjust for changes to the
-     input MLO/SMO files or the priors generating code.
-    :type force_strat_calculation: bool
+    :param recalculate_strat_lut: optional, set to ``True`` to force the stratospheric concentrations look up table
+     to be recalculated or ``False`` to always use the existing lookup table if it exists. Default is ``None``, which
+     will check if any of the files that the LUT depends on have changed, and recalculate it if so.
+    :type recalculate_strat_lut: bool or None
 
     :param save_strat: optional, set to ``False`` to avoid saving the stratospheric concentration lookup if it is
      recalculated. Default is ``True``. This option has no effect if the stratospheric lookup table is read from the
      netCDF file.
+    :type save_strat: bool
     """
 
     # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
@@ -242,7 +249,7 @@ class TraceGasTropicsRecord(object):
         return self._last_record_date(self.conc_seasonal)
 
     def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None,
-                 force_strat_calculation=False, save_strat=True):
+                 recalculate_strat_lut=None, save_strat=True):
         first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
         self.mlo_file = mlo_file
         self.smo_file = smo_file
@@ -257,12 +264,22 @@ class TraceGasTropicsRecord(object):
         # convolving the age spectra with the concentration record, so can be quite time consuming. To speed things up,
         # we usually load this table from a netCDF file, but if the prior code or the MLO/SMO files update, we'll need
         # to regenerate that lookup table and save it again.
-        if force_strat_calculation or not os.path.exists(self.get_strat_lut_file()):
-            if not os.path.exists(self.get_strat_lut_file()):
-                logger.info('{} strat LUT file does not exist. Calculating LUT.'.format(self.gas_name))
+        if recalculate_strat_lut is None:
+            recalculate_strat_lut = self._have_strat_array_deps_changed()
+            if recalculate_strat_lut:
+                logger.important('Strat LUT dependencies have changed, recalculating')
             else:
-                logger.info('Recalculating {} strat LUT as requested'.format(self.gas_name))
+                logger.important('Strat LUT dependencies unchanged; loading previous table')
+        elif recalculate_strat_lut:
+            logger.important('Recalculating strat LUT as requested')
+        elif os.path.isfile(self.get_strat_lut_file()):
+            logger.important('Using existing strat LUT as requested')
+        else:
+            recalculate_strat_lut = True
+            logger.important('Strat LUT file ({}) does not exist, must recompute'.format(self.get_strat_lut_file()))
 
+        if recalculate_strat_lut:
+            logger.info('Calculating {} strat LUT'.format(self.gas_name))
             self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
             if save_strat:
                 logger.important('Saving {} strat LUT file as "{}"'.format(self.gas_name, os.path.abspath(self.get_strat_lut_file())))
@@ -272,7 +289,7 @@ class TraceGasTropicsRecord(object):
             # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
             # generate the strat table stored in the netCDF file.
             logger.info('Loading {} strat LUT'.format(self.gas_name))
-            self.conc_strat = self._load_strat_arrays(self.list_strat_dependent_files())
+            self.conc_strat = self._load_strat_arrays()
 
     @classmethod
     def _init_helper(cls, first_date, last_date, lag, mlo_file, smo_file):
@@ -762,31 +779,53 @@ class TraceGasTropicsRecord(object):
             save_ds.attrs[att_name] = ioutils.make_dependent_file_hash(file_path)
         save_ds.to_netcdf(self.get_strat_lut_file())
 
-    @classmethod
-    def _load_strat_arrays(cls, dependent_files=None, lut_file=None):
+    def _have_strat_array_deps_changed(self, dependent_files=None, lut_file=None):
+        """
+        Check if dependencies for the strat LUTs have changed.
+
+        :param dependent_files: dictionary specifying which files need to be checked. Keys must be the root level
+         attribute names in the LUT netCDF file that store the SHA1 hashes of the dependency files, values must be the
+         paths to those files. If omitted, the dictionary returned by ``cls.list_strat_dependent_files()`` is used.
+        :type dependent_files: dict
+
+        :param lut_file: the LUT netCDF file. If omitted, the path returned by ``cls.get_strat_lut_file()`` is used.
+        :type lut_file: str
+
+        :return: ``True`` if the dependencies have changed (meaning a hash is different, the file doesn't exist, or one
+         of the expected files is missing), ``False`` otherwise.
+        :rtype: bool
+        """
         def check_hash(file_path, hash):
             if file_path is None:
-                return
+                return True
+            else:
+                return hash == ioutils.make_dependent_file_hash(file_path)
 
-            if hash != ioutils.make_dependent_file_hash(file_path):
-                raise GasRecordInputVerificationError('The SHA1 hash for the input file {} is not what was expected. '
-                                                      'This usually means that the file in question has been modified '
-                                                      'since the last time that the stratospheric concentration arrays '
-                                                      'were saved. If you are a GGG developer, you will likely just '
-                                                      'need to regenerate the strat files. If you are a regular GGG '
-                                                      'user, please file a bug report at https://gggbugs.gps.caltech.edu/')
-
-        dependent_files = dict() if dependent_files is None else dependent_files
-        strat_dict = dict()
-        if lut_file is None:
-            lut_file = cls.get_strat_lut_file()
+        dependent_files = self.list_strat_dependent_files() if dependent_files is None else dependent_files
+        lut_file = self.get_strat_lut_file() if lut_file is None else lut_file
 
         with xr.open_dataset(lut_file) as ds:
             # First verify that the SHA1 hashes for the MLO and SMO match. If not, we should recalculate the strat array
             # rather than use one calculated with old MLO/SMO data
             for att_name, file_path in dependent_files.items():
-                check_hash(file_path, ds.attrs[att_name])
+                if att_name not in ds.attrs:
+                    logger.important('{dep_file} not listed as an attribute in {lut_file}, assuming strat LUT needs '
+                                     'regenerated'.format(dep_file=att_name, lut_file=lut_file))
+                    return True
+                if not check_hash(file_path, ds.attrs[att_name]):
+                    logger.important('{dep_file} appears to have changed since the last time the {lut_file} was '
+                                     'generated'.format(dep_file=att_name, lut_file=lut_file))
+                    return True
 
+            return False
+
+    @classmethod
+    def _load_strat_arrays(cls, lut_file=None):
+        strat_dict = dict()
+        if lut_file is None:
+            lut_file = cls.get_strat_lut_file()
+
+        with xr.open_dataset(lut_file) as ds:
             for name, darray in ds.items():
                 new_coords = [(dim.split('_')[1], coord) for dim, coord in darray.coords.items()]
                 strat_dict[name] = xr.DataArray(darray.data, coords=new_coords)
@@ -806,7 +845,9 @@ class TraceGasTropicsRecord(object):
 
         :rtype: dict
         """
-        return {'mlo_sha1': self.mlo_file, 'smo_sha1': self.smo_file}
+        file_dict = deepcopy(_code_dep_files)
+        file_dict.update({'mlo_sha1': self.mlo_file, 'smo_sha1': self.smo_file})
+        return file_dict
 
     def get_strat_gas(self, date, ages, eqlat, theta=None, as_dataframe=False):
         """
