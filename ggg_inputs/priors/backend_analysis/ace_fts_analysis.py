@@ -386,7 +386,7 @@ def _save_hf_ch4_lut(nc_filename, ace_ch4_file, ace_hf_file, lat_bin_edges, full
                                   description='The names used for the latitude bins')
 
 
-def calc_fraction_remaining_from_acefts(nc_file, gas_name, gas_record, tropopause_approach='theta'):
+def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-profile'):
     """
     Calculate the fraction remaining of a gas in the stratosphere from an ACE-FTS netCDF file
 
@@ -411,9 +411,29 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, gas_record, tropopaus
      remaining. The latter will be set to NaN in the troposphere.
     :rtype: :class:`numpy.ndarray` x2
     """
+    bottom_pt = 360
+    top_pt = 390
 
+    def _get_bc_per_profile(dates, concentration, pt):
+        bc_conc = np.full([concentration.shape[0]], np.nan)
+        for i, (conc_row, pt_row) in enumerate(zip(concentration, pt)):
+            zz = (pt_row > bottom_pt) & (pt_row < top_pt)
 
-    tropopause_approach = tropopause_approach.lower()
+            if zz.sum() > 0:
+                bc_conc[i] = np.nanmean(conc_row[zz])
+
+        return bc_conc
+
+    def _get_bc_by_fit(dates, concentration, pt):
+        not_outliers = ~mod_utils.isoutlier(concentration, m=5)
+        in_pt = (pt > bottom_pt) & (pt < top_pt)
+        datenums = np.full_like(concentration, np.nan)
+        datenums[:] = np.array([np.datetime64(d) for d in dates]).reshape(-1, 1)
+        not_nans = ~np.isnan(datenums) & ~np.isnan(concentration)
+        xx = not_outliers & in_pt & not_nans
+
+        fit = np.polynomial.polynomial.Polynomial.fit(datenums[xx], concentration[xx], deg=2)
+        return fit(datenums[:, 0])
 
     with ncdf.Dataset(nc_file, 'r') as nch:
         alt = read_ace_var(nch, 'altitude', qflags=None)
@@ -424,69 +444,20 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, gas_record, tropopaus
         # ACE data appears to use -999 as fill value in the concentrations
         gas_conc[gas_conc < -900.0] = np.nan
 
-        temperature = read_ace_var(nch, 'temperature', qflags=qflags)
         theta = read_ace_theta(nch, qflags)
 
-    # Define a function to calculate the tropopause. Must be named `get_tropopause` and take one argument (the profile
-    # index), and return the tropopause altitude as a scalar float.
-
-    if tropopause_approach == 'wmo':
-        def get_tropopause(prof_indx):
-            return mod_utils.calc_wmo_tropopause(alt, temperature[prof_indx, :], raise_error=False)
-    elif tropopause_approach == 'theta':
-        def get_tropopause(prof_indx):
-            theta_prof = theta[prof_indx, :]
-
-            # Find all values above 380 K. If none exist (probably all NaNs) then we can't find the tropopause - return
-            # NaN. Otherwise get the first level below 380 K.
-            zz = np.flatnonzero(theta_prof > 380)
-            if zz.size == 0:
-                return np.nan
-            else:
-                zz = zz[0] - 1
-            # Assuming that theta is increasing in the stratosphere, necessary for interpolation
-            assert np.all(np.diff(theta_prof[zz:])) > 0, 'Theta is not monotonically increasing above 380 K'
-            return np.interp(380.0, theta_prof[[zz, zz+1]], alt[[zz, zz+1]])
+    if bc_approach == 'per-profile':
+        bc_fxn = _get_bc_per_profile
+    elif bc_approach == 'fit':
+        bc_fxn = _get_bc_by_fit
     else:
-        raise ValueError('No tropopause calculation defined for tropopause_approach == "{}"'.format(tropopause_approach))
+        raise ValueError('bc_approach must be "per-profile" or "fit"')
 
-    # Need a conversion factor between the gas record (which may be in ppbv, ppmv, etc) and the ACE data (in mixing
-    # ratio, no scaling).
-    gas_unit = gas_record.gas_unit
-    if re.match(r'ppmv?$', gas_unit):
-        scale_factor = 1e-6
-    elif re.match(r'ppbv?$', gas_unit):
-        scale_factor = 1e-9
-    else:
-        raise NotImplementedError('No scale factor defined for SBC record unit "{}"'.format(gas_unit))
+    bc_concentrations = bc_fxn(ace_dates, gas_conc, theta)
+    fgas = gas_conc / bc_concentrations.reshape(-1, 1)
+    fgas[theta < 380] = np.nan
 
-    # The gas variables are shaped (nprofiles) by (nlevels). Iterate over the profiles, calculate the tropopause for
-    # each profile, and limit data to just data above the tropopause. Look up the MLO/SMO stratospheric boundary
-    # condition for this date and normalize the profile to that.
-
-    pbar = mod_utils.ProgressBar(gas_conc.shape[0], style='counter', prefix='Profile:')
-
-    for iprof in range(gas_conc.shape[0]):
-        pbar.print_bar(iprof)
-
-        trop_alt = get_tropopause(iprof)
-        if np.isnan(trop_alt):
-            # Couldn't find tropopause, eliminate this profile from consideration
-            gas_conc[iprof, :] = np.nan
-            theta[iprof, :] = np.nan
-            continue
-
-        sbc_date = ace_dates[iprof] - gas_record.sbc_lag
-        sbc_conc = gas_record.get_gas_for_dates(sbc_date).item() * scale_factor
-
-        # The fraction remaining will be defined as relative to the tropopause concentration. In the troposphere, set it
-        # to NaN because it doesn't make sense to define the fraction remaining there
-        gas_conc[iprof, :] /= sbc_conc
-        gas_conc[iprof, alt < trop_alt] = np.nan
-
-    pbar.finish()
-
-    return alt, gas_conc, theta
+    return alt, fgas, theta
 
 
 def _get_ace_date_range(ace_dates, freq='YS'):
