@@ -265,26 +265,37 @@ class TraceGasTropicsRecord(object):
         # convolving the age spectra with the concentration record, so can be quite time consuming. To speed things up,
         # we usually load this table from a netCDF file, but if the prior code or the MLO/SMO files update, we'll need
         # to regenerate that lookup table and save it again.
-        if recalculate_strat_lut is None:
+        if not os.path.isfile(self.get_strat_lut_file()):
+            # File does not exist, would have to recalculate no matter what the request was.
+            recalculate_strat_lut = True
+            logger.important('Strat LUT file ({}) does not exist, must recompute'.format(self.get_strat_lut_file()))
+        elif recalculate_strat_lut is None:
+            # Determine if the dependencies have changed, if so, recalculate.
             recalculate_strat_lut = self._have_strat_array_deps_changed()
             if recalculate_strat_lut:
                 logger.important('Strat LUT dependencies have changed, recalculating')
             else:
                 logger.important('Strat LUT dependencies unchanged; loading previous table')
         elif recalculate_strat_lut:
+            # If told to force recalculation, do so
             logger.important('Recalculating strat LUT as requested')
-        elif os.path.isfile(self.get_strat_lut_file()):
-            logger.important('Using existing strat LUT as requested')
         else:
-            recalculate_strat_lut = True
-            logger.important('Strat LUT file ({}) does not exist, must recompute'.format(self.get_strat_lut_file()))
+            # recalculate_strat_lut must have been false to get here, therefore we should not recalculate
+            # the LUT
+            logger.important('Using existing strat LUT as requested')
 
         if recalculate_strat_lut:
             logger.info('Calculating {} strat LUT'.format(self.gas_name))
             self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
             if save_strat:
-                logger.important('Saving {} strat LUT file as "{}"'.format(self.gas_name, os.path.abspath(self.get_strat_lut_file())))
-                self._save_strat_arrays()
+                try:
+                    self._save_strat_arrays()
+                except PermissionError:
+                    logger.important('Could not save strat LUT file due to permission error. This just means it will '
+                                      'need recalculated the next time this record is loaded')
+                else:
+
+                    logger.important('Saved {} strat LUT file as "{}"'.format(self.gas_name, os.path.abspath(self.get_strat_lut_file())))
         else:
             # If we're loading the strat lookup table, we need to pass the MLO and SMO files to check their SHA1 hashes
             # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
