@@ -924,7 +924,15 @@ class TraceGasTropicsRecord(object):
             tmp_arr = region_arr
             for dim_name, dim_coords in interp_dims.items():
                 tmp_arr = tmp_arr.interp(method='linear', kwargs={'fill_value': 'extrapolate'}, **{dim_name: dim_coords})
-            gas_by_region[region] = tmp_arr
+            # needed to handle cases without theta dependence - removes theta dimension
+            tmp_arr = tmp_arr.squeeze()
+
+            # Interpolating each dimension in sequence like this leaves each dimension that had a non-scalar target for
+            # interpolation, so we need to get the diagonal which is the actual profile.
+            # Also we make diag_inds instead of using np.diag b/c the latter doesn't work in >2 dimensions.
+            diag_inds = tuple([np.arange(tmp_arr.level.size)]*tmp_arr.ndim)
+            gas_by_region[region] = tmp_arr[diag_inds]
+        
 
         gas_conc = gas_by_region['midlat']
         doy = mod_utils.day_of_year(date) + 1  # most of the code from Arlyn Andrews assumes Jan 1 -> DOY = 1
