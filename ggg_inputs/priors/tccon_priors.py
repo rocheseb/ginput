@@ -1324,6 +1324,11 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
 
         return fn2o_lut
 
+    def list_strat_dependent_files(self):
+        dep_dict = super(N2OTropicsRecord, self).list_strat_dependent_files()
+        dep_dict.update({'ace_fn2o_lut_sha1': self._ace_fn2o_file})
+        return dep_dict
+
     
 class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'ch4'
