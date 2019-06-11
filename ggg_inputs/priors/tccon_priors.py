@@ -249,10 +249,11 @@ class TraceGasTropicsRecord(object):
         return self._last_record_date(self.conc_seasonal)
 
     def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None,
-                 recalculate_strat_lut=None, save_strat=True):
+                 strat_age_scale=1.0, recalculate_strat_lut=None, save_strat=True):
         first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
         self.mlo_file = mlo_file
         self.smo_file = smo_file
+        self.strat_age_scale = strat_age_scale
         self.conc_seasonal = self.get_mlo_smo_mean(mlo_file, smo_file, first_date, last_date)
 
         # Deseasonalize the data by taking a 12 month rolling average. Only do that on the dmf_mean field,
@@ -874,7 +875,7 @@ class TraceGasTropicsRecord(object):
         :rtype: float, :class:`numpy.ndarray`, or :class:`pandas.DataFrame`
         """
 
-        ages = np.array(ages)
+        ages = np.array(ages) * self.strat_age_scale
         eqlat = np.array(eqlat)
 
         ancillary_dict = dict()
