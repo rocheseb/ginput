@@ -1824,7 +1824,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
     xx_overworld = prof_theta >= 380
     prof_world_flag[xx_overworld] = const.overworld_flag
     # Need the +1 because Jan 1 will be frac_year = 0, but CLAMS expects 1 <= doy <= 366
-    retrieval_doy = int(np.round(mod_utils.date_to_frac_year(retrieval_date) * 365.25)) + 1
+    retrieval_doy = int(mod_utils.clams_day_of_year(retrieval_date))
     age_of_air_years = get_clams_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
     prof_aoa[xx_overworld] = age_of_air_years[xx_overworld]
 

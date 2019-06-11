@@ -34,13 +34,12 @@ _std_theta_bin_centers = _bin_centers(_std_theta_bins)
 
 
 def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
-    logger.info('Instantiating N2O record')
-    #  It shouldn't matter if we recalculate the strat LUT or not since we're not using it here
-    n2o_record = tccon_priors.N2OTropicsRecord()
-
     logger.info('Loading ACE data')
-    ace_alt, ace_fn2o, ace_theta = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', n2o_record,
-                                                                       tropopause_approach='theta')
+    ace_alt, ace_fn2o, ace_theta, extra_info = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', bc_approach='fit')
+
+    ace_dates = extra_info['dates']
+    ace_doy = np.array([int(mod_utils.clams_day_of_year(date)) for date in ace_dates.flat]).reshape(ace_dates.shape)
+
     with ncdf.Dataset(ace_n2o_file, 'r') as nch:
         ace_lat = read_ace_var(nch, 'latitude', None)
 
@@ -49,10 +48,14 @@ def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
 
     logger.info('Binning F(N2O) vs. age and theta')
     # Similar to the F(CH4) vs. F(N2O) approach, we ignore fill values, want only positive F(N2O) values, want to
-    # avoid the polar vortex (lat < 50, could use mod_utils.isvortex to be more careful) and want to stay within
-    # TCCON relevant altitudes
-    xx = ~np.isnan(ace_fn2o) & ~np.isnan(ace_age) & (ace_fn2o >= 0) & (np.abs(ace_lat[:, np.newaxis]) < 50) & \
-         (ace_alt[np.newaxis, :] < _tccon_top_alt)
+    # avoid the polar vortex and want to stay within TCCON relevant altitudes.
+    #
+    # is_vortex expects everything to be the same size, so we need to tile lat and doy
+    ace_lat = np.tile(ace_lat[:, np.newaxis], [1, ace_age.shape[1]])
+    ace_doy = np.tile(ace_doy[:, np.newaxis], [1, ace_age.shape[1]])
+
+    xx = ~np.isnan(ace_fn2o) & ~np.isnan(ace_age) & (ace_fn2o >= 0) & \
+         ~mod_utils.is_vortex(ace_lat, ace_doy, ace_age) & (ace_alt[np.newaxis, :] < _tccon_top_alt)
 
     age_bins = _std_age_bins
     age_bin_centers = _bin_centers(age_bins)
@@ -62,21 +65,18 @@ def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
     # We're not going to worry about outliers initially
     fn2o_means, fn2o_counts, fn2o_overall, theta_overall = _bin_z_vs_xy(ace_age, ace_theta, ace_fn2o, xx, age_bins, theta_bins)
 
+    fn2o_means[fn2o_means > 1] = 1
+    fn2o_overall[fn2o_overall > 1] = 1
+
     _save_fn2o_lut(lut_save_file, fn2o_means, fn2o_counts, fn2o_overall, theta_overall, age_bin_centers, age_bins,
                    theta_bin_centers, theta_bins, ace_n2o_file)
 
 
 def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
-
-    logger.info('Instantiating trace gas records')
-    n2o_record = tccon_priors.N2OTropicsRecord()
-    ace_alt, ace_fn2o, ace_theta = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', n2o_record,
-                                                                       tropopause_approach='theta')
-    ch4_record = tccon_priors.CH4TropicsRecord()
-
     logger.info('Reading ACE data')
-    _, ace_fch4, _ = calc_fraction_remaining_from_acefts(ace_ch4_file, 'CH4', ch4_record,
-                                                         tropopause_approach='theta')
+    ace_alt, ace_fn2o, ace_theta, _ = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', bc_approach='fit')
+
+    _, ace_fch4, _ = calc_fraction_remaining_from_acefts(ace_ch4_file, 'CH4', bc_approach='fit')
 
     with ncdf.Dataset(ace_ch4_file, 'r') as nch:
         ace_ch4_raw = nch.variables['CH4'][:].filled(np.nan)
@@ -425,14 +425,15 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
         return bc_conc
 
     def _get_bc_by_fit(dates, concentration, pt):
-        not_outliers = ~mod_utils.isoutlier(concentration, m=5)
-        in_pt = (pt > bottom_pt) & (pt < top_pt)
         datenums = np.full_like(concentration, np.nan)
         datenums[:] = np.array([np.datetime64(d) for d in dates]).reshape(-1, 1)
-        not_nans = ~np.isnan(datenums) & ~np.isnan(concentration)
-        xx = not_outliers & in_pt & not_nans
-
-        fit = np.polynomial.polynomial.Polynomial.fit(datenums[xx], concentration[xx], deg=2)
+        in_pt = (theta > 360) & (theta < 390)
+        bc_concs = concentration[in_pt]
+        bc_datenums = datenums[in_pt]
+        not_outliers = ~mod_utils.isoutlier(bc_concs, m=5)
+        not_nans = ~np.isnan(bc_datenums) & ~np.isnan(bc_concs)
+        xx = not_outliers & not_nans
+        fit = np.polynomial.polynomial.Polynomial.fit(bc_datenums[xx], bc_concs[xx], deg=2)
         return fit(datenums[:, 0])
 
     with ncdf.Dataset(nc_file, 'r') as nch:
@@ -457,7 +458,7 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
     fgas = gas_conc / bc_concentrations.reshape(-1, 1)
     fgas[theta < 380] = np.nan
 
-    return alt, fgas, theta
+    return alt, fgas, theta, {'dates': ace_dates, 'bc_concs': bc_concentrations, 'gas_concs': gas_conc}
 
 
 def _get_ace_date_range(ace_dates, freq='YS'):

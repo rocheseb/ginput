@@ -1504,7 +1504,11 @@ def date_to_decimal_year(date_in):
 
 
 def day_of_year(date_in):
-    return float(date_in.strftime('%j')) - 1
+    return clams_day_of_year(date_in) - 1
+
+
+def clams_day_of_year(date_in):
+    return float(date_in.strftime('%j'))
 
 
 def date_to_frac_year(date_in):
