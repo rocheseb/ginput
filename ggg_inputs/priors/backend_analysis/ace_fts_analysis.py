@@ -3,11 +3,12 @@ from __future__ import print_function, division, absolute_import
 from collections import OrderedDict
 import datetime as dt
 from dateutil.relativedelta import relativedelta
+from itertools import repeat
+from multiprocessing import Pool
 import netCDF4 as ncdf
 import numpy as np
 import pandas as pd
 import os
-import re
 from scipy.optimize import curve_fit
 from statsmodels.robust.robust_linear_model import RLM
 from statsmodels.robust.norms import TukeyBiweight
@@ -528,7 +529,7 @@ def add_clams_age_to_file(ace_nc_file, save_nc_file=None):
                                       description='Age from the CLaMS model along the ACE profiles')
 
 
-def generate_ace_age_file(ace_in_file, age_file_out):
+def generate_ace_age_file(ace_in_file, age_file_out, geos_path, use_geos_theta_for_age=False, nprocs=0):
     # This will need to group ACE profiles by which GEOS files they fall between, read the PV from those files,
     # interpolate to the ACE profile lat/lon/time, generate the EL interpolators, calculate the EL profiles, then
     # finally lookup age from CLAMS.
@@ -541,41 +542,102 @@ def generate_ace_age_file(ace_in_file, age_file_out):
         ace_data['theta'] = read_ace_theta(nh, qflags=ace_qflags)
 
     date_groups = _bin_ace_to_geos_times(ace_data['dates'])
+    # Debugging only
+    dg_keys = list(date_groups.keys())
+    date_groups = OrderedDict([(k, date_groups[k]) for k in dg_keys[:4]])
+    # End debugging
+
+    # Now we need to loop over the date groups and calculate the eq. lat. and age for each group (since each group
+    # is the ace profiles in a 3 hour window bracketed by 2 GEOS files). There's usually only a few profiles per group,
+    # so it makes more sense to parallelize over groups than profiles within groups.
+    #
+    # Even though it may be memory intensive, we're going to build the inputs for each call to _calc_el_age_for_ace
+    # first then iterate so that we can use the same inputs for serial or parallel mode. We'll build as iterators to
+    # limit the memory use as much as possible.
+    group_inputs = dict()
+    group_inputs['ace_dates'] = (ace_data['dates'][xx] for xx in date_groups.values())
+    group_inputs['ace_lons'] = (ace_data['lon'][xx] for xx in date_groups.values())
+    group_inputs['ace_lats'] = (ace_data['lat'][xx] for xx in date_groups.values())
+    group_inputs['ace_theta'] = (ace_data['theta'][xx, :] for xx in date_groups.values())
+    group_inputs['geos_dates'] = ((d, d+dt.timedelta(hours=3)) for d in date_groups.keys())
+    group_inputs['geos_path'] = repeat(geos_path)
+    group_inputs['use_geos_theta'] = repeat(use_geos_theta_for_age)
+
+    input_order = ('ace_dates', 'ace_lons', 'ace_lats', 'ace_theta', 'geos_dates', 'geos_path', 'use_geos_theta')
+    inputs_interator = zip(*[group_inputs[k] for k in input_order])
+
+    if nprocs == 0:
+        results = []
+        for inputs in inputs_interator:
+            results.append(_calc_el_age_for_ace(*inputs))
+    else:
+        with Pool(processes=nprocs) as pool:
+            results = pool.starmap(_calc_el_age_for_ace, inputs_interator)
+
+    # _calc_el_age_for_age returns a dictionary of nprofs-by-nlevels arrays, where nprofs is the number of profiles in
+    # the group it was given. results is then a list of these dictionaries, so we need to go through those dictionaries
+    # and put their subset of profiles in the right rows in the bigger array
+    output_keys = ('EL', 'age')
+    ace_outputs = {k: np.full_like(ace_data['theta'], np.nan) for k in output_keys}
+    for i, inds in enumerate(date_groups.values()):
+        for k in output_keys:
+            ace_outputs[k][inds] = results[i][k]
+
+    save_ace_age_file(age_file_out, ('lon', 'lat', 'orbit', 'year', 'month', 'day', 'hour', 'quality_flag', 'temperature', 'pressure'),
+                      ace_in_file, ace_outputs['EL'], ace_outputs['age'])
 
 
-def _calc_el_age_for_ace(ace_dates, ace_lon, ace_lat, ace_theta, geos_dates, geos_path, use_geos_theta=False):
-    geos_vars = {'EPV': 1e6}
-    if use_geos_theta:
-        geos_vars['T'] = 1.0
-
+def _calc_el_age_for_ace(ace_dates, ace_lon, ace_lat, ace_theta, geos_dates, geos_path, use_geos_theta_for_age=False):
+    # Read in the GEOS data, calculating quantities as necessary #
+    geos_vars = {'EPV': 1e6, 'T': 1.0}
 
     geos_files = [os.path.join(geos_path, 'Np', mod_utils._format_geosfp_name('fpit', 'Np', d)) for d in geos_dates]
     geos_data_on_std_times = []
     for i, f in enumerate(geos_files):
-        geos_data_on_std_times[i] = _interp_geos_vars_to_ace_lat_lon(f, geos_vars, ace_lon, ace_lat)
+        geos_data_on_std_times.append(_interp_geos_vars_to_ace_lat_lon(f, geos_vars, ace_lon, ace_lat))
 
-    geos_data_at_ace_times = _interp_geos_vars_to_ace_times(ace_dates, geos_dates, geos_data_on_std_times)
     with ncdf.Dataset(geos_files[0]) as nh:
         geos_pres = nh.variables['lev'][:]
-    geos_pres = np.tile(geos_pres.reshape(-1, 1), [1, ace_lon.size])
-    geos_data_at_ace_times['PT'] = mod_utils.calculate_potential_temperature(geos_pres, geos_data_at_ace_times['T'])
+    geos_pres = np.tile(geos_pres.reshape(1, -1), [ace_lon.size, 1])
 
-    if use_geos_theta:
-        theta = geos_data_at_ace_times['PT']
-        pv = geos_data_at_ace_times['EPV']
-    else:
-        theta = ace_theta
-        pv = np.full_like(theta, np.nan)
-        # need to interpolate EPV to ACE levels. Will interpolate using theta as a vertical coordinate
-        for i, ace_theta_prof in enumerate(ace_theta):
-            pv[i, :] = np.interp(ace_theta_prof, geos_data_at_ace_times['PT'], geos_data_at_ace_times['EPV'])
-
+    # Generate the eq. lat. intepolators and find the eq. lat. profiles on the GEOS levels #
     eqlat_interpolators = mm.equivalent_latitude_functions_from_geos_files(geos_files, geos_dates)
+    for i, geos_data in enumerate(geos_data_on_std_times):
+        gdate = geos_dates[i]
+        geos_data['PT'] = mod_utils.calculate_potential_temperature(geos_pres, geos_data['T'])
+        # Calculate the equivalent latitude profiles.
+        eqlat = np.full_like(geos_data['T'], np.nan)
+        for j in range(ace_lon.size):
+            eqlat[j, :] = mod_utils.get_eqlat_profile(eqlat_interpolators[gdate], geos_data['EPV'][j, :], geos_data['PT'][j, :])
+        geos_data['EL'] = eqlat
 
-    # Calculate the equivalent latitude profiles.
-    ace_eqlat = np.full_like(ace_theta, np.nan)
+    # Put the profiles onto the ACE times and levels #
+    geos_data_at_ace_times = _interp_geos_vars_to_ace_times(ace_dates, geos_dates, geos_data_on_std_times)
+    geos_data_on_ace_levels = dict()
+    for varname, geos_data in geos_data_at_ace_times.items():
+        ace_profiles = np.full_like(ace_theta, np.nan)
+        for i, profile in enumerate(geos_data):
+            # This is one case where I think we do not want to extrapolate because the ACE data spans much greater
+            # vertical extent than the GEOS data, so it can't be reliable
+            ace_profiles[i, :] = np.interp(ace_theta[i, :], geos_data_at_ace_times['PT'][i, :], geos_data[i, :],
+                                           left=np.nan, right=np.nan)
+        geos_data_on_ace_levels[varname] = ace_profiles
+
+    # Use the equivalent latitude and potential temperature profiles to look up CLAMS ages #
+    ace_age = np.full_like(ace_theta, np.nan)
     for i in range(ace_lon.size):
-        ace_eqlat[i, :] = mod_utils.get_eqlat_profile()
+        if use_geos_theta_for_age:
+            theta_prof = geos_data_on_ace_levels['PT'][i, :]
+        else:
+            theta_prof = ace_theta[i, :]
+
+        eqlat_prof = geos_data_on_ace_levels['EL'][i, :]
+        ace_doy = mod_utils.clams_day_of_year(ace_dates[i])
+
+        ace_age[i, :] = tccon_priors.get_clams_age(theta_prof, eqlat_prof, ace_doy)
+
+    geos_data_on_ace_levels['age'] = ace_age
+    return geos_data_on_ace_levels
 
 
 def _bin_ace_to_geos_times(ace_dates):
@@ -607,7 +669,7 @@ def _bin_ace_to_geos_times(ace_dates):
     bin_edge_datenums = np.array([sat_utils.datetime2datenum(d) for d in bin_edges])
 
     inds = np.digitize(ace_datenums, bin_edge_datenums) - 1
-    date_groups = dict()
+    date_groups = OrderedDict()
     for i in np.unique(inds):
         date_groups[bin_edges[i]] = np.flatnonzero(inds == i)
 
@@ -648,9 +710,33 @@ def _interp_geos_vars_to_ace_lat_lon(geos_file_path, geos_vars, ace_lon, ace_lat
 def _interp_geos_vars_to_ace_times(ace_datetimes, geos_datetimes, geos_vars):
     interped_vars = dict()
     for ace_dt in ace_datetimes:
-        weight = sat_utils.time_weight_from_datetime(ace_dt, geos_datetimes[0], geos_datetimes[0])
+        weight = sat_utils.time_weight_from_datetime(ace_dt, geos_datetimes[0], geos_datetimes[1])
         for k in geos_vars[0].keys():
             interped_vars[k] = weight * geos_vars[0][k] + (1 - weight) * geos_vars[1][k]
 
     return interped_vars
+
+
+def save_ace_age_file(ace_out_file, vars_to_copy, orig_ace_file, eqlat, age):
+    def get_var_attrs(nh, varname):
+        return {k: nh.variables[varname].getncattr(k) for k in nh.variables[varname].ncattrs()}
+
+    with ncdf.Dataset(orig_ace_file, 'r') as nhread, ncdf.Dataset(ace_out_file, 'w') as nhwrite:
+        # Copy all the dimensions
+        for dimname in nhread.dimensions.keys():
+            attributes = get_var_attrs(nhread, dimname)
+            ioutils.make_ncdim_helper(nhwrite, dimname, nhread.variables[dimname][:], **attributes)
+
+        # Copy all the requested variables
+        for varname in vars_to_copy:
+            attributes = get_var_attrs(nhread, varname)
+            dims = nhread.variables[varname].dimensions
+            ioutils.make_ncvar_helper(nhwrite, varname, nhread.variables[varname][:], dims, **attributes)
+
+        # Add the new variables
+        dims = ('index', 'altitude')
+        ioutils.make_ncvar_helper(nhwrite, 'eqlat', eqlat, dims, long_name='equivalent_latitude', units='degrees_north',
+                                  description='Equivalent latitude computed from potential vorticity')
+        ioutils.make_ncvar_helper(nhwrite, 'age', age, dims, long_name='clams_age', units='years',
+                                  description='Time in years since the air entered the stratosphere')
 
