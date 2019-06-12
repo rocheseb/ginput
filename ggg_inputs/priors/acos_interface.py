@@ -59,7 +59,11 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     theta_array = met_data['theta'].reshape(-1, nlevels)
 
     datenum_array = met_data['datenums'].reshape(-1)
-    eqlat_array = compute_sounding_equivalent_latitudes(pv_array, theta_array, datenum_array, geos_files, nprocs=nprocs)
+    qflag_array = met_data['quality_flags'].reshape(-1)
+
+    eqlat_array = compute_sounding_equivalent_latitudes(sounding_pv=pv_array, sounding_theta=theta_array,
+                                                        sounding_datenums=datenum_array, sounding_qflags=qflag_array,
+                                                        geos_files=geos_files, nprocs=nprocs)
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
 
@@ -93,14 +97,14 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
 
     # Also need to convert the entry dates into strings to write to HDF 5.
     profiles['gas_record_date'] = _convert_to_acos_time_strings(profiles['gas_record_date'])
-    # And update the stratum unit to be more description
+    # And update the stratum unit to be more descriptive
     units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
 
     # Write the priors to the file requested.
     write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
 
 
-def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mapping, var_type_info):
+def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var_mapping, var_type_info):
     """
     Underlying function that generates individual prior profiles in serial and parallel mode
 
@@ -109,6 +113,9 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
 
     :param i_foot: the footprint index (second dimension).
     :type i_foot: int
+
+    :param qflag: the integer quality flag for this sounding
+    :type qflag: int
 
     :param mod_data: the dictionary representing the profile's met data, structure as a model data dictionary for the
      TCCON code.
@@ -142,7 +149,11 @@ def _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record, var_mappin
         profiles[k] = np.full(mod_data['profile']['Height'].shape, fill_val)
     units = {k: '' for k in var_mapping.keys()}
 
-    if obs_date < dt.datetime(1993, 1, 1):
+    if qflag != 0:
+        logger.info('Quality flag != for sounding group/footprint {}/{}. Skipping prior calculation'
+                    .format(i_sounding + 1, i_foot + 1))
+        return profiles, None
+    elif obs_date < dt.datetime(1993, 1, 1):
         # In the test met file I was given, one set of soundings had a date set to 20 Dec 1992, while the rest
         # where on 14 May 2017. Since the 1992 date is close to 999999 seconds before 1 Jan 1993 and the dates
         # are in TAI93 time, I assume these are fill values.
@@ -238,10 +249,12 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
 
     for i_sounding in range(orig_shape[0]):
         for i_foot in range(orig_shape[1]):
+
             mod_data = _construct_mod_dict(met_data, i_sounding, i_foot)
             obs_date = met_data['dates'][i_sounding, i_foot]
+            qflag = met_data['quality_flags'][i_sounding, i_foot]
 
-            this_profiles, this_units = _prior_helper(i_sounding, i_foot, mod_data, obs_date, co2_record,
+            this_profiles, this_units = _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record,
                                                       var_mapping, var_type_info)
             for h5_var, h5_array in profiles.items():
                 h5_array[i_sounding, i_foot, :] = this_profiles[h5_var]
@@ -276,9 +289,10 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
     sounding_inds, footprint_inds = [x for x in zip(*product(range(orig_shape[0]), range(orig_shape[1])))]
     mod_dicts = map(_construct_mod_dict, repeat(met_data), sounding_inds, footprint_inds)
     obs_dates = [met_data['dates'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
+    qflags = [met_data['quality_flags'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
 
     with Pool(processes=nprocs) as pool:
-        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, mod_dicts, obs_dates,
+        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, qflags, mod_dicts, obs_dates,
                                                  repeat(co2_record), repeat(var_mapping), repeat(var_type_info)))
 
     # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
@@ -295,7 +309,8 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
     return profiles, units
 
 
-def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_datenums, geos_files, nprocs=0):
+def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_files,
+                                          nprocs=0):
     """
     Compute equivalent latitudes for a collection of OCO soundings
 
@@ -308,7 +323,8 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     :type sounding_theta: :class:`numpy.ndarray`
 
     :param sounding_datenums: date and time of each profile as a date number (a numpy :class:`~numpy.datetime64` value
-     converted to a float type, see :func:`datetime2datenum` in this module). Same shape as ``sounding_pv`` required.
+     converted to a float type, see :func:`datetime2datenum` in this module). Must be a vector with length equal to the
+     first dimension of ``sounding_pv``.
     :type sounding_datenums: :class:`numpy.ndarray`
 
     :param geos_files: a list of the GEOS 3D met files that bracket the times of all the soundings. Need not be absolute
@@ -339,12 +355,12 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     # the actual sounding time.
 
     if nprocs == 0:
-        return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns)
+        return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns)
     else:
-        return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs=nprocs)
+        return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, nprocs=nprocs)
 
 
-def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
+def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geos_datenums):
     """
     Internal function that carries out the equivalent latitude calculation while running in either serial or parallel
 
@@ -361,6 +377,9 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
      :func:`datetime2datenum`.
     :type datenum: int or float
 
+    :param quality_flag: a scalar number that is the quality flag for this profile.
+    :type quality_flag: int
+
     :param eqlat_fxns: the collection of equivalent latitude interpolators, must be in the same order as
      ``geos_datenums``.
     :type eqlat_fxns: list(:class:`scipy.interpolate.interpolate.interp2d`)
@@ -373,13 +392,19 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums):
     :return: the equivalent latitude profile, interpolated in time and space to the sounding
     :rtype: :class:`numpy.ndarray`
     """
+    default_return = np.full_like(pv_vec, np.nan)
+
+    if quality_flag != 0:
+        logger.info('Sounding {}: quality flag != 0. Skipping eq. lat. calculation.'.format(idx))
+        return default_return
+
     logger.debug('Calculating eq. lat. {}'.format(idx))
     try:
         i_last_geos = _find_helper(geos_datenums <= datenum, order='last')
         i_next_geos = _find_helper(geos_datenums > datenum, order='first')
     except IndexError as err:
         logger.important('Sounding {}: could not find GEOS file by time. Assuming fill value for time'.format(idx))
-        return np.full_like(pv_vec, np.nan)
+        return default_return
 
     last_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_last_geos])
     next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
@@ -421,7 +446,7 @@ def _eqlat_clip(el):
                        .format(n_outside, max(max_below, max_above))) 
 
 
-def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns):
+def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns):
     """
     Calculate equivalent latitude running in serial mode.
 
@@ -453,14 +478,14 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, geos_datenums,
     # sounding for the two times on either side of the sounding time, then do a further linear interpolation to
     # the actual sounding time.
     logger.info('Running eq. lat. calculation in serial')
-    for idx, (pv_vec, theta_vec, datenum) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums)):
-        sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, eqlat_fxns, geos_datenums)
+    for idx, (pv_vec, theta_vec, datenum, qflag) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags)):
+        sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, qflag, eqlat_fxns, geos_datenums)
 
     _eqlat_clip(sounding_eqlat)
     return sounding_eqlat
 
 
-def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenums, eqlat_fxns, nprocs):
+def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, nprocs):
     """
     Calculate equivalent latitude running in parallel mode.
 
@@ -471,7 +496,8 @@ def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, geos_datenum
     """
     logger.info('Running eq. lat. calculation in parallel with {} processes'.format(nprocs))
     with Pool(processes=nprocs) as pool:
-        result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta, sounding_datenums,
+        result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta,
+                                                 sounding_datenums, sounding_qflags,
                                                  repeat(eqlat_fxns), repeat(geos_datenums)))
 
     sounding_eqlat = np.array(result)
@@ -501,6 +527,7 @@ def read_resampled_met(met_file):
         * "trop_pressure" - the blended tropopause pressure in hPa
         * "trop_temperature" - the blended tropopause temperature in K
         * "surf_alt" - the surface altitude, derived from surface geopotential, in km
+        * "quality_flags" - the sounding quality flag. Equal to 0 for good soundings.
 
     :rtype: dict
     """
@@ -515,14 +542,14 @@ def read_resampled_met(met_file):
                 'longitude': [sounding_group, 'sounding_longitude'],
                 'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
                 'trop_temperature': [met_group, 'tropopause_temperature_met'],
-                'surf_gph': [met_group, 'gph_met']
+                'surf_gph': [met_group, 'gph_met'],
+                'quality_flags': [sounding_group, 'sounding_qual_flag']
                 }
     data_dict = dict()
     with h5py.File(met_file, 'r') as h5obj:
         for out_var, (group_name, var_name) in var_dict.items():
             logger.debug('Reading {}/{}'.format(group_name, var_name))
             tmp_data = h5obj[group_name][var_name][:]
-            # TODO: verify that -999999 is the only fill value used with Chris/Albert
             if np.issubdtype(tmp_data.dtype, np.number):
                 tmp_data[tmp_data < _fill_val_threshold] = np.nan
             data_dict[out_var] = tmp_data
