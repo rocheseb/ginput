@@ -921,6 +921,14 @@ def calculate_eq_lat(EPV, PT, area):
     return interp2d(pv_grid, theta_grid, interp_EL)
 
 
+def get_eqlat_profile(interpolator, epv, theta):
+    el = np.full_like(epv, np.nan)
+    for i, (pv, pt) in enumerate(zip(epv, theta)):
+        el[i] = interpolator(pv, pt)
+
+    return el
+
+
 def _format_geosfp_name(product, file_type, date_time):
     """
     Create the file name for a GEOS FP or FP-IT file.

@@ -1,3 +1,4 @@
+import ggg_inputs.common_utils.sat_utils
 import numpy as np
 import os
 import re
@@ -193,11 +194,11 @@ def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids):
 
 
 def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_datetime, acos_datetimes):
-    last_datenum = aci.datetime2datenum(last_datetime)
-    next_datenum = aci.datetime2datenum(next_datetime)
-    acos_datenums = np.array([aci.datetime2datenum(d) for d in acos_datetimes])
+    last_datenum = ggg_inputs.common_utils.sat_utils.datetime2datenum(last_datetime)
+    next_datenum = ggg_inputs.common_utils.sat_utils.datetime2datenum(next_datetime)
+    acos_datenums = np.array([ggg_inputs.common_utils.sat_utils.datetime2datenum(d) for d in acos_datetimes])
 
-    weights = aci.time_weight(acos_datenums, last_datenum, next_datenum)
+    weights = ggg_inputs.common_utils.sat_utils.time_weight(acos_datenums, last_datenum, next_datenum)
     weights = weights.reshape(-1, 1)
     # allow broadcasting to expand the weights
     weighted_tccon = dict()

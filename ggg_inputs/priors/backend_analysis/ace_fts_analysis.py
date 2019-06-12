@@ -12,9 +12,10 @@ from scipy.optimize import curve_fit
 from statsmodels.robust.robust_linear_model import RLM
 from statsmodels.robust.norms import TukeyBiweight
 
-from ...common_utils import mod_utils, ioutils
+from ...common_utils import mod_utils, ioutils, sat_utils
 from ...common_utils.ggg_logging import logger
 from .. import tccon_priors
+from ...mod_maker import mod_maker as mm
 from .backend_utils import read_ace_var, read_ace_date, read_ace_theta
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
@@ -525,3 +526,131 @@ def add_clams_age_to_file(ace_nc_file, save_nc_file=None):
                                                 description='Fixed altitude grid', units='km')
             ioutils.make_ncvar_helper(nch, 'age', ace_ages, [index_dim, alt_dim], units='years', long_name='clams_age',
                                       description='Age from the CLaMS model along the ACE profiles')
+
+
+def generate_ace_age_file(ace_in_file, age_file_out):
+    # This will need to group ACE profiles by which GEOS files they fall between, read the PV from those files,
+    # interpolate to the ACE profile lat/lon/time, generate the EL interpolators, calculate the EL profiles, then
+    # finally lookup age from CLAMS.
+    ace_data = dict()
+    with ncdf.Dataset(ace_in_file) as nh:
+        ace_data['dates'] = read_ace_date(nh)
+        ace_qflags = read_ace_var(nh, 'quality_flag', None)
+        ace_data['lon'] = read_ace_var(nh, 'longitude', None)
+        ace_data['lat'] = read_ace_var(nh, 'latitude', None)
+        ace_data['theta'] = read_ace_theta(nh, qflags=ace_qflags)
+
+    date_groups = _bin_ace_to_geos_times(ace_data['dates'])
+
+
+def _calc_el_age_for_ace(ace_dates, ace_lon, ace_lat, ace_theta, geos_dates, geos_path, use_geos_theta=False):
+    geos_vars = {'EPV': 1e6}
+    if use_geos_theta:
+        geos_vars['T'] = 1.0
+
+
+    geos_files = [os.path.join(geos_path, 'Np', mod_utils._format_geosfp_name('fpit', 'Np', d)) for d in geos_dates]
+    geos_data_on_std_times = []
+    for i, f in enumerate(geos_files):
+        geos_data_on_std_times[i] = _interp_geos_vars_to_ace_lat_lon(f, geos_vars, ace_lon, ace_lat)
+
+    geos_data_at_ace_times = _interp_geos_vars_to_ace_times(ace_dates, geos_dates, geos_data_on_std_times)
+    with ncdf.Dataset(geos_files[0]) as nh:
+        geos_pres = nh.variables['lev'][:]
+    geos_pres = np.tile(geos_pres.reshape(-1, 1), [1, ace_lon.size])
+    geos_data_at_ace_times['PT'] = mod_utils.calculate_potential_temperature(geos_pres, geos_data_at_ace_times['T'])
+
+    if use_geos_theta:
+        theta = geos_data_at_ace_times['PT']
+        pv = geos_data_at_ace_times['EPV']
+    else:
+        theta = ace_theta
+        pv = np.full_like(theta, np.nan)
+        # need to interpolate EPV to ACE levels. Will interpolate using theta as a vertical coordinate
+        for i, ace_theta_prof in enumerate(ace_theta):
+            pv[i, :] = np.interp(ace_theta_prof, geos_data_at_ace_times['PT'], geos_data_at_ace_times['EPV'])
+
+    eqlat_interpolators = mm.equivalent_latitude_functions_from_geos_files(geos_files, geos_dates)
+
+    # Calculate the equivalent latitude profiles.
+    ace_eqlat = np.full_like(ace_theta, np.nan)
+    for i in range(ace_lon.size):
+        ace_eqlat[i, :] = mod_utils.get_eqlat_profile()
+
+
+def _bin_ace_to_geos_times(ace_dates):
+    """
+    Group ACE profiles by which GEOS FP files surround them
+
+    :param ace_dates: an array of ACE profile datetimes
+    :type ace_dates: array of datetimes
+
+    :return: a dictionary where the keys will be Pandas timestamps representing the time of the GEOS file preceding the
+     profiles in that group and the values are the indices of the profiles in that group as a numpy array.
+    :rtype: dict
+    """
+    def to_3hr(d):
+        return dt.datetime(d.year, d.month, d.day, to_3(d.hour))
+
+    def to_3(v):
+        return int(3*np.floor(v/3))
+
+    first_time = ace_dates.min()
+    last_time = ace_dates.max()
+
+    first_time = to_3hr(first_time)
+    last_time = to_3hr(last_time) + dt.timedelta(hours=3)
+
+    # Create the bins as floats so we can use numpy.digitize
+    ace_datenums = np.array([sat_utils.datetime2datenum(d) for d in ace_dates])
+    bin_edges = pd.date_range(first_time, last_time, freq='3H')
+    bin_edge_datenums = np.array([sat_utils.datetime2datenum(d) for d in bin_edges])
+
+    inds = np.digitize(ace_datenums, bin_edge_datenums) - 1
+    date_groups = dict()
+    for i in np.unique(inds):
+        date_groups[bin_edges[i]] = np.flatnonzero(inds == i)
+
+    return date_groups
+
+
+def _interp_geos_vars_to_ace_lat_lon(geos_file_path, geos_vars, ace_lon, ace_lat):
+    def interp_prof_helper(data, glat, glon, alat, alon, interp_inds):
+        profs_out = np.full([alat.size, data.shape[0]], np.nan)
+        for i, data_layer in enumerate(data):
+            # Reshape to nprofs-by-nlevels to be consistent with ACE
+            profs_out[:, i] = mm.lat_lon_interp(data_layer, glat, glon, alat, alon, interp_inds)
+
+        return profs_out
+
+    geos_data = dict()
+    geos_interp_inds = []
+    with ncdf.Dataset(geos_file_path) as nh:
+        geos_lon_half_res = 0.5 * float(nh.LongitudeResolution)
+        geos_lat_half_res = 0.5 * float(nh.LatitudeResolution)
+
+        for varname, scale in geos_vars.items():
+            # convert to 3D - remove singleton time dimension
+            geos_data[varname] = nh.variables[varname][0] * scale
+
+        for lon, lat in zip(ace_lon, ace_lat):
+            geos_interp_inds.append(mm.querry_indices(nh, lat, lon, geos_lat_half_res, geos_lon_half_res))
+
+        geos_lat = nh.variables['lat'][:]
+        geos_lon = nh.variables['lon'][:]
+
+        for varname, array in geos_data.items():
+            geos_data[varname] = interp_prof_helper(array, geos_lat, geos_lon, ace_lat, ace_lon, geos_interp_inds)
+
+    return geos_data
+
+
+def _interp_geos_vars_to_ace_times(ace_datetimes, geos_datetimes, geos_vars):
+    interped_vars = dict()
+    for ace_dt in ace_datetimes:
+        weight = sat_utils.time_weight_from_datetime(ace_dt, geos_datetimes[0], geos_datetimes[0])
+        for k in geos_vars[0].keys():
+            interped_vars[k] = weight * geos_vars[0][k] + (1 - weight) * geos_vars[1][k]
+
+    return interped_vars
+
