@@ -33,7 +33,8 @@ _fill_val = -999999
 _string_fill = b'N/A'
 
 
-def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
+def acos_interface_main(met_resampled_file, geos_files, output_file, mlo_co2_file=None, smo_co2_file=None,
+                        cache_strat_lut=False, nprocs=0):
     """
     The primary interface to create CO2 priors for the ACOS algorithm
 
@@ -48,7 +49,21 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     :param output_file: the path to where the priors (and related data) should be written as an HDF5 file.
     :type output_file: str
 
-    :return: None
+    :param mlo_co2_file: optional, the path to the Mauna Loa monthly CO2 flask data file. If not given (None), the
+     default file included in the repository is used.
+    :type mlo_co2_file: str or None
+
+    :param smo_co2_file: optional, the path to the American Samoa monthly CO2 flask data file. If not given (None), the
+     default file included in the repository is used.
+    :type smo_co2_file: str
+
+    :param cache_strat_lut: optional, set to ``True`` to enable the CO2 record instance to cache its stratospheric
+     concentration lookup table to avoid having to recalculate it each time. When ``True``, the CO2 record class will
+     determine if the LUT needs updated based on the state of the dependencies. When ``False`` (default), the LUT will
+     always be calculated from the MLO/SMO record and the age spectra and will never be saved.
+    :type cache_strat_lut: bool
+
+    :return: None, writes results to the HDF5 ``output_file``.
     """
     met_data = read_resampled_met(met_resampled_file)
 
@@ -68,7 +83,15 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     met_data['el'] = eqlat_array.reshape(orig_shape)
 
     # Create the CO2 priors
-    co2_record = tccon_priors.CO2TropicsRecord()
+    if cache_strat_lut:
+        regen_lut = None
+        save_lut = True
+    else:
+        regen_lut = True
+        save_lut = False
+
+    co2_record = tccon_priors.CO2TropicsRecord(mlo_file=mlo_co2_file, smo_file=smo_co2_file,
+                                               recalculate_strat_lut=regen_lut, save_strat=save_lut)
 
     # The keys here define the variable names that will be used in the HDF file. The values define the corresponding
     # keys in the output dictionaries from tccon_priors.generate_single_tccon_prior.
@@ -99,7 +122,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     gas_date_dec_years = [mod_utils.date_to_decimal_year(d) for d in profiles['gas_record_date'].flat]
     profiles['gas_record_date'] = np.array(gas_date_dec_years).reshape(profiles['gas_record_date'].shape)
     units['gas_record_date'] = 'Date as decimal year (decimal part = 0-based day-of-year / {})'.format(mod_constants.days_per_year)
-    
+
     # And update the stratum unit to be more descriptive
     units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
 
@@ -810,6 +833,20 @@ def parse_args(parser=None):
     parser.add_argument('output_file', help='The filename to give the output HDF5 file containing the CO2 profiles and '
                                             'any additional variables. Note that this path will be overwritten without '
                                             'any warning.')
+    parser.add_argument('--cache-strat-lut', action='store_true',
+                        help='Give this flag to turn on the ability of the code to cache the stratospheric CO2 lookup '
+                             'table rather than recalculating it each time this program is launched. Even when cached, '
+                             'the table will be recalculated if the code detects that the dependencies of the table '
+                             'have changed. If this is set, then the code must have permission to write to {}'
+                             .format(tccon_priors._data_dir))
+    parser.add_argument('--mlo-co2-file', default=None, help='Path to the Mauna Loa CO2 monthly flask file. Must be '
+                                                             'a file formatted with "# f_header_lines: n" as the first '
+                                                             'line (where n is some number) and the data as a space '
+                                                             'separated table where each line has four entries: site, '
+                                                             'year, month, and CO2 concentration in ppm. If this is '
+                                                             'given, it overrides --record-dir for the Mauna Loa file.')
+    parser.add_argument('--smo-co2-file', default=None, help='Path to the American Samoa CO2 monthly flask file. Same '
+                                                             'behavior and requirements as the Mauna Loa file.')
     parser.add_argument('-v', '--verbose', dest='log_level', default=0, action='count',
                         help='Increase logging verbosity')
     parser.add_argument('-q', '--quiet', dest='log_level', const=-1, action='store_const',
