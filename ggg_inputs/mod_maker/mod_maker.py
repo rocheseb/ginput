@@ -1073,7 +1073,7 @@ def equivalent_latitude_functions_from_geos_files(geos_np_files, geos_dates, mut
         lat_res = float(dataset.LatitudeResolution)
         lon_res = float(dataset.LongitudeResolution)
 
-    area = mod_utils.calculate_area(lat, lon, lat_res, lon_res)
+    area = mod_utils.calculate_area(lat, lon, lat_res, lon_res, muted=muted)
 
     # pre-compute pressure coefficients for calculating potential temperature, this is the (Po/P)^(R/Cp) term
     # TODO: test replacement with mod_utils potential temperature function
@@ -1130,7 +1130,7 @@ def equivalent_latitude_functions_from_native_geos_files(geos_nv_files, geos_dat
             # Get the area of each grid cell
             lat_res = float(dataset.LatitudeResolution)
             lon_res = float(dataset.LongitudeResolution)
-            area = mod_utils.calculate_area(lat, lon, lat_res, lon_res)
+            area = mod_utils.calculate_area(lat, lon, lat_res, lon_res, muted=muted)
 
         # The native 72-level geos files are ordered space-to-surface. The equivalent latitude calculation *may* be okay
         # with that, but I felt it was safer to just go ahead and flip them.

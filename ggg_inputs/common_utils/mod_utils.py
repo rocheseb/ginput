@@ -763,7 +763,7 @@ def _construct_grid(*part_defs):
 
 
 # Compute area of each grid cell and the total area
-def calculate_area(lat, lon, lat_res=None, lon_res=None):
+def calculate_area(lat, lon, lat_res=None, lon_res=None, muted=False):
     """
     Calculate grid cell area for an equirectangular grid.
 
@@ -803,8 +803,9 @@ def calculate_area(lat, lon, lat_res=None, lon_res=None):
             area[j, i] = np.deg2rad(lon_res)*np.abs(np.sin(Slat)-np.sin(Nlat))
 
     if abs(np.sum(area) - 4*np.pi) > 0.0001: # ensure proper normalization so the total area of Earth is 4*pi
-        print('Total earth area is {:g} not 4pi (difference of {:g}), normalizing to 4pi.'
-              .format(np.sum(area), np.sum(area) - 4*np.pi))
+        if not muted:
+            print('Total earth area is {:g} not 4pi (difference of {:g}), normalizing to 4pi.'
+                  .format(np.sum(area), np.sum(area) - 4*np.pi))
         area *= 4*np.pi/np.sum(area)
 
     return area

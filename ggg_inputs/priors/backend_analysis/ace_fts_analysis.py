@@ -542,10 +542,6 @@ def generate_ace_age_file(ace_in_file, age_file_out, geos_path, use_geos_theta_f
         ace_data['theta'] = read_ace_theta(nh, qflags=ace_qflags)
 
     date_groups = _bin_ace_to_geos_times(ace_data['dates'])
-    # Debugging only
-    dg_keys = list(date_groups.keys())
-    date_groups = OrderedDict([(k, date_groups[k]) for k in dg_keys[:4]])
-    # End debugging
 
     # Now we need to loop over the date groups and calculate the eq. lat. and age for each group (since each group
     # is the ace profiles in a 3 hour window bracketed by 2 GEOS files). There's usually only a few profiles per group,
@@ -583,11 +579,13 @@ def generate_ace_age_file(ace_in_file, age_file_out, geos_path, use_geos_theta_f
         for k in output_keys:
             ace_outputs[k][inds] = results[i][k]
 
-    save_ace_age_file(age_file_out, ('lon', 'lat', 'orbit', 'year', 'month', 'day', 'hour', 'quality_flag', 'temperature', 'pressure'),
+    save_ace_age_file(age_file_out, ('longitude', 'latitude', 'orbit', 'year', 'month', 'day', 'hour', 'quality_flag', 'temperature', 'pressure'),
                       ace_in_file, ace_outputs['EL'], ace_outputs['age'])
 
 
 def _calc_el_age_for_ace(ace_dates, ace_lon, ace_lat, ace_theta, geos_dates, geos_path, use_geos_theta_for_age=False):
+    date_str = ', '.join(d.strftime('%Y-%m-%d %H:%M') for d in ace_dates)
+    logger.info('Calculating eqlat and age for profiles on {}'.format(date_str))
     # Read in the GEOS data, calculating quantities as necessary #
     geos_vars = {'EPV': 1e6, 'T': 1.0}
 
@@ -601,7 +599,7 @@ def _calc_el_age_for_ace(ace_dates, ace_lon, ace_lat, ace_theta, geos_dates, geo
     geos_pres = np.tile(geos_pres.reshape(1, -1), [ace_lon.size, 1])
 
     # Generate the eq. lat. intepolators and find the eq. lat. profiles on the GEOS levels #
-    eqlat_interpolators = mm.equivalent_latitude_functions_from_geos_files(geos_files, geos_dates)
+    eqlat_interpolators = mm.equivalent_latitude_functions_from_geos_files(geos_files, geos_dates, muted=True)
     for i, geos_data in enumerate(geos_data_on_std_times):
         gdate = geos_dates[i]
         geos_data['PT'] = mod_utils.calculate_potential_temperature(geos_pres, geos_data['T'])
@@ -693,13 +691,13 @@ def _interp_geos_vars_to_ace_lat_lon(geos_file_path, geos_vars, ace_lon, ace_lat
 
         for varname, scale in geos_vars.items():
             # convert to 3D - remove singleton time dimension
-            geos_data[varname] = nh.variables[varname][0] * scale
+            geos_data[varname] = nh.variables[varname][0].filled(np.nan) * scale
 
         for lon, lat in zip(ace_lon, ace_lat):
             geos_interp_inds.append(mm.querry_indices(nh, lat, lon, geos_lat_half_res, geos_lon_half_res))
 
-        geos_lat = nh.variables['lat'][:]
-        geos_lon = nh.variables['lon'][:]
+        geos_lat = nh.variables['lat'][:].filled(np.nan)
+        geos_lon = nh.variables['lon'][:].filled(np.nan)
 
         for varname, array in geos_data.items():
             geos_data[varname] = interp_prof_helper(array, geos_lat, geos_lon, ace_lat, ace_lon, geos_interp_inds)
@@ -724,8 +722,12 @@ def save_ace_age_file(ace_out_file, vars_to_copy, orig_ace_file, eqlat, age):
     with ncdf.Dataset(orig_ace_file, 'r') as nhread, ncdf.Dataset(ace_out_file, 'w') as nhwrite:
         # Copy all the dimensions
         for dimname in nhread.dimensions.keys():
-            attributes = get_var_attrs(nhread, dimname)
-            ioutils.make_ncdim_helper(nhwrite, dimname, nhread.variables[dimname][:], **attributes)
+            try:
+                attributes = get_var_attrs(nhread, dimname)
+                ioutils.make_ncdim_helper(nhwrite, dimname, nhread.variables[dimname][:], **attributes)
+            except KeyError:
+                # Sometimes we get a dimension with no corresponding variable
+                nhwrite.createDimension(dimname, nhread.dimensions[dimname].size)
 
         # Copy all the requested variables
         for varname in vars_to_copy:
@@ -740,3 +742,6 @@ def save_ace_age_file(ace_out_file, vars_to_copy, orig_ace_file, eqlat, age):
         ioutils.make_ncvar_helper(nhwrite, 'age', age, dims, long_name='clams_age', units='years',
                                   description='Time in years since the air entered the stratosphere')
 
+        ioutils.add_creation_info(nhwrite, creation_note='ace_fts_analysis.generate_ace_age_file')
+        nhwrite.setncattr('template_ace_file', orig_ace_file)
+        ioutils.add_dependent_file_hash(nhwrite, 'template_ace_sha1', orig_ace_file)
