@@ -17,7 +17,7 @@ from multiprocessing import Pool
 import numpy as np
 import os
 
-from ..common_utils import mod_utils, ioutils
+from ..common_utils import mod_utils, ioutils, mod_constants
 from ..common_utils.sat_utils import time_weight, datetime2datenum
 from ..common_utils.ggg_logging import logger, setup_logger
 from ..mod_maker import mod_maker
@@ -73,7 +73,7 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     # The keys here define the variable names that will be used in the HDF file. The values define the corresponding
     # keys in the output dictionaries from tccon_priors.generate_single_tccon_prior.
     var_mapping = {'co2_prior': co2_record.gas_name, 'co2_record_latency': 'mean_latency', 'equivalent_latitude': 'EL',
-                   'gas_record_date': 'gas_date', 'atmospheric_stratum': 'atm_stratum',
+                   'gas_record_date': 'gas_date', 'atmospheric_stratum': 'atm_stratum', 'age_of_air': 'strat_age_of_air',
                    'altitude': 'Height', 'pressure': 'Pressure'}
     # This dictionary defines extra type information to create the output arrays. _make_output_profiles_dict uses it.
     # The keys should match those in var_mapping; any key from var_mapping that isn't in this one gets the default
@@ -95,8 +95,11 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, nprocs=0):
     profiles['sounding_latitude'] = met_data['latitude']
     units['sounding_latitude'] = 'degrees_north'
 
-    # Also need to convert the entry dates into strings to write to HDF 5.
-    profiles['gas_record_date'] = _convert_to_acos_time_strings(profiles['gas_record_date'])
+    # Also need to convert the entry dates into decimal years to write to HDF
+    gas_date_dec_years = [mod_utils.date_to_decimal_year(d) for d in profiles['gas_record_date'].flat]
+    profiles['gas_record_date'] = np.array(gas_date_dec_years).reshape(profiles['gas_record_date'].shape)
+    units['gas_record_date'] = 'Date as decimal year (decimal part = 0-based day-of-year / {})'.format(mod_constants.days_per_year)
+    
     # And update the stratum unit to be more descriptive
     units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
 
@@ -170,7 +173,7 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
             mod_data, obs_date, dt.timedelta(hours=0), co2_record,
         )
     except Exception as err:
-        raise err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding, i_foot))
+        raise err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
 
     # Convert the CO2 priors from ppm to dry mole fraction.
     priors_dict[co2_record.gas_name] *= 1e-6
