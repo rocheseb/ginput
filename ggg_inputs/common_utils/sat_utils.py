@@ -42,7 +42,9 @@ def time_weight(acos_datenum, prev_geos_datenum, next_geos_datenum):
      are the profiles at the GEOS times before and after the sounding, respectively.
     :rtype: float
     """
-    return (acos_datenum - prev_geos_datenum) / (next_geos_datenum - prev_geos_datenum)
+    # if acos_datenum == prev_geos_datenum, then this == 1 => p = 1*p1 + 0*p2 = p1
+    # if acos_datenum == next_geos_datenum, then this == 0 => p = 0*p1 + 1*p2 = p2
+    return (next_geos_datenum - acos_datenum) / (next_geos_datenum - prev_geos_datenum)
 
 
 def datetime2datenum(datetime_obj):
