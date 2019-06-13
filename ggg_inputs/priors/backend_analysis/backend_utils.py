@@ -64,6 +64,22 @@ def read_ace_date(ace_nc_handle, out_type=dt.datetime):
     return np.array(dates)
 
 
+def read_ace_latlon(ace_nc_handle, clip=True):
+    def clip_vec(v, span):
+        adj = span[1] - span[0]
+        v[v<span[0]] += adj
+        v[v>span[1]] -= adj
+        return v
+
+    lon = ace_nc_handle.variables['longitude'][:].filled(np.nan)
+    lat = ace_nc_handle.variables['latitude'][:].filled(np.nan)
+
+    if clip:
+        lon = clip_vec(lon, [-180.0, 180.0])
+        lat = clip_vec(lat, [-90.0, 90.0])
+
+    return lon, lat
+
 def read_ace_theta(ace_nc_handle, qflags=None):
     temperature = read_ace_var(ace_nc_handle, 'temperature', qflags=qflags)
     pressure = read_ace_var(ace_nc_handle, 'pressure', qflags=qflags) * 1013.25  # Pressure given in atm, need hPa

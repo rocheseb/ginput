@@ -17,7 +17,7 @@ from ...common_utils import mod_utils, ioutils, sat_utils
 from ...common_utils.ggg_logging import logger
 from .. import tccon_priors
 from ...mod_maker import mod_maker as mm
-from .backend_utils import read_ace_var, read_ace_date, read_ace_theta
+from .backend_utils import read_ace_var, read_ace_date, read_ace_theta, read_ace_latlon
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
 _tccon_top_alt = 65.0
@@ -537,8 +537,9 @@ def generate_ace_age_file(ace_in_file, age_file_out, geos_path, use_geos_theta_f
     with ncdf.Dataset(ace_in_file) as nh:
         ace_data['dates'] = read_ace_date(nh)
         ace_qflags = read_ace_var(nh, 'quality_flag', None)
-        ace_data['lon'] = read_ace_var(nh, 'longitude', None)
-        ace_data['lat'] = read_ace_var(nh, 'latitude', None)
+        # This wraps lons outside [-180,180] and lats outside [-90,90] into
+        # those ranges
+        ace_data['lon'], ace_data['lat'] = read_ace_latlon(nh, clip=True)
         ace_data['theta'] = read_ace_theta(nh, qflags=ace_qflags)
 
     date_groups = _bin_ace_to_geos_times(ace_data['dates'])
@@ -589,53 +590,57 @@ def _calc_el_age_for_ace(ace_dates, ace_lon, ace_lat, ace_theta, geos_dates, geo
     # Read in the GEOS data, calculating quantities as necessary #
     geos_vars = {'EPV': 1e6, 'T': 1.0}
 
-    geos_files = [os.path.join(geos_path, 'Np', mod_utils._format_geosfp_name('fpit', 'Np', d)) for d in geos_dates]
-    geos_data_on_std_times = []
-    for i, f in enumerate(geos_files):
-        geos_data_on_std_times.append(_interp_geos_vars_to_ace_lat_lon(f, geos_vars, ace_lon, ace_lat))
+    try:
+        geos_files = [os.path.join(geos_path, 'Np', mod_utils._format_geosfp_name('fpit', 'Np', d)) for d in geos_dates]
+        geos_data_on_std_times = []
+        for i, f in enumerate(geos_files):
+            geos_data_on_std_times.append(_interp_geos_vars_to_ace_lat_lon(f, geos_vars, ace_lon, ace_lat))
 
-    with ncdf.Dataset(geos_files[0]) as nh:
-        geos_pres = nh.variables['lev'][:]
-    geos_pres = np.tile(geos_pres.reshape(1, -1), [ace_lon.size, 1])
+        with ncdf.Dataset(geos_files[0]) as nh:
+            geos_pres = nh.variables['lev'][:]
+        geos_pres = np.tile(geos_pres.reshape(1, -1), [ace_lon.size, 1])
 
-    # Generate the eq. lat. intepolators and find the eq. lat. profiles on the GEOS levels #
-    eqlat_interpolators = mm.equivalent_latitude_functions_from_geos_files(geos_files, geos_dates, muted=True)
-    for i, geos_data in enumerate(geos_data_on_std_times):
-        gdate = geos_dates[i]
-        geos_data['PT'] = mod_utils.calculate_potential_temperature(geos_pres, geos_data['T'])
-        # Calculate the equivalent latitude profiles.
-        eqlat = np.full_like(geos_data['T'], np.nan)
-        for j in range(ace_lon.size):
-            eqlat[j, :] = mod_utils.get_eqlat_profile(eqlat_interpolators[gdate], geos_data['EPV'][j, :], geos_data['PT'][j, :])
-        geos_data['EL'] = eqlat
+        # Generate the eq. lat. intepolators and find the eq. lat. profiles on the GEOS levels #
+        eqlat_interpolators = mm.equivalent_latitude_functions_from_geos_files(geos_files, geos_dates, muted=True)
+        for i, geos_data in enumerate(geos_data_on_std_times):
+            gdate = geos_dates[i]
+            geos_data['PT'] = mod_utils.calculate_potential_temperature(geos_pres, geos_data['T'])
+            # Calculate the equivalent latitude profiles.
+            eqlat = np.full_like(geos_data['T'], np.nan)
+            for j in range(ace_lon.size):
+                eqlat[j, :] = mod_utils.get_eqlat_profile(eqlat_interpolators[gdate], geos_data['EPV'][j, :], geos_data['PT'][j, :])
+            geos_data['EL'] = eqlat
 
-    # Put the profiles onto the ACE times and levels #
-    geos_data_at_ace_times = _interp_geos_vars_to_ace_times(ace_dates, geos_dates, geos_data_on_std_times)
-    geos_data_on_ace_levels = dict()
-    for varname, geos_data in geos_data_at_ace_times.items():
-        ace_profiles = np.full_like(ace_theta, np.nan)
-        for i, profile in enumerate(geos_data):
-            # This is one case where I think we do not want to extrapolate because the ACE data spans much greater
-            # vertical extent than the GEOS data, so it can't be reliable
-            ace_profiles[i, :] = np.interp(ace_theta[i, :], geos_data_at_ace_times['PT'][i, :], geos_data[i, :],
-                                           left=np.nan, right=np.nan)
-        geos_data_on_ace_levels[varname] = ace_profiles
+        # Put the profiles onto the ACE times and levels #
+        geos_data_at_ace_times = _interp_geos_vars_to_ace_times(ace_dates, geos_dates, geos_data_on_std_times)
+        geos_data_on_ace_levels = dict()
+        for varname, geos_data in geos_data_at_ace_times.items():
+            ace_profiles = np.full_like(ace_theta, np.nan)
+            for i, profile in enumerate(geos_data):
+                # This is one case where I think we do not want to extrapolate because the ACE data spans much greater
+                # vertical extent than the GEOS data, so it can't be reliable
+                ace_profiles[i, :] = np.interp(ace_theta[i, :], geos_data_at_ace_times['PT'][i, :], geos_data[i, :],
+                                               left=np.nan, right=np.nan)
+            geos_data_on_ace_levels[varname] = ace_profiles
 
-    # Use the equivalent latitude and potential temperature profiles to look up CLAMS ages #
-    ace_age = np.full_like(ace_theta, np.nan)
-    for i in range(ace_lon.size):
-        if use_geos_theta_for_age:
-            theta_prof = geos_data_on_ace_levels['PT'][i, :]
-        else:
-            theta_prof = ace_theta[i, :]
+        # Use the equivalent latitude and potential temperature profiles to look up CLAMS ages #
+        ace_age = np.full_like(ace_theta, np.nan)
+        for i in range(ace_lon.size):
+            if use_geos_theta_for_age:
+                theta_prof = geos_data_on_ace_levels['PT'][i, :]
+            else:
+                theta_prof = ace_theta[i, :]
 
-        eqlat_prof = geos_data_on_ace_levels['EL'][i, :]
-        ace_doy = mod_utils.clams_day_of_year(ace_dates[i])
+            eqlat_prof = geos_data_on_ace_levels['EL'][i, :]
+            ace_doy = mod_utils.clams_day_of_year(ace_dates[i])
 
-        ace_age[i, :] = tccon_priors.get_clams_age(theta_prof, eqlat_prof, ace_doy)
+            ace_age[i, :] = tccon_priors.get_clams_age(theta_prof, eqlat_prof, ace_doy)
 
-    geos_data_on_ace_levels['age'] = ace_age
-    return geos_data_on_ace_levels
+        geos_data_on_ace_levels['age'] = ace_age
+        return geos_data_on_ace_levels
+    except Exception as err:
+        msg = 'Problem occurred in ACE profile group for dates {} (GEOS file date {}).'.format(date_str, geos_dates[0]) + err.args[0]
+        raise err.__class__(msg)
 
 
 def _bin_ace_to_geos_times(ace_dates):
