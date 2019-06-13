@@ -123,7 +123,8 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, mlo_co2_fil
     profiles['gas_record_date'] = np.array(gas_date_dec_years).reshape(profiles['gas_record_date'].shape)
     units['gas_record_date'] = 'Date as decimal year (decimal part = 0-based day-of-year / {})'.format(mod_constants.days_per_year)
 
-    # And update the stratum unit to be more descriptive
+    # And convert the stratum to a short integer and update the unit to be more descriptive
+    profiles['atmospheric_stratum'] = profiles['atmospheric_stratum'].astype(np.uint8)
     units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
 
     # Write the priors to the file requested.
@@ -176,7 +177,7 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
     units = {k: '' for k in var_mapping.keys()}
 
     if qflag != 0:
-        logger.info('Quality flag != for sounding group/footprint {}/{}. Skipping prior calculation'
+        logger.info('Quality flag != 0 for sounding group/footprint {}/{}. Skipping prior calculation'
                     .format(i_sounding + 1, i_foot + 1))
         return profiles, None
     elif obs_date < dt.datetime(1993, 1, 1):
@@ -576,7 +577,7 @@ def read_resampled_met(met_file):
         for out_var, (group_name, var_name) in var_dict.items():
             logger.debug('Reading {}/{}'.format(group_name, var_name))
             tmp_data = h5obj[group_name][var_name][:]
-            if np.issubdtype(tmp_data.dtype, np.number):
+            if np.issubdtype(tmp_data.dtype, np.floating):
                 tmp_data[tmp_data < _fill_val_threshold] = np.nan
             data_dict[out_var] = tmp_data
 
