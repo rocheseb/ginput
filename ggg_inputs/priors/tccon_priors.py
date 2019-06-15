@@ -216,6 +216,7 @@ class TraceGasTropicsRecord(object):
     # This sets the maximum degree of the polynomial used to fit and extend the MLO/SMO trends. Set to 1 to use linear,
     # 2 for quadratic, etc.
     _max_trend_poly_deg = 2
+    _nyears_for_extrap_avg = 10
     _max_safe_extrap_forward = relativedelta(years=5)
 
     # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
@@ -561,7 +562,9 @@ class TraceGasTropicsRecord(object):
         return gas_df
 
     @classmethod
-    def _extend_mlo_smo_mean(cls, df, direction, nyears=5):
+    def _extend_mlo_smo_mean(cls, df, direction, nyears=None, fit_type=None):
+        nyears = cls._nyears_for_extrap_avg if nyears is None else nyears
+
         xx = np.flatnonzero(df.interp_flag < 2)
         avg_period = relativedelta(years=nyears, months=-1)
         if direction == 'forward':
@@ -581,7 +584,7 @@ class TraceGasTropicsRecord(object):
         # Fit with a quadratic to allow for nonlinear increase
         x = dmf.index.to_julian_date().to_numpy()
         y = dmf.to_numpy()
-        fit = np.polynomial.polynomial.Polynomial.fit(x, y, deg=cls._max_trend_poly_deg)
+        fit = cls._fit_gas_trend(x, y, fit_type=fit_type)
 
         avg_dmf_detrended = np.nanmean((y - fit(x)).reshape(-1, 12), axis=0)
         months = dmf.index.month.to_numpy().reshape(-1, 12)
@@ -603,7 +606,34 @@ class TraceGasTropicsRecord(object):
         df.loc[to_fill, 'dmf_mean'] = fit(extrap_julian_dates) + delta_dmf
 
     @classmethod
-    def _check_extrap_fit(cls, df, fit, extrap_julian_dates, direction):
+    def _fit_gas_trend(cls, x, y, fit_type=None):
+        """
+        Creating a fitting function for the gas record.
+
+        :param x: dates for the concentrations in y, expressed in a numeric format.  These are typically expressed in
+         Julian days (i.e. days since noon, Jan 1 4713 BC, c.f. documentation for :func:`pandas.Timestamp.to_julian_date`)
+         but this function can accept any numerical representation. Note that this function in subclasses *may* expect
+         julian days in order to fit reliably.
+        :type x: :class:`numpy.ndarray`
+
+        :param y: concentrations corresponding to the dates in x.
+        :type y: :class:`numpy.ndarray`
+
+        :return:
+        """
+        fit_type = cls._max_trend_poly_deg if fit_type is None else fit_type
+        if fit_type == 'exp':
+            logger.debug('Using exponential fit to extrapolate {}'.format(cls.gas_name))
+            fit = np.polynomial.polynomial.Polynomial.fit(x, np.log(y), 1, w=np.sqrt(y))
+            return lambda t: np.exp(fit(t))
+
+        else:
+            logger.debug('Using order {} polynomial to extrapolate {}'.format(fit_type, cls.gas_name))
+            fit = np.polynomial.polynomial.Polynomial.fit(x, y, deg=fit_type)
+            return fit
+
+    @classmethod
+    def _check_extrap_fit(cls, df, fit, extrap_julian_dates, direction, fit_type=None):
         """
         Verify that any extrapolation of the MLO/SMO record was successful.
 
@@ -639,6 +669,11 @@ class TraceGasTropicsRecord(object):
                            '({end}). Likely okay, but consider updating the MLO/SMO {gas} record if possible.'
                            .format(time=mod_utils.relativedelta2string(cls._max_safe_extrap_forward), end=last_date,
                                    gas=cls.gas_name))
+
+        if fit_type == 'exp':
+            df_jdates = df.index.to_julian_date().to_numpy()
+            if fit(df_jdates[0]) > fit(df_jdates[-1]):
+                raise GasRecordExtrapolationError('{} exponential fit is not increasing'.format(cls.gas_name))
 
     @staticmethod
     def _make_lagged_df(df, lag):
@@ -943,7 +978,6 @@ class TraceGasTropicsRecord(object):
             # Also we make diag_inds instead of using np.diag b/c the latter doesn't work in >2 dimensions.
             diag_inds = tuple([np.arange(tmp_arr.level.size)]*tmp_arr.ndim)
             gas_by_region[region] = tmp_arr[diag_inds]
-        
 
         gas_conc = gas_by_region['midlat']
         doy = mod_utils.day_of_year(date) + 1  # most of the code from Arlyn Andrews assumes Jan 1 -> DOY = 1
@@ -1284,28 +1318,6 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
 
-    _max_trend_poly_deg = 2
-
-    @classmethod
-    def _check_extrap_fit(cls, df, fit, extrap_julian_dates, direction):
-        TraceGasTropicsRecord._check_extrap_fit(df, fit, extrap_julian_dates, direction)
-        # The input fit does not have its coefficients unscaled (which numpy does for numeric stability). We need to
-        # return the coefficients to their native values in order to compare the derivatives against the julian dates.
-        fit = fit.convert()
-
-        # First check that the fit is concave up - that matches the larger trend
-        if fit.deriv(2).coef.item() < 0:
-            raise GasRecordExtrapolationError('CO2 extrapolation fit is not concave up')
-
-        # Then make sure that we're not trying to extrapolate to any dates before the minimum in the quadratic,
-        # that would give a weird result
-        zero_jdate = np.polynomial.polynomial.polyroots(fit.deriv().coef).item()
-        zero_datestr = pd.to_datetime(zero_jdate, origin='julian', unit='D').strftime('%Y-%m-%d')
-        if np.any(extrap_julian_dates < zero_jdate):
-            raise GasRecordExtrapolationError('CO2 extrapolation attempting to go back before the minimum in the '
-                                              'quadratic ({}). This would result in CO2 increasing as we go back in '
-                                              'time, which is incorrect.'.format(zero_datestr))
-
 
 class N2OTropicsRecord(TraceGasTropicsRecord):
     gas_name = 'n2o'
@@ -1355,7 +1367,7 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.012
 
-    _max_trend_poly_deg = 1
+    _nyears_for_extrap_avg = 5
 
     _fn2o_fch4_lut_file = os.path.join(_data_dir, 'n2o_ch4_acefts.nc')
 
@@ -1392,16 +1404,21 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
             for j in range(fch4_lut.shape[0]):
                 fch4_lut[j, :] = replace_end_nans(fch4_lut[j, :])
 
-            # Interpolate the F(CH4) remaining to the F(N2O) for each age, then replace the F(N2O) coordinate with the
-            # age one.
-            # need to use fn2o.data b/c the theta coordinates are different
-            fch4_lut = fch4_lut.interp(fn2o=fn2o.data, kwargs={'fill_value': 'extrapolate'})
-            # I couldn't find a way to rename one of the coordinates, so I think we have to create a new DataArray
-            fch4_lut = xr.DataArray(fch4_lut.data, coords=[('age', ages), ('theta', fch4_lut.theta)])
-            # Fill in NaNs along each theta line
-            fch4_lut = fch4_lut.interpolate_na('theta')
+            # Now that F(N2O) has both age and theta as axes, we need to deal with that. Unfortunately, we can't handle
+            # the interpolation along both axes in one shot, so we need to iterate over the theta values that we want
+            # the F(CH4) LUT to have, interpolate F(N2O) to those to get a vector with the same length as ages, then
+            # interpolate each theta row of F(CH4) to the F(N2O) values for each age.
+            fch4_lut_final = xr.DataArray(np.full([np.size(ages), np.size(fch4_lut.theta)], np.nan),
+                                          coords=[ages, fch4_lut.theta], dims=('age', 'theta'))
+            for itheta, this_theta in enumerate(fch4_lut.theta):
+                this_fn2o = fn2o.interp(theta=this_theta, kwargs={'fill_value': 'extrapolate'})
+                this_fch4 = fch4_lut[{'theta': itheta}]
+                fch4_lut_final[{'theta': itheta}] = this_fch4.interp(fn2o=this_fn2o, kwargs={'fill_value': 'extrapolate'})
 
-        return fch4_lut
+            # Fill in NaNs along each theta line
+            fch4_lut_final = fch4_lut_final.interpolate_na('theta')
+
+        return fch4_lut_final
 
 
 class COTropicsRecord(TraceGasTropicsRecord):
