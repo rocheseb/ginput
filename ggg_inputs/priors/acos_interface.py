@@ -620,7 +620,6 @@ def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_
     with h5py.File(output_file, 'w') as h5obj:
         h5obj.attrs['geos_files'] = ','.join(os.path.abspath(f) for f in geos_files)
         h5obj.attrs['resampler_file'] = os.path.abspath(resampler_file)
-        h5obj.attrs['creation_info'] = ioutils.make_creation_info(output_file, 'acos_interface.acos_interface_main')
         h5grp = h5obj.create_group('priors')
         for var_name, var_data in profile_variables.items():
             # Replace NaNs with numeric fill values
