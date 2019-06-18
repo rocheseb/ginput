@@ -720,11 +720,9 @@ class TraceGasTropicsRecord(object):
         for region in cls.age_spec_regions:
             time, delt, age, spectra = cls._load_age_spectrum_data(region, normalize_spectra=True)
 
-            # Get the fraction remaining on the same ages as the age spectra are defined
-            fgas = cls.get_frac_remaining_by_age(time.values.squeeze())
-
             # Add a zero age to the beginning of age
             age = np.concatenate([[0], age.to_numpy().squeeze()])
+            fgas = cls.get_frac_remaining_by_age(age)
             theta = fgas.theta
 
             n_dates = out_dates.size
@@ -772,13 +770,7 @@ class TraceGasTropicsRecord(object):
                     # We want the kernel reversed because the trace gas records are defined from old to new, while the
                     # age spectra are from new to old. Therefore, we need to reverse the spectra before convolving to
                     # actually put both in the same direction.
-                    #
-                    # We also multiply the age spectra by the fraction of gas remaining at a given age. For something
-                    # like CO2 that is not lost in the stratosphere, this will just be 1s, but for N2O, CH4, etc. that
-                    # have loss then as we get to older air we also need to reduce MLO/SMO average to the fraction
-                    # remaining to accurately represent the concentration in that air mass.
-                    conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(),
-                                              spectra.iloc[ispec, :].values * fgas[:, itheta].squeeze(),
+                    conv_result = np.convolve(df_asi['dmf_mean'].values.squeeze(), spectra.iloc[ispec, :].values,
                                               mode='valid')
                     if conv_dates is None:
                         conv_dates = new_index[(spectra.shape[1] - 1):]
@@ -799,7 +791,11 @@ class TraceGasTropicsRecord(object):
 
                     # And store this result in the output data frame, remembering that we added an extra row at the
                     # beginning for zero age air, and again using broadcasting.
-                    out_array[:, ispec+1, itheta] = this_out_df.reindex(out_dates).to_numpy().squeeze()
+                    #
+                    # We also deal with adding in any chemical loss here because we determine chemical loss from ACE
+                    # data with respect to the mean age of the air, therefore we need to lookup the fraction remaining
+                    # for that mean age, rather than apply it in the same convolution as the age spectra.
+                    out_array[:, ispec+1, itheta] = this_out_df.reindex(out_dates).to_numpy().squeeze() * fgas.isel(age=ispec, theta=itheta).item()
 
             gas_conc[region] = out_array
 
@@ -2284,8 +2280,8 @@ def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None,
     else:
         geos_prof_data['EL'] = np.full_like(geos_prof_data['PT'], np.nan)
 
-    # Third, pass each column to as a mod file-like dictionary, passing it to generate_single_tccon_prior, and storing the
-    # result in a CO2 array.
+    # Third, pass each column to as a mod file-like dictionary, passing it to generate_single_tccon_prior, and storing
+    # the result in a CO2 array.
     ntimes, nlev, nlat, nlon = geos_prof_data['H'].shape
     prior_kwargs.update({'use_eqlat_strat': use_eqlat_strat, 'write_map': False, 'use_geos_grid': True})
 
