@@ -102,12 +102,13 @@ def match_ace_prior_profiles(prior_dirs, ace_dir, specie, match_alt=True, prior_
     prior_datetimes = np.array(prior_datetimes)
 
     # Read in the ACE data, interpolating to the profile altitudes if requested
-    ace_profiles, ace_alts, ace_datetimes = get_matching_ace_profiles(prior_lons, prior_lats, prior_dates, ace_dir,
-                                                                      specie, alt=prior_alts if match_alt else None,
-                                                                      ace_var=ace_var)
+    ace_profiles, ace_prof_errs, ace_alts, ace_datetimes = get_matching_ace_profiles(prior_lons, prior_lats, prior_dates, ace_dir,
+                                                                                     specie, alt=prior_alts if match_alt else None,
+                                                                                     ace_var=ace_var)
 
     return {'priors': priors, 'prior_alts': prior_alts, 'prior_datetimes': prior_datetimes, 'prior_zs': prior_zs,
-            'ace_profiles': ace_profiles, 'ace_alts': ace_alts, 'ace_datetimes': ace_datetimes}
+            'ace_profiles': ace_profiles, 'ace_prof_errors': ace_prof_errs, 'ace_alts': ace_alts,
+            'ace_datetimes': ace_datetimes}
 
 
 def _find_matching_ace_profile(this_lon, this_lat, this_date, ace_lons, ace_lats, ace_dates):
@@ -171,6 +172,7 @@ def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_v
 
     ace_file = butils.find_ace_file(ace_dir, specie)
 
+    ace_error_var = '{}_error'.format(specie.upper()) if ace_var is None else None
     ace_var = specie.upper() if ace_var is None else ace_var
 
     with ncdf.Dataset(ace_file, 'r') as nch:
@@ -184,34 +186,42 @@ def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_v
         else:
             try:
                 ace_profiles = butils.read_ace_var(nch, ace_var, ace_qflags)
+                ace_prof_error = butils.read_ace_var(nch, ace_error_var, ace_qflags)
             except IndexError:
                 # If trying to read a 1D variable, then we can't quality filter b/c the quality flags are 2D. But 1D
                 # variables are always coordinates, so they don't need filtering.
                 ace_profiles = butils.read_ace_var(nch, ace_var, None)
+                ace_prof_error = np.full(ace_profiles.shape, np.nan)
 
-    # Expand the ACE var if 1D
+    # Expand the ACE var if 1D.
     if ace_profiles.ndim == 1:
         if ace_profiles.size == ace_qflags.shape[0]:
             ace_profiles = np.tile(ace_profiles.reshape(-1, 1), [1, ace_qflags.shape[1]])
+            ace_prof_error = np.tile(ace_prof_error.shape(-1, 1), [1, ace_qflags.shape[1]])
         else:
             ace_profiles = np.tile(ace_profiles.reshape(1, -1), [ace_qflags.shape[0], 1])
+            ace_prof_error = np.tile(ace_prof_error.reshape(1, -1), [ace_qflags.shape[0], 1])
 
     n_profs = np.size(lon)
     n_out_levels = np.shape(alt)[1] if interp_to_alt else np.size(ace_alts)
     out_profiles = np.full([n_profs, n_out_levels], np.nan)
+    out_prof_errors = np.full([n_profs, n_out_levels], np.nan)
     out_datetimes = np.full([n_profs], None)
 
     for idx, (this_lon, this_lat, this_date, this_alt) in enumerate(zip(lon, lat, date, alt)):
         xx = _find_matching_ace_profile(this_lon, this_lat, this_date, ace_lons, ace_lats, ace_dates)
 
         this_prof = ace_profiles[xx, :]
+        this_prof_error = ace_prof_error[xx, :]
         if interp_to_alt:
             this_prof = np.interp(this_alt, ace_alts, this_prof.squeeze())
+            this_prof_error = np.interp(this_alt, ace_alts, this_prof_error.squeeze())
 
         out_profiles[idx, :] = this_prof
+        out_prof_errors[idx, :] = this_prof_error
         out_datetimes[idx] = ace_dates[xx]
 
     if not interp_to_alt:
         alt = np.tile(ace_alts.reshape(1, -1), [n_profs, 1])
 
-    return out_profiles, alt, out_datetimes
+    return out_profiles, out_prof_errors, alt, out_datetimes

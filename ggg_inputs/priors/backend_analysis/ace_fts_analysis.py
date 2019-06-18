@@ -416,7 +416,7 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
     bottom_pt = 360
     top_pt = 390
 
-    def _get_bc_per_profile(dates, concentration, pt):
+    def _get_bc_per_profile(dates, concentration, pt, lat):
         bc_conc = np.full([concentration.shape[0]], np.nan)
         for i, (conc_row, pt_row) in enumerate(zip(concentration, pt)):
             zz = (pt_row > bottom_pt) & (pt_row < top_pt)
@@ -426,12 +426,14 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
 
         return bc_conc
 
-    def _get_bc_by_fit(dates, concentration, pt):
+    def _get_bc_by_fit(dates, concentration, pt, lat):
         datenums = np.full_like(concentration, np.nan)
         datenums[:] = np.array([np.datetime64(d) for d in dates]).reshape(-1, 1)
-        in_pt = (theta > 360) & (theta < 390)
-        bc_concs = concentration[in_pt]
-        bc_datenums = datenums[in_pt]
+        in_pt = (pt > 360) & (pt < 390)
+        in_tropics = mod_utils.is_tropics(lat, None, None)
+        in_both = in_pt & in_tropics.reshape(-1, 1)
+        bc_concs = concentration[in_both]
+        bc_datenums = datenums[in_both]
         not_outliers = ~mod_utils.isoutlier(bc_concs, m=5)
         not_nans = ~np.isnan(bc_datenums) & ~np.isnan(bc_concs)
         xx = not_outliers & not_nans
@@ -440,6 +442,7 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
 
     with ncdf.Dataset(nc_file, 'r') as nch:
         alt = read_ace_var(nch, 'altitude', qflags=None)
+        latitude = read_ace_var(nch, 'latitude', qflags=None)
         ace_dates = read_ace_date(nch)
         qflags = read_ace_var(nch, 'quality_flag', qflags=None)
 
@@ -456,7 +459,7 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
     else:
         raise ValueError('bc_approach must be "per-profile" or "fit"')
 
-    bc_concentrations = bc_fxn(ace_dates, gas_conc, theta)
+    bc_concentrations = bc_fxn(ace_dates, gas_conc, theta, latitude)
     fgas = gas_conc / bc_concentrations.reshape(-1, 1)
     fgas[theta < 380] = np.nan
 
