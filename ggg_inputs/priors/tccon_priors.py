@@ -1409,7 +1409,10 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
             for itheta, this_theta in enumerate(fch4_lut.theta):
                 this_fn2o = fn2o.interp(theta=this_theta, kwargs={'fill_value': 'extrapolate'})
                 this_fch4 = fch4_lut[{'theta': itheta}]
-                fch4_lut_final[{'theta': itheta}] = this_fch4.interp(fn2o=this_fn2o, kwargs={'fill_value': 'extrapolate'})
+                # Use constant value extrapolation past the edge of the FN2O values in the LUT. Doing this rather than
+                # linear extrapolation prevents undershooting the F(CH4) at high theta.
+                fill_values = (this_fch4[0], this_fch4[-1])
+                fch4_lut_final[{'theta': itheta}] = this_fch4.interp(fn2o=this_fn2o, kwargs={'fill_value': fill_values})
 
             # Fill in NaNs along each theta line
             fch4_lut_final = fch4_lut_final.interpolate_na('theta')
