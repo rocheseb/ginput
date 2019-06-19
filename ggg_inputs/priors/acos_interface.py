@@ -118,6 +118,10 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, mlo_co2_fil
     profiles['sounding_latitude'] = met_data['latitude']
     units['sounding_latitude'] = 'degrees_north'
 
+    # Convert the CO2 from ppm to dry mole fraction
+    profiles['co2_prior'] *= 1e-6
+    units['co2_prior'] = 'dmf'
+
     # Also need to convert the entry dates into decimal years to write to HDF
     gas_date_dec_years = [mod_utils.date_to_decimal_year(d) for d in profiles['gas_record_date'].flat]
     profiles['gas_record_date'] = np.array(gas_date_dec_years).reshape(profiles['gas_record_date'].shape)
@@ -198,10 +202,6 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
         )
     except Exception as err:
         raise err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
-
-    # Convert the CO2 priors from ppm to dry mole fraction.
-    priors_dict[co2_record.gas_name] *= 1e-6
-    priors_units[co2_record.gas_name] = 'dmf'
 
     for h5_var, tccon_var in var_mapping.items():
         # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
