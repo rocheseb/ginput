@@ -30,7 +30,7 @@ def _bin_centers(bins):
 _std_age_bins = np.arange(0.0, 10.0, 0.25)
 _std_age_bin_centers = _bin_centers(_std_age_bins)
 _std_frac_bins = np.arange(0.0, 1.05, 0.05)
-_std_frac_bin_centers = _bin_centers(_std_age_bins)
+_std_frac_bin_centers = _bin_centers(_std_frac_bins)
 _std_theta_bins = np.concatenate([np.arange(380, 1080, 50), np.arange(1080, 1680, 100), np.arange(1680, 3680, 200)])
 _std_theta_bin_centers = _bin_centers(_std_theta_bins)
 
@@ -74,11 +74,16 @@ def make_fn2o_lookup_table(ace_age_file, ace_n2o_file, lut_save_file):
                    theta_bin_centers, theta_bins, ace_n2o_file)
 
 
-def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
+def make_fch4_fn2o_lookup_table(ace_age_file, ace_n2o_file, ace_ch4_file, lut_save_file):
     logger.info('Reading ACE data')
-    ace_alt, ace_fn2o, ace_theta, _ = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', bc_approach='fit')
+    ace_alt, ace_fn2o, ace_theta, extra_info = calc_fraction_remaining_from_acefts(ace_n2o_file, 'N2O', bc_approach='fit')
+    ace_dates = extra_info['dates']
+    ace_doy = np.array([int(mod_utils.clams_day_of_year(date)) for date in ace_dates.flat]).reshape(ace_dates.shape)
 
-    _, ace_fch4, _ = calc_fraction_remaining_from_acefts(ace_ch4_file, 'CH4', bc_approach='fit')
+    _, ace_fch4, _, _ = calc_fraction_remaining_from_acefts(ace_ch4_file, 'CH4', bc_approach='fit')
+
+    with ncdf.Dataset(ace_age_file, 'r') as nch:
+        ace_age = nch.variables['age'][:].filled(np.nan)
 
     with ncdf.Dataset(ace_ch4_file, 'r') as nch:
         ace_ch4_raw = nch.variables['CH4'][:].filled(np.nan)
@@ -88,8 +93,10 @@ def make_fch4_fn2o_lookup_table(ace_n2o_file, ace_ch4_file, lut_save_file):
     # We're looking for reliable stratospheric relationships. Therefore we limit to data where the concentration is
     # positive and definitely not tropospheric (CH4 < 2e-6 i.e. < 2000 ppb), not in the polar vortex (abs(lat) < 50)
     # and not in the mesosphere or upper stratosphere (alt < 40).
+    ace_lat = np.tile(ace_lat[:, np.newaxis], [1, ace_age.shape[1]])
+    ace_doy = np.tile(ace_doy[:, np.newaxis], [1, ace_age.shape[1]])
     xx = ~np.isnan(ace_fch4) & ~np.isnan(ace_fn2o) & (ace_fch4 >= 0) & (ace_fn2o >= 0) & (ace_ch4_raw < 2e-6) & \
-         (np.abs(ace_lat[:, np.newaxis]) < 50) & (ace_alt[np.newaxis, :] < _tccon_top_alt)
+         ~mod_utils.is_vortex(ace_lat, ace_doy, ace_age) & (ace_alt[np.newaxis, :] < _tccon_top_alt)
 
     # Define bins for F(N2O) and theta
     fn2o_bins = _std_frac_bins
