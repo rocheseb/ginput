@@ -3,7 +3,7 @@ import argparse
 
 from ggg_inputs.priors import acos_interface as aci
 from ggg_inputs.mod_maker import mod_maker
-
+from ggg_inputs.download import get_GEOS5
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Call various pieces of ggg_inputs')
@@ -14,6 +14,9 @@ def parse_args():
 
     mm_parser = subparsers.add_parser('mod', help='Generate .mod (model) files for GGG')
     mod_maker.parse_args(mm_parser)
+
+    get_g5_parser = subparsers.add_parser('getg5', help='Download GEOS5 FP or FP-IT data')
+    get_GEOS5.parse_args(get_g5_parser)
 
     return vars(parser.parse_args())
 

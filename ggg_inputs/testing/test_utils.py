@@ -106,7 +106,7 @@ def download_test_geos_data(rebuild=False, rebuild_hash_only=False):
         if os.path.exists(os.path.join(geos_fp_dir, 'Nx')):
             shutil.rmtree(os.path.join(geos_fp_dir, 'Nx'))
 
-        get_GEOS5.driver(start=test_date, end=test_date+dt.timedelta(days=1), mode='FP', path=geos_fp_dir)
+        get_GEOS5.driver(date_range=[test_date, test_date+dt.timedelta(days=1)], mode='FP', path=geos_fp_dir)
 
     if rebuild or rebuild_hash_only:
         surf_files = glob(os.path.join(geos_fp_dir, 'Nx', 'GEOS*.nc4'))

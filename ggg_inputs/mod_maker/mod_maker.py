@@ -1845,7 +1845,6 @@ def driver(date_range, GEOS_path, save_path=None, keep_latlon_prec=False, save_i
            slant=False, alt=None, lon=None, lat=None, site_abbrv=None, **kwargs):
 
     start_date, end_date = date_range
-    import pdb; pdb.set_trace()
     func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
                                                    muted=muted)
 

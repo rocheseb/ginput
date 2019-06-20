@@ -106,8 +106,15 @@ def _parse_file_types(clinput):
     return types
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Download GEOSFP or GEOSFP-IT reanalysis met data')
+def parse_args(parser=None):
+    description = 'Download GEOSFP or GEOSFP-IT reanalysis met data'
+    if parser is None:
+        parser = argparse.ArgumentParser(description=description)
+        am_i_main = True
+    else:
+        parser.description = description
+        am_i_main = False
+
     parser.add_argument('date_range', type=dlutils.parse_date_range_no_hm, help=dlutils.date_range_cl_help(False))
     parser.add_argument('--mode', choices=list(_func_dict.keys()), default='FP',
                         help='Which GEOS product to get. The default is %(default)s. Note that to retrieve FP-IT data '
@@ -118,15 +125,20 @@ def parse_args():
     parser.add_argument('-t', '--filetypes', default=_file_types, type=_parse_file_types,
                         help='Which file types to download. Default is to download 2D and 3D met files, and 3D chem '
                              'files. Pass a comma separated list of {} to change this'.format(', '.join(_file_types)))
-    args = vars(parser.parse_args())
 
-    # Go ahead and separate out the two parts of the date range so this dictionary can be used directly for keyword
-    # arguments to the driver function
-    args['start'], args['end'] = args['date_range']
-    return args
+    if am_i_main:
+        args = vars(parser.parse_args())
+
+        # Go ahead and separate out the two parts of the date range so this dictionary can be used directly for keyword
+        # arguments to the driver function
+        args['start'], args['end'] = args['date_range']
+        return args
+    else:
+        parser.set_defaults(driver_fxn=driver)
 
 
-def driver(start, end, mode='FP', path='.', filetypes=_file_types, **kwargs):
+def driver(date_range, mode='FP', path='.', filetypes=_file_types, **kwargs):
+    start, end = date_range
     for ftype in filetypes:
         outpath = os.path.join(path, _std_out_paths[ftype])
         if not os.path.exists(outpath):
