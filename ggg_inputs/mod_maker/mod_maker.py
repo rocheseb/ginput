@@ -934,7 +934,7 @@ def equivalent_latitude_functions(ncdf_path,mode,start=None,end=None,muted=False
 
     return func_dict
 
-def parse_args(argu=sys.argv):
+def parse_args(parser=None):
     """
     parse commandline arguments (see code header or README.md)
     """
@@ -958,7 +958,14 @@ def parse_args(argu=sys.argv):
     # For Py3 compatibility, convert keys iterator into an explicit list.
     valid_site_ids = list(site_dict.keys())
 
-    parser = argparse.ArgumentParser(description='Generate TCCON .mod files')
+    description = 'Generate TCCON .mod files'
+    if parser is None:
+        parser = argparse.ArgumentParser(description=description)
+        am_i_main = True
+    else:
+        parser.description = description
+        am_i_main = False
+
     parser.add_argument('date_range', type=parse_date_range,
                         help='The range of dates to generate .mod files for. May be given as YYYYMMDD-YYYYMMDD, or '
                              'YYYYMMDD_HH-YYYYMMDD_HH, where the ending date is exclusive. A single date may be given, '
@@ -969,7 +976,8 @@ def parse_args(argu=sys.argv):
                                                   'site, and vertical/slant .mod files will be created. If not given, '
                                                   'will attempt to save files under $GGGPATH/models/gnd')
     parser.add_argument('--keep-latlon-prec', action='store_true', help='Retain lat/lon to 2 decimals in the .mod file names')
-    parser.add_argument('--save-in-utc', action='store_true', help='Use UTC time in .mod file name, instead of local')
+    parser.add_argument('--save-in-local', action='store_false', dest='save_in_utc',
+                        help='Use local time in .mod file name, instead of UTC')
     parser.add_argument('-q', '--quiet', dest='muted', action='store_true', help='Suppress log output to command line.')
     parser.add_argument('--slant', action='store_true', help='Generate slant .mod files, in addition to vertical .mod '
                                                              'files.')
@@ -981,19 +989,22 @@ def parse_args(argu=sys.argv):
                                                                                   'Providing this will produce .mod '
                                                                                   'files only for that site.')
 
-    arg_dict = vars(parser.parse_args())
+    if am_i_main:
+        arg_dict = vars(parser.parse_args())
 
-    # Error checking and some splitting of variables
-    arg_dict['start_date'], arg_dict['end_date'] = arg_dict['date_range']
-    if arg_dict['end_date'] < arg_dict['start_date']:
-        shell_error('Error: end of date range (if given) must be after the start')
-    if not os.path.exists(arg_dict['GEOS_path']):
-        shell_error('Given GEOS data path ({}) does not exist'.format(arg_dict['GEOS_path']))
+        # Error checking and some splitting of variables
+        arg_dict['start_date'], arg_dict['end_date'] = arg_dict['date_range']
+        if arg_dict['end_date'] < arg_dict['start_date']:
+            shell_error('Error: end of date range (if given) must be after the start')
+        if not os.path.exists(arg_dict['GEOS_path']):
+            shell_error('Given GEOS data path ({}) does not exist'.format(arg_dict['GEOS_path']))
 
-    return arg_dict
+        return arg_dict
+    else:
+        parser.set_defaults(driver_fxn=driver)
 
 
-def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=False):
+def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=True):
 
     YYYYMMDD = date.strftime('%Y%m%d')
     HHMM = date.strftime('%H%M')
@@ -1212,7 +1223,7 @@ def show_interp(data,x,y,interp_data,ilev):
     pl.colorbar()
     pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,save_path=None,keep_latlon_prec=False,save_in_utc=False,**kwargs):
+def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,save_path=None,keep_latlon_prec=False,save_in_utc=True,**kwargs):
     """
     This code only works with GEOS-5 FP-IT data.
     It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1830,13 +1841,19 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
         print(len(local_date_list),'mod files written')
 
 
-def driver(start_date, end_date, GEOS_path, save_path=None, keep_latlon_prec=False, save_in_utc=False, muted=False,
+def driver(date_range, GEOS_path, save_path=None, keep_latlon_prec=False, save_in_utc=True, muted=False,
            slant=False, alt=None, lon=None, lat=None, site_abbrv=None, **kwargs):
+
+    start_date, end_date = date_range
+    import pdb; pdb.set_trace()
     func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
                                                    muted=muted)
+
     mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=GEOS_path, slant=slant,
                   locations=site_dict, muted=muted, lat=lat, lon=lon, alt=alt, site_abbrv=site_abbrv,
                   save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc)
+
+
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
 
     arguments = parse_args()

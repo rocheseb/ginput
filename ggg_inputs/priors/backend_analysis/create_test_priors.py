@@ -112,7 +112,7 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir):
         else:
             print('One or more files for {} at {}/{} needs generated, proceeding'.format(dates, lon, lat))
 
-        mod_maker.driver(start_date, end_date, geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
+        mod_maker.driver([start_date, end_date], geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
                          lon=lon, lat=lat, alt=0.0)
 
 

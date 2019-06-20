@@ -2,6 +2,7 @@
 import argparse
 
 from ggg_inputs.priors import acos_interface as aci
+from ggg_inputs.mod_maker import mod_maker
 
 
 def parse_args():
@@ -10,6 +11,9 @@ def parse_args():
 
     aci_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the OCO/GOSAT algorithm')
     aci.parse_args(aci_parser)
+
+    mm_parser = subparsers.add_parser('mod', help='Generate .mod (model) files for GGG')
+    mod_maker.parse_args(mm_parser)
 
     return vars(parser.parse_args())
 

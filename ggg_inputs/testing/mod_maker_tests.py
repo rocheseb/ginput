@@ -20,7 +20,7 @@ class TestModMaker(unittest.TestCase):
         test_utils.download_test_geos_data()
 
         # Run mod_maker for the standard test site
-        mmdriver(test_utils.test_date, test_utils.test_date+dt.timedelta(days=1), test_utils.geos_fp_dir,
+        mmdriver([test_utils.test_date, test_utils.test_date+dt.timedelta(days=1)], test_utils.geos_fp_dir,
                  save_path=test_utils.mod_output_top_dir, keep_latlon_prec=True, save_in_utc=True, site_abbrv=test_utils.test_site)
 
         # Instantiate the necessary trace gas records
