@@ -1,4 +1,5 @@
 from datetime import datetime
+from copy import deepcopy
 
 """
 site_dict is a dictionary mapping TCCON site abbreviations to their lat-lon-alt data, and full names
@@ -58,22 +59,39 @@ site_dict = {
     'zs':{'name':'Zugspitze','loc':'Germany','lat':47.42,'lon':10.98,'alt':34.5},
 }
 
-def tccon_site_info(site_dict):
+
+def tccon_site_info(site_dict_in=None):
     """
     Takes the site_dict dictionary and adds longitudes in the [-180,180] range
     """
+    if site_dict_in is None:
+        site_dict_in = site_dict
 
-    for site in site_dict:
-        if 'time_spans' in site_dict[site].keys():
-            for time_span in site_dict[site]['time_spans']:
-                if site_dict[site]['time_spans'][time_span]['lon']>180:
-                    site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']-360
+    site_dict_in = deepcopy(site_dict_in)
+
+    for site in site_dict_in:
+        if 'time_spans' in site_dict_in[site].keys():
+            for time_span in site_dict_in[site]['time_spans']:
+                if site_dict_in[site]['time_spans'][time_span]['lon']>180:
+                    site_dict_in[site]['time_spans'][time_span]['lon_180'] = site_dict_in[site]['time_spans'][time_span]['lon'] - 360
                 else:
-                    site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']
+                    site_dict_in[site]['time_spans'][time_span]['lon_180'] = site_dict_in[site]['time_spans'][time_span]['lon']
         else:
-            if site_dict[site]['lon']>180:
-                site_dict[site]['lon_180'] = site_dict[site]['lon']-360
+            if site_dict_in[site]['lon']>180:
+                site_dict_in[site]['lon_180'] = site_dict_in[site]['lon'] - 360
             else:
-                site_dict[site]['lon_180'] = site_dict[site]['lon']
+                site_dict_in[site]['lon_180'] = site_dict_in[site]['lon']
 
-    return site_dict
+    return site_dict_in
+
+
+def tccon_site_info_for_date(date):
+    new_site_dict = tccon_site_info()
+    for site, info in new_site_dict.items():
+        if 'time_spans' in info:
+            time_spans = info.pop('time_spans')
+            for date_range, values in time_spans.items():
+                if date_range[0] <= date < date_range[1]:
+                    info.update(values)
+                    break
+    return new_site_dict
