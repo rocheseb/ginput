@@ -534,40 +534,18 @@ def read_data(dataset, varlist, lat_lon_box=0):
 
     return DATA
 
+def nearest(array,value):
+    """
+    return index of element in array that is closest to value
+    """
+    array = np.asarray(array)
+    idx = (np.abs(array - value)).argmin()
+    return idx
+
 def querry_indices(dataset,site_lat,site_lon_180,box_lat_half_width,box_lon_half_width):
     """
-    Set up a lat-lon box for the data querry
-
-    Unlike with ncep, this will only use 3-hourly files for interpolation, so no time box is defined
-
-    NOTE: merra lat -90 -> +90 ;  merra lon -180 -> +179.375
-
-    To be certain to get two points on both side of the site lat and lon, use the grid resolution
+    Get the lat/lon IDs of the grid cell that contain the site lat/lon
     """
-    # define 2xbox_lat_half_width°x2xbox_lon_half_width° lat-lon box centered on the site lat-lon
-    min_lat, max_lat = site_lat-box_lat_half_width, site_lat+box_lat_half_width
-    min_lon, max_lon = site_lon_180-box_lon_half_width, site_lon_180+box_lon_half_width
-
-    # handle edge cases
-    if min_lat < -90:
-        min_lat = -(90-abs(90-min_lat))
-    if max_lat > 90:
-        max_lat = 90-abs(90-max_lat)
-
-    if max_lat < min_lat:
-        swap = max_lat
-        max_lat = min_lat
-        min_lat = swap
-
-    if min_lon < -180:
-        min_lon = 180 - abs(180-min_lon)
-    if max_lon > 180:
-        max_lon = - (180 - abs(180-max_lon))
-
-    if max_lon < min_lon:
-        swap = max_lon
-        max_lon = min_lon
-        min_lon = swap
 
     # read the latitudes and longitudes from the merra file
     if type(dataset)==netCDF4._netCDF4.Dataset:
@@ -580,20 +558,35 @@ def querry_indices(dataset,site_lat,site_lon_180,box_lat_half_width,box_lon_half
         merra_lon = dataset['lon'][:].data
         merra_lat = dataset['lat'][:].data
 
-    # get the indices of merra longitudes and latitudes that fit in the lat-lon box
-    merra_lon_in_box_IDs = np.where((merra_lon>=min_lon) & (merra_lon<=max_lon))[0]
-    merra_lat_in_box_IDs = np.where((merra_lat>=min_lat) & (merra_lat<=max_lat))[0]
 
-    nlon = np.size(merra_lon)
-    nlat = np.size(merra_lat)
-    min_lat_ID, max_lat_ID = merra_lat_in_box_IDs[0], (merra_lat_in_box_IDs[-1]+1) % nlat
-    min_lon_ID, max_lon_ID = merra_lon_in_box_IDs[0], (merra_lon_in_box_IDs[-1]+1) % nlon
-    # +1 because ARRAY[i:j] in python will return elements i to j-1
-    # take the modulus of the second index because if you have a lat/lon near the end of a MERRA grid we need to
-    # wrap around in the interpolation and interpolate between points on either end of the grid (periodic bdy condition)
+    nearest_lat_ID = nearest(merra_lat,site_lat)
+    if (site_lat-merra_lat[nearest_lat_ID])>0: # if exact same latitude, the second latitude for the grid square will be south
+        min_lat_ID = nearest_lat_ID
+        max_lat_ID = nearest_lat_ID+1
+    else:
+        min_lat_ID = nearest_lat_ID-1
+        max_lat_ID = nearest_lat_ID
 
-    return [min_lat_ID, max_lat_ID, min_lon_ID, max_lon_ID]
+    nearest_lon_ID = nearest(merra_lon,site_lon_180)
+    if (site_lon_180-merra_lon[nearest_lon_ID])>0: # if exact same longitude, the second longitude for the grid square will be west
+        min_lon_ID = nearest_lon_ID
+        if nearest_lon_ID == len(merra_lon)-1: # positive longitude edge case
+            max_lon_ID = 0
+        else:
+            max_lon_ID = nearest_lon_ID+1
+    else:
+        # no need for a negative longitude edge case because negative indices go in reverse from the end of the list e.g. for a list with N elements: list[-1] = list[N-1]
+        min_lon_ID = nearest_lon_ID-1
+        max_lon_ID = nearest_lon_ID
 
+    if not merra_lat[min_lat_ID]<site_lat<merra_lat[max_lat_ID]:
+        print('min_lat','site_lat','max_lat',merra_lat[min_lat_ID],site_lat,merra_lat[max_lat_ID])
+    if not merra_lon[min_lon_ID]<site_lon_180<merra_lon[max_lon_ID]:
+        print('min_lon','site_lon','max_lon',merra_lon[min_lon_ID],site_lon_180,merra_lon[max_lon_ID])
+
+    IDs = [min_lat_ID, max_lat_ID, min_lon_ID, max_lon_ID]
+
+    return IDs
 # ncep has geopotential height profiles, not merra(?, only surface), so I need to convert geometric heights to geopotential heights
 # the idl code uses a fixed radius for the radius of earth (6378.137 km), below the gravity routine of gsetup is used
 # also the surface geopotential height of merra is in units of m2 s-2, so it must be divided by surface gravity
