@@ -1567,7 +1567,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
             print('\t-Write mod files ...')
 
         # write the .mod files
-        version = 'mod_maker_10.6   2017-04-11   GCT'
+        version = 'mod_maker.py   2019-06-20   SR/JL'
 
         for site in INTERP_DATA:
             mod_dicts[UTC_date][site] = dict()
@@ -1822,7 +1822,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
         if not muted:
             print('\n',mod_name)
 
-        version = 'mod_maker_10.6   2017-04-11   GCT'
+        version = 'mod_maker.py   2019-06-20   SR/JL'
         if 'ncep' in mode:
             write_mod(mod_file_path,version,site_lat,data=INTERP_DATA,muted=muted)
         else:
