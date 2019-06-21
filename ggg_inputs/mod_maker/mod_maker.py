@@ -1700,7 +1700,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 
     total_time = end_date-start_date
     n_step = int(total_time.total_seconds()/time_step.total_seconds())
-    local_date_list = np.array([start_date+i*time_step for i in range(n_step)])
+    local_date_list = np.array([start_date+timedelta(hours=HH,minutes=MM)+i*time_step for i in range(n_step)])
 
     site_moved = False
     if 'time_spans' in site_dict[site_abbrv].keys(): # instruments with different locations for different time periods
