@@ -981,6 +981,7 @@ def parse_args(parser=None):
     parser.add_argument('--site', dest='site_abbrv', choices=valid_site_ids, help='Two-letter site abbreviation. '
                                                                                   'Providing this will produce .mod '
                                                                                   'files only for that site.')
+    parser.add_argument('--mode',help="if specified uses the old code with time interpolation",choices=['ncep','merradap42','merradap72','merraglob','fpglob','fpitglob'])
 
     if am_i_main:
         arg_dict = vars(parser.parse_args())
@@ -1838,18 +1839,25 @@ def driver(date_range, GEOS_path, save_path=None, keep_latlon_prec=False, save_i
            slant=False, alt=None, lon=None, lat=None, site_abbrv=None, **kwargs):
 
     start_date, end_date = date_range
-    func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
-                                                   muted=muted)
 
-    mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=GEOS_path, slant=slant,
-                  locations=site_dict, muted=muted, lat=lat, lon=lon, alt=alt, site_abbrv=site_abbrv,
-                  save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc)
+    if kwargs['mode']:
+        mod_maker(site_abbrv=site_abbrv,start_date=start_date,end_date=end_date,locations=site_dict,
+                    HH=12,MM=0,time_step=24,muted=muted,lat=lat,lon=lon,alt=alt,save_path=save_path,ncdf_path=GEOS_path,
+                    keep_latlon_prec=keep_latlon_prec,mode=kwargs['mode'])
+    else:
+        func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
+                                                       muted=muted)
+
+        mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=GEOS_path, slant=slant,
+                      locations=site_dict, muted=muted, lat=lat, lon=lon, alt=alt, site_abbrv=site_abbrv,
+                      save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc)
 
 
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
 
     arguments = parse_args()
-    if 'mode' in arguments.keys(): # the fp / fpit mode works with concatenated files
+    
+    if arguments['mode']: # the fp / fpit mode works with concatenated files
 
         mod_maker(**arguments)
 
