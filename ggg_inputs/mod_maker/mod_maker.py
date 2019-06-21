@@ -282,7 +282,7 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
                               fmt2.format(*[surf_data[key] for key in ['PS','T2M','H','MMW','H2O_DMF','RH','SLP','TROPPB','TROPPV','TROPPT','TROPT','SZA']]),
                               version+'\n',
                               ' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin      degrees     kg/kg\n',
-                              'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT          EL         O3\n',	]
+                              'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT         EqL         O3\n',	]
 
             fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {EL:7.3f}    {O3:9.3e}\n' # format for writting the lines
 
