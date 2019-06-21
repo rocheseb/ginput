@@ -1200,7 +1200,7 @@ def lat_lon_interp(data_old,lat_old,lon_old,lat_new,lon_new,IDs_list):
 
     return data_new
 
-def show_interp(data,x,y,interp_data,ilev):
+def show_interp(data,x,y,interp_data,ilev,pres):
 
     max = data[ilev].max()
     min = data[ilev].min()
@@ -1213,7 +1213,7 @@ def show_interp(data,x,y,interp_data,ilev):
     pl.gca().invert_yaxis()
     pl.xlabel('Longitude')
     pl.ylabel('Latitude')
-    pl.title('Level {}'.format(ilev+1))
+    pl.title('Level {}: {} hPa'.format(ilev+1,pres[ilev]))
     pl.colorbar()
     pl.show()
 
