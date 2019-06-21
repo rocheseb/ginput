@@ -197,10 +197,10 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
         for k,elem in enumerate(data['H2O_DMF']):
             svp = svp_wv_over_ice(data['T'][k])
             h2o_wmf = compute_h2o_wmf(data['H2O_DMF'][k]) # wet mole fraction of h2o
-            frh = h2o_wmf*data['T'][k]/svp # Fractional relative humidity
+            frh = h2o_wmf*data['lev'][k]/svp # Fractional relative humidity
 
             # Relace H2O mole fractions that are too small
-            if (frh < 30./data['T'][k]):
+            if (frh < 30./data['lev'][k]):
                 if not muted:
                     print('Replacing too small H2O ',mod_path, data['lev'][k],h2o_wmf,svp*30./data['lev'][k]/data['lev'][k],frh,30./data['lev'][k])
                 frh = 30./data['lev'][k]
@@ -305,7 +305,7 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
 
             if 300<=data['lev'][k]<=1000:
                 # Relace H2O mole fractions that are too small
-                if (data['RH'][k] < 30./data['T'][k]):
+                if (data['RH'][k] < 30./data['lev'][k]):
                     if not muted:
                         print('Replacing too small H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0))
                     data['RH'][k] = 30./data['lev'][k]
