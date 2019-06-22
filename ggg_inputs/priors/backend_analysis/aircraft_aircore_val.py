@@ -55,18 +55,18 @@ Most relevant functions are probably:
 
     Older:
 
-    * plot_binned_rmse() - plots GGG2014, GGGdevel, and python priors' RMSE binned by z
+    * plot_binned_rmse_by_type() - plots GGG2014, GGGdevel, and python priors' RMSE binned by z
     * plot_single_prof_comp() - plot comparision of py and GGG2014 priors for one location
 
 """
 
 from __future__ import print_function, division
 import argparse
-from datetime import datetime as dtime
 from glob import glob
+
+from .backend_utils import read_atm_file
 from matplotlib import pyplot as plt
 import numpy as np
-import pandas as pd
 import re
 import os
 import sys
@@ -110,96 +110,66 @@ def format_y_axis(ax, ztype):
         ax.invert_yaxis()
 
 
-def bin_frac_weight(bottom, top, levels, method='total'):
-    if top < bottom:
-        tmp = bottom
-        bottom = top
-        top = tmp
+def bin_data(data, data_z, bin_edges, bin_op=np.nanmean):
+    """
+    Bin aircraft/aircore data into vertical bins
 
-    bin_dist = top - bottom
-    if method == 'total':
-        prof_dist = bin_dist
-        min_lev = np.min(levels)
-        max_lev = np.max(levels)
+    :param data: the data to bin
+    :type data: 1D array-like
 
-        if min_lev > bottom:
-            prof_dist -= min_lev - bottom
-        if max_lev < top:
-            prof_dist -= top - max_lev
+    :param data_z: the z-coordinates of the data
+    :type data_z: 1D array like
 
-        prof_dist = max(prof_dist, 0.0)
-    elif method == 'internal':
-        # Find the alt/pres levels within the bin, get the first and last
-        xx = np.nonzero((levels >= bottom) & (levels < top))[0]
-        xx = np.sort(xx)
-        xx1 = xx[0]
-        xx2 = xx[-1]
+    :param bin_edges: the edges of the bins. Assumed to abut, so that the edges of bin i are ``bin_edges[i:i+2]``.
+     Must be in the same units as ``data_z``.
+    :type bin_edges: 1D array like
 
-        # The weight will be the fraction of the bin range covered by the
-        # profile
-        prof_dist = np.abs(levels[xx2] - levels[xx1])
+    :param bin_op: the operation to use to reduce the values in the bin to one number
+    :type bin_op: callable
 
-    return prof_dist / bin_dist
-
-
-def bin_data(data, data_z, bin_edges, weight_method='total', bin_op=np.nanmean):
+    :return: vector of length ``bin_edges.size - 1`` containing the binned values
+    :rtype: 1D array like
+    """
     bins_size = (np.size(bin_edges) - 1,)
     bins = np.full(bins_size, np.nan)
-    weights = np.full(bins_size, np.nan)
     for i in range(np.size(bin_edges) - 1):
         bottom, top = np.sort(bin_edges[i:i + 2])
         zz = (data_z >= bottom) & (data_z < top)
         bins[i] = bin_op(data[zz])
-        # pass all altitudes to bin_frac_weight b/c the "total" method considers if the profile extends outside this bin
-        weights[i] = bin_frac_weight(bottom, top, data_z, method=weight_method)
 
-    return bins, weights
+    return bins
 
 
-def convert_atm_value(val):
-    conv_fxns = (lambda v: dtime.strptime(v, '%Y-%m-%d %H:%M:%S'),
-                 lambda v: dtime.strptime(v, '%Y-%m-%d'),
-                 float)
-    for fxn in conv_fxns:
-        try:
-            new_val = fxn(val)
-        except ValueError:
-            continue
-        else:
-            return new_val
-
-    return val
-
-
-def read_atm_file(filename, limit_to_meas=True):
-    header_info = dict()
-    with open(filename, 'r') as fobj:
-        # skip line 1
-        fobj.readline()
-        line_num = 0
-        for line in fobj:
-            line_num += 1
-            if re.match(r'\-+$', line):
-                # Stop reading the header at a line of all dashes
-                break
-            else:
-                k, v = [s.strip() for s in line.split(':', 1)]
-                header_info[k] = convert_atm_value(v)
-
-    data = pd.read_csv(filename, header=line_num + 1)
-    if limit_to_meas:
-        bottom_alt = header_info['aircraft_floor_m']
-        top_alt = header_info['aircraft_ceiling_m']
-        xx = (data['Altitude_m'] >= bottom_alt) & (data['Altitude_m'] <= top_alt)
-        data = data[xx]
-    return data, header_info
+def num_atm_files(atm_dir):
+    return len(glob(os.path.join(atm_dir, '*')))
 
 
 def rmse(obs_values, calc_values):
+    """
+    Calculate root mean squared error between observed and calculated values.
+
+    :param obs_values: observed values
+    :type obs_values: array-like
+
+    :param calc_values: calculated values
+    :type calc_values: array-like
+
+    :return: root mean squared error
+    :rtype: float
+    """
     return rmse2(obs_values - calc_values)
 
 
 def rmse2(diff_values):
+    """
+    Calculate the RMSE assuming we already have the array of differences between the two sets of values
+
+    :param diff_values: array of differences
+    :type diff_values: array like
+
+    :return: root mean squared error
+    :rtype: float
+    """
     return np.sqrt(np.nanmean((diff_values)**2.0))
 
 
@@ -244,8 +214,105 @@ def iter_prior_pairs(prior_root_1, prior_root_2, return_type='dict'):
                 yield prior_dat_1, prior_dat_2
 
 
-def iter_matched_data(data_root, data_type, prof_type, ret_filenames=False, include_filenames=False, skip_missing_map=True,
-                      years=None, months=None):
+def _get_subdirs_by_type(data_root, data_type, prof_type):
+    if data_type.lower() == 'aircore':
+        atm_dir = os.path.join(data_root, 'atm', 'aircore')
+        map_dir = os.path.join(data_root, 'map', 'aircore')
+    elif data_type.lower() == 'aircraft':
+        atm_dir = os.path.join(data_root, 'atm', 'aircraft')
+        map_dir = os.path.join(data_root, 'map', 'aircraft')
+    else:
+        raise ValueError('data type not recognized')
+
+    if prof_type == '2014':
+        map_dir = os.path.join(map_dir, 'map_GGG2014')
+    elif prof_type.lower() in ('next', 'devel'):
+        map_dir = os.path.join(map_dir, 'map_GGGdevel')
+    elif prof_type.lower() == 'py':
+        map_dir = os.path.join(map_dir, 'map_GGGpy')
+    else:
+        raise ValueError('prof type not recognized')
+
+    return atm_dir, map_dir
+
+
+def iter_matched_data_by_type(data_root, data_type, prof_type, **kwargs):
+    """
+    Iterate over matched pairs of .map and .atm files assuming a standard directory structure
+
+    Convenience method to iterate over matched pairs of .map and .atm files assuming that the directory structure is:
+
+     * ``data_root`` contains subdirectories "atm" and "map"
+     * "atm" and "map" both contain "aircore" and "aircraft" subdirectories
+     * The subdirectories in "atm" contain all the .atm files, not organized any further by subdirectories
+     * The subdirectories in "map" each have their own trio of subdirectories: "map_GGG2014", "map_GGGdevel", and
+       "map_GGGpy".
+     * These three map subdirectories are organized into subdirectories by location and, possibly, date.
+        * For the GGG2014 and GGGdevel directories, the subdirectories must be named "maps_[y]y.yy{NS}_[xx]x.xx{WE}" e.g.
+          "maps_29.00N_70.00W" or "maps_34.60N_117.30W" and contain files named as "xxyyyymmdd.map" e.g. xx20180723.map.
+        * For the GGGpy directory, the subdirectories must be named "yyyymmdd_[xx]x.xx{WE}_[y]y.yy{NS}" e.g.
+          "20140716_26.10E_67.50N" and contain 8 files named "xxyy{NS}_yyyymmdd_hhmm.map" e.g. "xx37N_20120114_0300.map"
+
+    :param data_root: the top level directory containing the atm and map subdirs
+    :type data_root: str
+
+    :param data_type: which data type to iterate over, "aircore" or "aircraft"
+    :type data_type: str
+
+    :param prof_type: which prior type to iterate over, "2014", "next"/"devel", or "py"
+    :type prof_type: str
+
+    :param kwargs: additional keywords passed through to :func:`iter_matched_data`
+
+    :return: iterator over data, filename, or data+filename pairs.
+    """
+    atm_dir, map_dir = _get_subdirs_by_type(data_root, data_type, prof_type)
+    for i in iter_matched_data(atm_dir, map_dir, **kwargs):
+        yield i
+
+
+def iter_matched_data(atm_dir, map_dir, years=None, months=None, skip_missing_map=False, ret_filenames=False,
+                      include_filenames=False):
+    """
+    Iterate over matched pairs of .atm and .map files.
+
+    This is a more generic version of :func:`iter_matched_data_by_type` that doesn't assume as much about the directory
+    structure, therefore allowing greater flexibility in which directories are read at the expense of having to specify
+    the map and atm directories separately.
+
+    :param atm_dir: the directory containing all .atm files to match with the priors.
+    :type atm_dir: str
+
+    :param map_dir: the directory containing subdirectories of .map files to match with the .atm files.  It will
+     auto-detect one of two formats for the subdirectories:
+
+     * The subdirectories may be named following the pattern "maps_[y]y.yy{NS}_[xx]x.xx{WE}" e.g. "maps_29.00N_70.00W"
+       or "maps_34.60N_117.30W" and contain files named as "xxyyyymmdd.map" e.g. xx20180723.map.  This is used for
+       older versions of priors.
+     * Alternatively, the subdirectories may be named "yyyymmdd_[xx]x.xx{WE}_[y]y.yy{NS}" e.g. "20140716_26.10E_67.50N"
+       and contain 8 files named "xxyy{NS}_yyyymmdd_hhmm.map" e.g. "xx37N_20120114_0300.map". This is the convention
+       expected for the GEOS FP-IT derived priors.
+
+    :param years: if given, a list or other collection of which years to include
+    :type years: None or list(int)
+
+    :param months: if given, a list or other collection of which months to include
+    :type months: None or list(int)
+
+    :param skip_missing_map: set to ``True`` to skip validation profiles that do not have a corresponding .map file.
+     Raises and error if ``False`` and there is a missing .map file.
+    :type skip_missing_map: bool
+
+    :param ret_filenames: set to ``True`` to return filenames instead of data loaded from those files.
+    :type ret_filenames: bool
+
+    :param include_filenames: set to ``True`` to return both data and filenames
+    :type include_filenames: bool
+
+    :return: data loaded from the .atm and .map files, the .atm and .map file names, or tuples of both
+    :rtype: iterator of (:class:`pandas.DataFrame`, :class:`pandas.DataFrame`) OR (str, str) OR
+     ((:class:`pandas.DataFrame`, str), (:class:`pandas.DataFrame`, str)) pairs.
+    """
     def idl_maps_file(lon, ew, lat, ns, date_time):
         subdir = 'maps_{lat:.2f}{ns}_{lon:.2f}{ew}'.format(lat=lat, ns=ns, lon=lon, ew=ew)
         filename = 'xx{}.map'.format(date_time.strftime('%Y%m%d'))
@@ -263,20 +330,15 @@ def iter_matched_data(data_root, data_type, prof_type, ret_filenames=False, incl
                                                                  hr=hr)
         return os.path.join(subdir, filename)
 
-    def aircore_id(atmf):
-        bname = os.path.basename(atmf)
-        latstr = re.search(r'\d+\.\d+[NS]', bname).group()
-        lat = float(latstr[:-1])
-        ns = latstr[-1]
-        lonstr = re.search(r'\d+\.\d+[EW]', bname).group()
-        lon = float(lonstr[:-1])
-        ew = lonstr[-1]
+    def choose_map_file_function(example_dirname):
+        if re.match('maps', example_dirname):
+            return idl_maps_file
+        elif re.match(r'\d{8}', example_dirname):
+            return py_maps_file
+        else:
+            raise RuntimeError('Do not know what format the maps directory "{}" is'.format(example_dirname))
 
-        _, header_info = read_atm_file(atmf)
-        date_time = header_info['aircraft_start_time_UTC']
-        return lon, ew, lat, ns, date_time
-
-    def aircraft_id(atmf):
+    def id_fxn(atmf):
         _, header_info = read_atm_file(atmf)
         lat = header_info['TCCON_site_latitude_N']
         ns = 'S' if lat < 0 else 'N'
@@ -290,30 +352,12 @@ def iter_matched_data(data_root, data_type, prof_type, ret_filenames=False, incl
 
         return lon, ew, lat, ns, date_time
 
-    if data_type.lower() == 'aircore':
-        atm_dir = os.path.join(data_root, 'atm', 'aircore')
-        map_dir = os.path.join(data_root, 'map', 'aircore')
-        id_fxn = aircore_id
-    elif data_type.lower() == 'aircraft':
-        atm_dir = os.path.join(data_root, 'atm', 'aircraft')
-        map_dir = os.path.join(data_root, 'map', 'aircraft')
-        id_fxn = aircraft_id
-
-    if prof_type == '2014':
-        map_dir = os.path.join(map_dir, 'map_GGG2014')
-        map_file_fxn = idl_maps_file
-
-    elif prof_type.lower() in ('next', 'devel'):
-        map_dir = os.path.join(map_dir, 'map_GGGdevel')
-        map_file_fxn = idl_maps_file
-    elif prof_type.lower() == 'py':
-        map_dir = os.path.join(map_dir, 'map_GGGpy')
-        map_file_fxn = py_maps_file
-    else:
-        raise ValueError('prof type not recognized')
-
     # List the available obs files
     atm_files = sorted(glob(os.path.join(atm_dir, '*CO2.atm')))
+
+    # List one map file directorie, just to determine which format they are. glob does not return . and ..
+    example_map_dir = glob(os.path.join(atm_dir, '*'))[0]
+    map_file_fxn = choose_map_file_function(example_map_dir)
 
     missing = 0
     for atmf in atm_files:
@@ -344,28 +388,81 @@ def iter_matched_data(data_root, data_type, prof_type, ret_filenames=False, incl
     print('missing {} of {} files'.format(missing, len(atm_files)))
 
 
-def find_map_for_obs(obs_file, data_type, prof_type, data_root=None):
+def find_map_for_obs_by_type(obs_file, data_type, prof_type, data_root=None):
+    """
+    Find the map file that corresponds to an observation .atm file
+
+    :param obs_file: the observation .atm file
+    :type obs_file: str
+
+    :param data_type: ``data_type`` argument to :func:`iter_matched_data_by_type`
+    :type data_type: str
+
+    :param prof_type: ``prof_type`` argument to :func:`iter_matched_data_by_type`
+    :type prof_type: str
+
+    :param data_root: ``data_root`` argument to :func:`iter_matched_data_by_type`
+    :type data_root: str
+
+    :return: path to .map file or None if cannot find one
+    :rtype: str or None
+    """
     if data_root is None:
         data_root = os.path.abspath(os.path.join(os.path.dirname(obs_file), '..', '..'))
 
     obs_file = os.path.basename(obs_file)
 
-    for obsf, mapf in iter_matched_data(data_root, data_type, prof_type, ret_filenames=True):
+    for obsf, mapf in iter_matched_data_by_type(data_root, data_type, prof_type, ret_filenames=True):
         if os.path.basename(obsf) == obs_file:
             return mapf
 
     return None
 
 
-def load_as_array(data_root, data_type, prof_type, ztype='pres', years=None, months=None):
+def find_map_for_obs(obs_file, map_dir):
+    atm_dir = os.path.dirname(obs_file)
+    obs_file = os.path.basename(obs_file)
+    for obsf, mapf in iter_matched_data(atm_dir, map_dir, ret_filenames=True):
+        if os.path.basename(obsf) == obs_file:
+            return mapf
+
+    return None
+
+
+def load_as_array_by_type(data_root, data_type, prof_type, **kwargs):
+    atm_dir, map_dir = _get_subdirs_by_type(data_root, data_type, prof_type)
+    return load_as_array(atm_dir, map_dir, **kwargs)
+
+
+def load_as_array(atm_dir, map_dir, ztype='pres', years=None, months=None):
+    """
+    Load all the observational data and prior profiles as single (1D) arrays
+
+    :param atm_dir: the directory containing the .atm files
+    :type atm_dir: str
+
+    :param map_dir: the directory containing the .map file subdirectories
+    :type map_dir: str
+
+    :param ztype: which z-coordinate ("pres", "alt", or "alt-trop") to use when matching the data
+    :type ztype: str
+
+    :param years: collection of which years to include. If omitted, all are included
+    :type years: list(int) or None
+
+    :param months: collection of which months to include. If omitted, all are included.
+    :type months: list(int) or None
+
+    :return: 1D arrays of z-coordinate, observational concentrations, and prior concentrations concatenated together.
+    """
     obs_co2 = np.array([])
     prof_co2 = np.array([])
     z = np.array([])
 
-    for (obsdat, obsfile), (mapdat, mapfile) in iter_matched_data(data_root, data_type, prof_type, years=years, months=months,
+    for (obsdat, obsfile), (mapdat, mapfile) in iter_matched_data(atm_dir, map_dir, years=years, months=months,
                                                                   include_filenames=True):
         this_obs_co2, this_prof_co2, this_obs_z = interp_profile_to_obs(obsdat, mapdat, ztype=ztype, obs_file=obsfile,
-                                                                        data_type=data_type)
+                                                                        map_dir=map_dir)
 
         obs_co2 = np.concatenate((obs_co2, this_obs_co2), axis=0)
         prof_co2 = np.concatenate((prof_co2, this_prof_co2), axis=0)
@@ -374,8 +471,96 @@ def load_as_array(data_root, data_type, prof_type, ztype='pres', years=None, mon
     return z, obs_co2, prof_co2
 
 
-def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, data_type=None, data_root=None,
-                          limit_by_zsurf=True):
+def load_binned_array(atm_dir, map_dir, ztype='pres', bin_edges=None, bin_op=np.nanmean):
+    """
+    Load the observed and prior profiles as a 2D array.
+
+    This will interpolate the priors to the altitudes in the observed data, then bin both, to ensure that both are
+    treated the same. The returned profiles will have been binned in the z-direction.
+
+    :param atm_dir: the directory containing the .atm files
+    :type atm_dir: str
+
+    :param map_dir: the directory containing the .map file subdirectories
+    :type map_dir: str
+
+    :param ztype: which z-coordinate ("pres", "alt", or "alt-trop") to use when matching the data
+    :type ztype: str
+
+    :param bin_edges: see :func:`bin_data`
+
+    :param bin_op: see :func:`bin_data`
+
+    :return: observed profiles and prior profiles as 2D arrays with dimensions (n_profiles) x (n_bins)
+    :rtype: :class:`numpy.ndarray`, :class:`numpy.ndarray`
+    """
+    if bin_edges is None:
+        bin_edges, _ = _get_std_bins(ztype)
+
+    n_profs = num_atm_files(atm_dir)
+    n_levels = np.size(bin_edges) - 1
+    obs_profiles = np.full([n_profs, n_levels], np.nan)
+    prior_profiles = np.full([n_profs, n_levels], np.nan)
+
+    for i, ((obsdat, obsfile), (mapdat, mapfile)) in enumerate(iter_matched_data(atm_dir, map_dir, include_filenames=True)):
+        this_obs_conc, this_prof_conc, this_z = interp_profile_to_obs(obsdat, mapdat, ztype=ztype, obs_file=obsfile,
+                                                                      map_dir=map_dir)
+        obs_profiles[i, :] = bin_data(this_obs_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
+        prior_profiles[i, :] = bin_data(this_prof_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
+
+    return obs_profiles, prior_profiles
+
+
+def interp_profile_to_obs_by_type(obsdat, mapdat, data_type=None, data_root=None, **kwargs):
+    """
+    Interpolate prior profile data to the observation's altitudes
+
+    :param obsdat: observational data
+    :type obsdat: :class:`pandas.DataFrame`
+
+    :param mapdat: priors from .map files
+    :type mapdat: :class:`pandas.DataFrame`
+
+    :param data_type: data type argument to :func:`iter_matched_data_by_type`
+    :type data_type: str
+
+    :param data_root: data root argument to :func:`iter_matched_data_by_type`
+    :type data_root: str
+
+    :param kwargs: additional keyword args to :func:`interp_profile_to_obs`
+
+    :return: observed concentration, prior concentration, z-coordinates
+    :rtype: three :class:`numpy.ndarray` instances
+    """
+    _, map_dir = _get_subdirs_by_type(data_root, data_type, 'py')
+    return interp_profile_to_obs(obsdat, mapdat, **kwargs)
+
+
+def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, map_dir=None, limit_by_zsurf=True):
+    """
+    Interpolate prior profile data to the observation's altitude
+
+    :param obsdat: observational data
+    :type obsdat: :class:`pandas.DataFrame`
+
+    :param mapdat: priors from .map files
+    :type mapdat: :class:`pandas.DataFrame`
+
+    :param ztype: which z-coordinate ("pres", "alt", or "alt-trop") to use when matching the data
+    :type ztype: str
+
+    :param obs_file: the .atm file to load the observations from
+    :type obs_file: str
+
+    :param map_dir: the directory containing the .map file subdirectories
+    :type map_dir: str
+
+    :param limit_by_zsurf: if ``True``, only data above the surface altitude for this prior will be used.
+    :type limit_by_zsurf: bool
+
+    :return: observed concentration, prior concentration, z-coordinates
+    :rtype: three :class:`numpy.ndarray` instances
+    """
     interp_mode = 'log-log' if ztype == 'pres' else 'linear'
     obs_z_var = 'Pressure_hPa' if ztype == 'pres' else 'Altitude_m'
     obs_zscale = 1.0 if ztype == 'pres' else 0.001  # must convert meters to kilometers
@@ -392,9 +577,9 @@ def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, data_type
     # if we only want profile levels above the surface, get the surface altitude and the altitude profile (regardless
     # of z_type) and cut down the profile
     if limit_by_zsurf or ztype == 'alt-trop':
-        if obs_file is None or data_type is None:
-            raise TypeError('obs_file and data_type are needed if limit_by_zsurf is True or ztype == "alt-trop"')
-        py_map_file = find_map_for_obs(obs_file, data_type, 'py', data_root=data_root)
+        if obs_file is None or map_dir is None:
+            raise TypeError('obs_file and map_dir are needed if limit_by_zsurf is True or ztype == "alt-trop"')
+        py_map_file = find_map_for_obs(obs_file, map_dir)
         full_py_mapdate = mod_utils.read_map_file(py_map_file)
 
     if limit_by_zsurf:
@@ -434,7 +619,7 @@ def fmt_lat(lat):
 def plot_single_prof_comp(py_map_file, data_type, ax=None, ztype='pres'):
     data_root = os.path.abspath(os.path.join(os.path.dirname(py_map_file), '..', '..', '..', '..'))
     found_it = False
-    for obs_file, mf in iter_matched_data(data_root, data_type, 'py', ret_filenames=True):
+    for obs_file, mf in iter_matched_data_by_type(data_root, data_type, 'py', ret_filenames=True):
         if os.path.basename(mf) == os.path.basename(py_map_file):
             found_it = True
             break
@@ -442,7 +627,7 @@ def plot_single_prof_comp(py_map_file, data_type, ax=None, ztype='pres'):
         raise RuntimeError('Did not find obs file matching {}'.format(py_map_file))
 
     found_it = False
-    for of, map_file_14 in iter_matched_data(data_root, data_type, '2014', ret_filenames=True):
+    for of, map_file_14 in iter_matched_data_by_type(data_root, data_type, '2014', ret_filenames=True):
         if os.path.basename(of) == os.path.basename(obs_file):
             found_it = True
             break
@@ -456,8 +641,8 @@ def plot_single_prof_comp(py_map_file, data_type, ax=None, ztype='pres'):
 
     # Since the 2014 map files don't include surface altitude, right now I'm just not limiting the profiles to above
     # the surface
-    obs_co2, prof_co2, p = interp_profile_to_obs(obsdat, mapdat, ztype=ztype, obs_file=obs_file, data_type=data_type, limit_by_zsurf=False)
-    _, prof_14_co2, p14 = interp_profile_to_obs(obsdat, mapdat14, ztype=ztype, limit_by_zsurf=False)
+    obs_co2, prof_co2, p = interp_profile_to_obs_by_type(obsdat, mapdat, ztype=ztype, obs_file=obs_file, data_type=data_type, limit_by_zsurf=False)
+    _, prof_14_co2, p14 = interp_profile_to_obs_by_type(obsdat, mapdat14, ztype=ztype, limit_by_zsurf=False)
 
     if ax is None:
         fig = plt.figure()
@@ -488,13 +673,13 @@ def calc_binned_rmses(data_root, bin_edges):
         binned_rmses[prof_type] = dict()
         for data_type in ('aircore', 'aircraft'):  # problem with aircraft longitudes, rerunning now
             this_rmse = dict()
-            zall, obsall, profall = load_as_array(data_root, data_type, prof_type)
-            this_rmse['rmse'], this_rmse['weight'] = bin_data(obsall - profall, zall, bin_edges, bin_op=rmse2)
+            zall, obsall, profall = load_as_array_by_type(data_root, data_type, prof_type)
+            this_rmse['rmse'] = bin_data(obsall - profall, zall, bin_edges, bin_op=rmse2)
             binned_rmses[prof_type][data_type] = this_rmse
 
 
-def plot_binned_rmse(data_root, bin_edges, bin_centers, ztype='pres', years=None, months=None, title_extra='',
-                     prof_types=('2014', 'devel', 'py'), plot_labels=None):
+def plot_binned_rmse_by_type(data_root, bin_edges, bin_centers, ztype='pres', years=None, months=None, title_extra='',
+                             prof_types=('2014', 'devel', 'py'), plot_labels=None):
     if plot_labels is not None:
         plot_labels = {k: v for k, v in zip(prof_types, plot_labels)}
     else:
@@ -504,8 +689,8 @@ def plot_binned_rmse(data_root, bin_edges, bin_centers, ztype='pres', years=None
         binned_rmses[prof_type] = dict()
         for data_type in ('Aircore', 'Aircraft'):
             this_rmse = dict()
-            zall, obsall, profall = load_as_array(data_root, data_type.lower(), prof_type, ztype=ztype, years=years, months=months)
-            this_rmse['rmse'], this_rmse['weight'] = bin_data(obsall - profall, zall, bin_edges, bin_op=rmse2)
+            zall, obsall, profall = load_as_array_by_type(data_root, data_type.lower(), prof_type, ztype=ztype, years=years, months=months)
+            this_rmse['rmse'] = bin_data(obsall - profall, zall, bin_edges, bin_op=rmse2)
             binned_rmses[prof_type][data_type] = this_rmse
 
     fig = plt.figure()
@@ -528,164 +713,6 @@ def plot_binned_rmse(data_root, bin_edges, bin_centers, ztype='pres', years=None
             ax.plot(ax.get_xlim(), [0, 0], color='k', linestyle='--', linewidth=2)
 
     return fig, all_ax
-
-
-def plot_scatter_by_height(data_root, bin_edges, bin_centers, ztype, prof_types=('2014', 'devel', 'py')):
-    # Now lets go profile by profile and do a scatter plot of RMSE vs. altitude, with size representing weight
-    fig = plt.figure()
-    all_ax = []
-    for didx, data_type in enumerate(('Aircore', 'Aircraft')):
-        for idx, prof_type in enumerate(prof_types):
-            ax = fig.add_subplot(2, 3, idx + 1 + didx * 3)
-            all_ax.append(ax)
-            for (obsdat, obsfile), (profdat, proffile) in iter_matched_data(data_root, data_type.lower(), prof_type,
-                                                                            include_filenames=True):
-                this_obs_co2, this_prof_co2, this_z = interp_profile_to_obs(obsdat, profdat, ztype=ztype,
-                                                                            obs_file=obsfile, data_type=data_type)
-                rmse_bins, wt_bins = bin_data(this_obs_co2 - this_prof_co2, this_z, bin_edges, weight_method='total',
-                                              bin_op=rmse2)
-                ax.scatter(rmse_bins, bin_centers, s=wt_bins * 5)
-            ax.set_xlabel('RMSE')
-            format_y_axis(ax, ztype)
-            ax.set_title('GGG {} vs. {}'.format(prof_type, data_type))
-            ax.grid(which='both')
-
-    fig.set_size_inches([len(prof_types)*7, 16])
-    plt.subplots_adjust(hspace=0.3)
-    return fig, all_ax
-
-
-def plot_pbl_rmse_vs_grad(data_root, data_type, prof_types):
-    def collect_vals(prior_type):
-        rmse_vals = []
-        grad_ac_vals = []
-        for (obsdat, obsfile), (mapdat, mapfile) in iter_matched_data(data_root, data_type, prior_type, include_filenames=True):
-            obs_co2, prof_co2, p = interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=obsfile, data_type=data_type)
-            zz = p >= 800
-            z_surf = np.argmax(p)
-            z_400 = np.argmin(np.abs(p - 400))
-            rmse_vals.append(rmse(obs_co2[zz], prof_co2[zz]))
-            grad_ac_vals.append(obs_co2[z_surf] - obs_co2[z_400])
-        return np.array(rmse_vals), np.array(grad_ac_vals)
-
-    rmse_dict = dict()
-    grad_ac_dict = dict()
-    for prof_type in prof_types:
-        rmse_dict[prof_type], grad_ac_dict[prof_type] = collect_vals(prof_type)
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    for prof_type in prof_types:
-        ax.plot(grad_ac_dict[prof_type], rmse_dict[prof_type], color=_color_mapping[prof_type],
-                marker=_marker_mapping[prof_type], linestyle='none', label=_label_mapping[prof_type])
-    ax.set_ylabel('RMSE for $p \geq 800$ hPa (ppm)')
-    ax.set_xlabel('Obs. CO$_2$(surf) - CO$_2$(400 hPa) (ppm)')
-    ax.legend()
-    fig.set_size_inches([8, 6])
-    return fig, ax
-
-
-def order_by_pbl_rmse(data_root, prof_type, filter_fxn=None):
-    if filter_fxn is None:
-        filter_fxn = lambda x,y: np.ones_like(x, dtype=np.bool)
-
-    dtypes = ('aircore', 'aircraft')
-    map_files = {k: [] for k in dtypes}
-    pbl_err = {k: [] for k in dtypes}
-    obs_grad = {k: [] for k in dtypes}
-    for dtype in dtypes:
-        for obsf, mapf in iter_matched_data(data_root, dtype, prof_type, ret_filenames=True):
-            obsdat, _ = read_atm_file(obsf)
-            mapdat = mod_utils.read_map_file(mapf, as_dataframes=True)
-
-            obs_co2, prof_co2, p = interp_profile_to_obs(obsdat, mapdat['profile'], obs_file=obsf, data_type=dtype)
-            zz = p >= 800
-            z_surf = np.argmax(p)
-            z_400 = np.argmin(np.abs(p - 400))
-            map_files[dtype].append(mapf)
-            pbl_err[dtype].append(rmse(obs_co2[zz], prof_co2[zz]))
-            obs_grad[dtype].append(obs_co2[z_surf] - obs_co2[z_400])
-
-    map_files = {k: np.array(v) for k, v in map_files.items()}
-    pbl_err = {k: np.array(v) for k, v in pbl_err.items()}
-    obs_grad = {k: np.array(v) for k, v in obs_grad.items()}
-
-    ordered_errs = dict()
-    ordered_files = dict()
-    ordered_grads = dict()
-    for dtype in dtypes:
-        xx = ~np.isnan(pbl_err[dtype])
-        this_pbl_err = pbl_err[dtype][xx]
-        this_map_files = map_files[dtype][xx]
-        this_obs_grad = obs_grad[dtype][xx]
-
-        err_order = np.flipud(np.argsort(this_pbl_err))
-
-        ordered_errs[dtype] = this_pbl_err[err_order]
-        ordered_files[dtype] = this_map_files[err_order]
-        ordered_grads[dtype] = this_obs_grad[err_order]
-
-        xx = filter_fxn(ordered_errs[dtype], ordered_grads[dtype])
-        ordered_errs[dtype] = ordered_errs[dtype][xx]
-        ordered_grads[dtype] = ordered_grads[dtype][xx]
-        ordered_files[dtype] = ordered_files[dtype][xx]
-
-    return ordered_errs, ordered_grads, ordered_files
-
-
-def plot_top_n_plb_rmses(data_root, data_type, subplot_pattern, filter_fxn=None, ztype='pres'):
-    ordered_errs, ordered_grads, ordered_files = order_by_pbl_rmse(data_root, 'py', filter_fxn=filter_fxn)
-    nrow, ncol = subplot_pattern
-    n = nrow * ncol
-
-    fig, axs = plt.subplots(nrow, ncol)
-
-    for i in range(n):
-        if i > np.size(ordered_files[data_type]):
-            continue
-        inds = np.unravel_index(i, axs.shape)
-        plot_single_prof_comp(ordered_files[data_type][i], data_type, ax=axs[inds], ztype=ztype)
-
-    fig.set_size_inches([24, 24])
-    return fig, axs
-
-
-def lat_rmse_plot(new_map_lists, del_rmse_lists, labels=None, vertical_part=''):
-    geog_lat = [[] for m in new_map_lists]
-    eq_lat = [[] for m in new_map_lists]
-    for i, map_files in enumerate(new_map_lists):
-        for f in map_files:
-            mapdat = mod_utils.read_map_file(f)
-            geog_lat[i].append(mapdat['constants']['Latitude'])
-            eq_lat[i].append(mapdat['constants']['Trop. eqlat'])
-
-    colors = ['blue', 'orange', 'red', 'green']
-    markers = ['o', '^', 'v', 'd']
-    markers2 = ['x', '+', '1', '_']
-
-    fig = plt.figure()
-    fig.set_size_inches([16, 6])
-    ax1 = fig.add_subplot(1, 2, 1)
-    ax1.set_xlabel('Order (big -> small) {} RMSE increase'.format(vertical_part))
-    ax1.set_ylabel('Latitude')
-    ax1.grid(axis='y')
-
-    ax2 = fig.add_subplot(1, 2, 2)
-    ax2.set_xlabel('Order (big -> small) {} RMSE increase'.format(vertical_part))
-    ax2.set_ylabel(r'$\Delta$ {} RMSE (ppm)'.format(vertical_part))
-    ax2.grid(axis='y')
-
-    for i, (geog, eq, rmse) in enumerate(zip(geog_lat, eq_lat, del_rmse_lists)):
-        lab_str = labels[i] if labels is not None else ''
-        ax1.plot(geog, label='{} (geog. lat.)'.format(lab_str), linestyle='none', marker=markers[i], color=colors[i])
-        ax1.plot(eq, label='{} (eq. lat.)'.format(lab_str), linestyle='none', marker=markers2[i], color=colors[i])
-        ax2.plot(rmse, linestyle='none', marker=markers[i], color=colors[i], label=lab_str)
-
-    ax1.legend()
-    if labels is not None:
-        ax2.legend()
-
-    return fig, [ax1, ax2]
 
 
 def plot_rmse_comparison(data_roots, data_type, bin_edges=None, bin_centers=None, prof_type='py', ztype='pres',
@@ -733,8 +760,8 @@ def plot_rmse_comparison(data_roots, data_type, bin_edges=None, bin_centers=None
 
     all_binned_rmses = []
     for idx, root in enumerate(data_roots):
-        z, obs, prof = load_as_array(root, data_type.lower(), prof_type, ztype=ztype)
-        rmse, _ = bin_data(obs - prof, z, bin_edges, bin_op=rmse2)
+        z, obs, prof = load_as_array_by_type(root, data_type.lower(), prof_type, ztype=ztype)
+        rmse = bin_data(obs - prof, z, bin_edges, bin_op=rmse2)
         all_binned_rmses.append(rmse)
 
         label_str = labels[idx] if labels is not None else ''
@@ -791,9 +818,9 @@ def plot_profiles_comparison(obs_file, data_roots, data_type, prof_type='py', zt
 
     obs_dat, _ = read_atm_file(obs_file)
     for i, root in enumerate(data_roots):
-        map_file = find_map_for_obs(obs_file, data_type, prof_type, data_root=root)
+        map_file = find_map_for_obs_by_type(obs_file, data_type, prof_type, data_root=root)
         map_dat = mod_utils.read_map_file(map_file, as_dataframes=True)['profile']
-        obs_co2, this_co2, z = interp_profile_to_obs(obs_dat, map_dat, ztype=ztype, obs_file=obs_file, data_type=data_type)
+        obs_co2, this_co2, z = interp_profile_to_obs_by_type(obs_dat, map_dat, ztype=ztype, obs_file=obs_file, data_type=data_type)
         if i == 0:
             ax.plot(obs_co2, z, label='Obs.')
             check_obs_co2 = obs_co2
@@ -812,37 +839,6 @@ def plot_profiles_comparison(obs_file, data_roots, data_type, prof_type='py', zt
         ax.legend()
 
     return fig, ax
-
-
-def find_top_rmse_increases(old_data_root, new_data_root, data_type, zrange, ztype, prof_type='py'):
-    delta_rmses = []
-    obs_files = []
-    new_map_files = []
-    old_map_files = []
-    for (obsdat, obsfile), (new_profdat, new_proffile) in iter_matched_data(new_data_root, data_type, prof_type,
-                                                                            include_filenames=True):
-        old_proffile = find_map_for_obs(os.path.abspath(obsfile), data_type, prof_type, data_root=old_data_root)
-        old_profdat = mod_utils.read_map_file(old_proffile, as_dataframes=True)['profile']
-
-        obs_co2, new_co2, z = interp_profile_to_obs(obsdat, new_profdat, ztype=ztype, obs_file=obsfile, data_type=data_type)
-        zz_lev = (z >= np.min(zrange)) & (z <= np.max(zrange))
-        new_rmse = rmse(obs_co2[zz_lev], new_co2[zz_lev])
-        _, old_co2, _ = interp_profile_to_obs(obsdat, old_profdat, ztype=ztype, obs_file=obsfile, data_type=data_type, data_root=old_data_root)
-        old_rmse = rmse(obs_co2[zz_lev], old_co2[zz_lev])
-
-        if np.isnan(new_rmse) or np.isnan(old_rmse):
-            continue
-
-        delta_rmses.append(np.mean(new_rmse - old_rmse))
-        obs_files.append(obsfile)
-        new_map_files.append(new_proffile)
-        old_map_files.append(old_proffile)
-
-    pbl_results = [np.array(delta_rmses), np.array(obs_files), np.array(new_map_files), np.array(old_map_files)]
-    err_order = np.flipud(np.argsort(pbl_results[0]))
-    for i, v in enumerate(pbl_results):
-        pbl_results[i] = v[err_order]
-    return pbl_results
 
 
 def _get_std_bins(ztype, bin_edges=None, bin_centers=None):
@@ -873,31 +869,8 @@ def make_all_plots(data_root, fig_save_root, bin_centers=None, bin_edges=None, z
     old_font_size = plt.rcParams['font.size']
     try:
         plt.rcParams['font.size'] = font_size
-        fig_rmse, ax_rmse = plot_binned_rmse(data_root, bin_edges, bin_centers, ztype=ztype, prof_types=prof_types)
+        fig_rmse, ax_rmse = plot_binned_rmse_by_type(data_root, bin_edges, bin_centers, ztype=ztype, prof_types=prof_types)
         fig_rmse.savefig(os.path.join(fig_save_root, '1-profile-rmse.png'))
-
-        fig_scatter, ax_scatter = plot_scatter_by_height(data_root, bin_edges, bin_centers, ztype=ztype, prof_types=prof_types)
-        fig_scatter.savefig(os.path.join(fig_save_root, '2-rmse-scatter.png'))
-
-        fig_err_v_grad_core, ax_err_v_grad_core = plot_pbl_rmse_vs_grad(data_root, 'aircore', prof_types=prof_types)
-        fig_err_v_grad_core.savefig(os.path.join(fig_save_root, '3a-err-vs-grad-aircore.png'))
-        fig_err_v_grad_craft, ax_err_v_grad_craft = plot_pbl_rmse_vs_grad(data_root, 'aircraft', prof_types=prof_types)
-        fig_err_v_grad_craft.savefig(os.path.join(fig_save_root, '3b-err-vs-grad-aircraft.png'))
-
-        # Make plots of the profiles with the top nine PBL RMSEs for aircore and aircraft
-        fig_9core, ax_9core = plot_top_n_plb_rmses(data_root, 'aircore', (2, 3), ztype=ztype)
-        fig_9core.savefig(os.path.join(fig_save_root, '4a-top-nine-pbl-rmses-aircore.png'))
-        fig_9craft, ax_9craft = plot_top_n_plb_rmses(data_root, 'aircraft', (2, 3), ztype=ztype)
-        fig_9craft.savefig(os.path.join(fig_save_root, '4b-top-nine-pbl-rmses-aircraft.png'))
-
-        # Make plots of the top nine PBL RMSE with a gradient of < 5 ppm between 400 hPa and the surface
-        def low_gradient(ordered_errs, ordered_grads):
-            return np.abs(ordered_grads) < 5
-
-        fig_9core2, ax_9core2 = plot_top_n_plb_rmses(data_root, 'aircore', (2, 3), filter_fxn=low_gradient, ztype=ztype)
-        fig_9core2.savefig(os.path.join(fig_save_root, '5a-top-nine-pbl-rmses-grad_lt_5-aircore.png'))
-        fig_9craft2, ax_9craft2 = plot_top_n_plb_rmses(data_root, 'aircraft', (2, 3), filter_fxn=low_gradient, ztype=ztype)
-        fig_9craft2.savefig(os.path.join(fig_save_root, '5a-top-nine-pbl-rmses-grad_lt_5-aircraft.png'))
     finally:
         plt.rcParams['font.size'] = old_font_size
 

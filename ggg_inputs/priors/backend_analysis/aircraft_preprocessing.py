@@ -1,10 +1,12 @@
 from collections import OrderedDict
 from copy import deepcopy
+from glob import glob
 import numpy as np
 import os
 import pandas as pd
 import re
 
+from . import backend_utils as butils
 from ...mod_maker.tccon_sites import tccon_site_info_for_date
 from ...common_utils import mod_utils
 from ...common_utils.ggg_logging import logger
@@ -262,5 +264,16 @@ def _write_single_atm_file(filename, data, utc_dates, var_mapping, header_info, 
             fobj.write(','.join(data_row) + '\n')
 
 
+def write_date_lat_lon_list(atm_dir, list_file):
+    atm_files = sorted(glob(os.path.join(atm_dir, '*')))
 
+    with open(list_file, 'w') as wobj:
+        wobj.write('DATES,LAT,LON\n')
+        for f in atm_files:
+            _, header_info = butils.read_atm_file(f)
+            date = header_info['flight_date']
+            lon = header_info['TCCON_site_longitude_E']
+            lat = header_info['TCCON_site_latitude_N']
 
+            line = '{date},{lat:.3f},{lon:.3f}\n'.format(date=date.strftime('%Y-%m-%d'), lat=lat, lon=lon)
+            wobj.write(line)

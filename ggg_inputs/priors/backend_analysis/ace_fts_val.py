@@ -1,6 +1,5 @@
 from __future__ import print_function, division
 
-import datetime as dt
 from glob import glob
 import netCDF4 as ncdf
 import numpy as np
@@ -8,6 +7,7 @@ import os
 
 from ...common_utils import mod_utils
 from . import backend_utils as butils
+from .backend_utils import find_matching_val_profile, get_matching_val_profiles
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
 
@@ -111,20 +111,6 @@ def match_ace_prior_profiles(prior_dirs, ace_dir, specie, match_alt=True, prior_
             'ace_datetimes': ace_datetimes}
 
 
-def _find_matching_ace_profile(this_lon, this_lat, this_date, ace_lons, ace_lats, ace_dates):
-    xx = (ace_dates >= this_date) & (ace_dates < (this_date + dt.timedelta(days=1))) \
-         & np.isclose(ace_lons, this_lon) & np.isclose(ace_lats, this_lat)
-    if np.sum(xx) < 1:
-        raise RuntimeError('Could not find a profile at lon/lat {}/{} on {}'.format(
-            this_lon, this_lat, this_date
-        ))
-    elif np.sum(xx) > 1:
-        raise RuntimeError('Found multiple profiles matching lon/lat {}/{} on {}'.format(
-            this_lon, this_lat, this_date
-        ))
-    return xx
-
-
 def get_matching_ace_hours(lon, lat, date, ace_dir, specie):
     lon, lat, date = _match_input_size('lon, lat, and date must have compatible sizes', lon, lat, date)
     ace_file = butils.find_ace_file(ace_dir, specie)
@@ -136,13 +122,13 @@ def get_matching_ace_hours(lon, lat, date, ace_dir, specie):
 
     matched_ace_hours = np.full([np.size(lon)], np.nan)
     for idx, (this_lon, this_lat, this_date) in enumerate(zip(lon, lat, date)):
-        xx = _find_matching_ace_profile(this_lon, this_lat, this_date, ace_lons, ace_lats, ace_dates)
+        xx = find_matching_val_profile(this_lon, this_lat, this_date, ace_lons, ace_lats, ace_dates)
         matched_ace_hours[idx] = ace_hours[xx]
 
     return matched_ace_hours
 
 
-def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_var=None, ace_var=None):
+def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt, ace_var=None, interp_to_alt=True):
     """
     Get the ACE profile(s) for a particular species at specific lat/lons
 
@@ -167,7 +153,6 @@ def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_v
     will load three profiles from 1 Jan 2012 at the three lon/lats given.
     """
 
-    interp_to_alt = alt is not None
     lon, lat, date, alt = _match_input_size('lon, lat, date, and alt must have compatible sizes', lon, lat, date, alt)
 
     ace_file = butils.find_ace_file(ace_dir, specie)
@@ -183,6 +168,7 @@ def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_v
         ace_qflags = butils.read_ace_var(nch, 'quality_flag', None)
         if ace_var == 'theta':
             ace_profiles = butils.read_ace_theta(nch, ace_qflags)
+            ace_prof_error = np.zeros_like(ace_profiles)
         else:
             try:
                 ace_profiles = butils.read_ace_var(nch, ace_var, ace_qflags)
@@ -197,31 +183,12 @@ def get_matching_ace_profiles(lon, lat, date, ace_dir, specie, alt=None, prior_v
     if ace_profiles.ndim == 1:
         if ace_profiles.size == ace_qflags.shape[0]:
             ace_profiles = np.tile(ace_profiles.reshape(-1, 1), [1, ace_qflags.shape[1]])
-            ace_prof_error = np.tile(ace_prof_error.shape(-1, 1), [1, ace_qflags.shape[1]])
+            ace_prof_error = np.tile(ace_prof_error.reshape(-1, 1), [1, ace_qflags.shape[1]])
         else:
             ace_profiles = np.tile(ace_profiles.reshape(1, -1), [ace_qflags.shape[0], 1])
             ace_prof_error = np.tile(ace_prof_error.reshape(1, -1), [ace_qflags.shape[0], 1])
 
-    n_profs = np.size(lon)
-    n_out_levels = np.shape(alt)[1] if interp_to_alt else np.size(ace_alts)
-    out_profiles = np.full([n_profs, n_out_levels], np.nan)
-    out_prof_errors = np.full([n_profs, n_out_levels], np.nan)
-    out_datetimes = np.full([n_profs], None)
+    return get_matching_val_profiles(lon, lat, date, alt, ace_lons, ace_lats, ace_dates, ace_alts,
+                                     ace_profiles, ace_prof_error, interp_to_alt=interp_to_alt)
 
-    for idx, (this_lon, this_lat, this_date, this_alt) in enumerate(zip(lon, lat, date, alt)):
-        xx = _find_matching_ace_profile(this_lon, this_lat, this_date, ace_lons, ace_lats, ace_dates)
 
-        this_prof = ace_profiles[xx, :]
-        this_prof_error = ace_prof_error[xx, :]
-        if interp_to_alt:
-            this_prof = np.interp(this_alt, ace_alts, this_prof.squeeze())
-            this_prof_error = np.interp(this_alt, ace_alts, this_prof_error.squeeze())
-
-        out_profiles[idx, :] = this_prof
-        out_prof_errors[idx, :] = this_prof_error
-        out_datetimes[idx] = ace_dates[xx]
-
-    if not interp_to_alt:
-        alt = np.tile(ace_alts.reshape(1, -1), [n_profs, 1])
-
-    return out_profiles, out_prof_errors, alt, out_datetimes
