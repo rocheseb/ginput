@@ -2,6 +2,7 @@ from __future__ import print_function
 import argparse
 from datetime import datetime as dtime, timedelta as tdel
 from glob import glob
+import numpy as np
 import os
 import re
 import shutil
@@ -116,28 +117,38 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir):
                          lon=lon, lat=lat, alt=0.0)
 
 
-def make_priors(prior_dir, mod_dir, gas_name):
+def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
     print('Will save to', prior_dir)
     # Find all the .mod files, get unique date/lat/lon (should be 8 files per)
     # and make an output directory for that
     mod_files = glob(os.path.join(mod_dir, '*.mod'))
     grouped_mod_files = dict()
+    aclons = np.array(aclons)
+    aclats = np.array(aclats)
+
     for f in mod_files:
         fbase = os.path.basename(f)
         lonstr = re.search(r'\d{1,3}.\d\d[EW]', fbase).group()
         latstr = re.search(r'\d{1,2}.\d\d[NS]', fbase).group()
         datestr = re.search(r'^\d{8}_\d{4}Z', fbase).group()
-        utc_date = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
-        utc_datestr = utc_date.date().strftime('%Y%m%d')
-        keystr = '{}_{}_{}'.format(utc_datestr, lonstr, latstr)
-        if keystr in grouped_mod_files:
-                grouped_mod_files[keystr].append(f)
-        else:
-                grouped_mod_files[keystr] = [f]
-                this_out_dir = os.path.join(prior_dir, keystr)
-                if os.path.isdir(this_out_dir):
-                        shutil.rmtree(this_out_dir)
-                os.makedirs(this_out_dir)
+
+        utc_datetime = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
+        utc_date = utc_datetime.date()
+        utc_datestr = utc_datetime.date().strftime('%Y%m%d')
+        lon = float(lonstr)
+        lat = float(latstr)
+
+        # If its one of the profiles in the info file, make it
+        if utc_date in acdates and np.any(np.abs(aclons - lon) < 0.02) and np.any(np.abs(aclats - lat) < 0.02):
+            keystr = '{}_{}_{}'.format(utc_datestr, lonstr, latstr)
+            if keystr in grouped_mod_files:
+                    grouped_mod_files[keystr].append(f)
+            else:
+                    grouped_mod_files[keystr] = [f]
+                    this_out_dir = os.path.join(prior_dir, keystr)
+                    if os.path.isdir(this_out_dir):
+                            shutil.rmtree(this_out_dir)
+                    os.makedirs(this_out_dir)
 
     print('Instantiating {} record'.format(gas_name))
     if gas_name.lower() == 'co2':
@@ -176,7 +187,8 @@ def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, 
         print('Not making .mod files')
 
     if makepriors:
-        make_priors(prior_top_dir, make_full_mod_dir(mod_top_dir, 'fpit'), gas_name)
+        make_priors(prior_top_dir, make_full_mod_dir(mod_top_dir, 'fpit'), gas_name,
+                    acdates=acdates, aclons=aclons, aclats=aclats)
     else:
         print('Not making priors')
 
