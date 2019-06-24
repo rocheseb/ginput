@@ -123,6 +123,7 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
     # and make an output directory for that
     mod_files = glob(os.path.join(mod_dir, '*.mod'))
     grouped_mod_files = dict()
+    acdates = [dtime.strptime(d.split('-')[0], '%Y%m%d').date() for d in acdates]
     aclons = np.array(aclons)
     aclats = np.array(aclats)
 
@@ -135,11 +136,12 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
         utc_datetime = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
         utc_date = utc_datetime.date()
         utc_datestr = utc_datetime.date().strftime('%Y%m%d')
-        lon = float(lonstr)
-        lat = float(latstr)
+        lon = mod_utils.format_lon(lonstr)
+        lat = mod_utils.format_lat(latstr)
 
         # If its one of the profiles in the info file, make it
         if utc_date in acdates and np.any(np.abs(aclons - lon) < 0.02) and np.any(np.abs(aclats - lat) < 0.02):
+            print(f, 'matches one of the listed profiles!')
             keystr = '{}_{}_{}'.format(utc_datestr, lonstr, latstr)
             if keystr in grouped_mod_files:
                     grouped_mod_files[keystr].append(f)
@@ -149,6 +151,8 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
                     if os.path.isdir(this_out_dir):
                             shutil.rmtree(this_out_dir)
                     os.makedirs(this_out_dir)
+        else:
+            print(f, 'is not for one of the profiles listed in the lat/lon file; skipping')
 
     print('Instantiating {} record'.format(gas_name))
     if gas_name.lower() == 'co2':
