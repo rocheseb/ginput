@@ -2,6 +2,7 @@ from __future__ import print_function
 import argparse
 from datetime import datetime as dtime, timedelta as tdel
 from glob import glob
+from multiprocessing import Pool
 import numpy as np
 import os
 import re
@@ -97,11 +98,20 @@ def download_geos(acdates, download_to_dir):
             print('Could not download GEOS-FP for {}'.format(dates))
 
 
-def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir):
+def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
+    def mm_helper(date_range, mm_lon, mm_lat):
+        date_fmt = '%Y-%m-%d'
+        print('Generating .mod files for {} to {}'.format(date_range[0].strftime(date_fmt),
+                                                          date_range[1].strftime(date_fmt)))
+        mod_maker.driver(date_range, geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
+                         lon=mm_lon, lat=mm_lat, alt=0.0, muted=nprocs > 0)
+
     print('Will save to', out_dir)
     mod_dir = make_full_mod_dir(out_dir, 'fpit')
     geos_files = sorted(glob(os.path.join(geos_dir, 'Np', 'GEOS*.nc4')))
     geos_dates = set([dtime.strptime(re.search(r'\d{8}', f).group(), '%Y%m%d') for f in geos_files])
+
+    mm_args = []
 
     for (dates, lon, lat) in zip(acdates, aclons, aclats):
         start_date, end_date = [dtime.strptime(d, '%Y%m%d') for d in dates.split('-')]
@@ -118,13 +128,20 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir):
             print('All files for {} at {}/{} complete, skipping'.format(dates, lon, lat))
             continue
         else:
-            print('One or more files for {} at {}/{} needs generated, proceeding'.format(dates, lon, lat))
+            print('One or more files for {} at {}/{} needs generated'.format(dates, lon, lat))
 
-        mod_maker.driver([start_date, end_date], geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
-                         lon=lon, lat=lat, alt=0.0)
+        these_args = ([start_date, end_date], lon, lat)
+        mm_args.append(these_args)
+
+    if nprocs == 0:
+        for args in mm_args:
+            mm_helper(*args)
+    else:
+        with Pool(processes=nprocs) as pool:
+            pool.starmap(mm_helper, mm_args)
 
 
-def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
+def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0):
     print('Will save to', prior_dir)
     # Find all the .mod files, get unique date/lat/lon (should be 8 files per)
     # and make an output directory for that
@@ -151,13 +168,13 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
             print(f, 'matches one of the listed profiles!')
             keystr = '{}_{}_{}'.format(utc_datestr, lonstr, latstr)
             if keystr in grouped_mod_files:
-                    grouped_mod_files[keystr].append(f)
+                grouped_mod_files[keystr].append(f)
             else:
-                    grouped_mod_files[keystr] = [f]
-                    this_out_dir = os.path.join(prior_dir, keystr)
-                    if os.path.isdir(this_out_dir):
-                            shutil.rmtree(this_out_dir)
-                    os.makedirs(this_out_dir)
+                grouped_mod_files[keystr] = [f]
+                this_out_dir = os.path.join(prior_dir, keystr)
+                if os.path.isdir(this_out_dir):
+                    shutil.rmtree(this_out_dir)
+                os.makedirs(this_out_dir)
         else:
             print(f, 'is not for one of the profiles listed in the lat/lon file; skipping')
 
@@ -173,16 +190,30 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats):
     else:
         raise RuntimeError('No record defined for gas_name = "{}"'.format(gas_name))
 
+    def prior_helper(ph_f, ph_obs_date, ph_out_dir):
+        _fbase = os.path.basename(ph_f)
+        print('Processing {} ({}), saving to {}'.format(_fbase, ph_obs_date.strftime('%Y-%m-%d'), ph_out_dir))
+        tccon_priors.generate_single_tccon_prior(ph_f, ph_obs_date, tdel(hours=0), gas_rec, write_map=ph_out_dir,
+                                                 use_eqlat_strat=True)
+
+    prior_args = []
+
     for k, files in grouped_mod_files.items():
         this_out_dir = os.path.join(prior_dir, k)
         for f in files:
             fbase = os.path.basename(f)
-            print('Processing', fbase)
             datestr = re.search(r'^\d{8}_\d{4}Z', fbase).group()
-            utc_offset = tdel(hours=0)  # calc_utc_offset(lon)
             obs_date = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
 
-            tccon_priors.generate_single_tccon_prior(f, obs_date, utc_offset, gas_rec, write_map=this_out_dir, use_eqlat_strat=True)
+            these_args = (f, obs_date, this_out_dir)
+            prior_args.append(these_args)
+
+    if nprocs == 0:
+        for args in prior_args:
+            prior_helper(*args)
+    else:
+        with Pool(processes=nprocs) as pool:
+            pool.starmap(prior_helper, prior_args)
 
 
 def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name):
@@ -211,6 +242,8 @@ def parse_args():
     parser.add_argument('--download', action='store_true', help='Download GEOS FP-IT files needed for these priors.')
     parser.add_argument('--makemod', action='store_true', help='Generate the .mod files for these priors.')
     parser.add_argument('--makepriors', action='store_true', help='Generate the priors as .map files.')
+    parser.add_argument('-n', '--nprocs', default=0, help='Number of processors to use to run in parallel mode '
+                                                          '(for --makemod and --makepriors only)')
 
     return vars(parser.parse_args())
 
