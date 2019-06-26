@@ -242,7 +242,7 @@ def read_atm_file(filename, limit_to_meas=False):
                 k, v = [s.strip() for s in line.split(':', 1)]
                 header_info[k] = convert_atm_value(v)
 
-    data = pd.read_csv(filename, header=line_num + 1)
+    data = pd.read_csv(filename, header=line_num + 1, na_values='NAN')
     if limit_to_meas:
         bottom_alt = header_info['aircraft_floor_m']
         top_alt = header_info['aircraft_ceiling_m']

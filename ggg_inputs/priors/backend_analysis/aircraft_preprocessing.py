@@ -141,7 +141,9 @@ def write_atm_files(data_df, metadata_df, common_header_info, profnum_var, lon_v
             n_points = np.size(all_data[var_mapping['additional'][0]])
 
         if n_points < min_num_pts:
-            logger.important('Profile {} has < {} valid points, skipping'.format(uind, min_num_pts))
+            logger.important('Profile {prof_num} has < {min_num} ({num_valid}/{num_total}) valid points, skipping'.format(
+                prof_num=uind, min_num=min_num_pts, num_valid=n_points, num_total=np.size(all_data[var_mapping['additional'][0]]))
+            )
             continue
 
         # Match to tccon site
@@ -177,23 +179,32 @@ def write_atm_files(data_df, metadata_df, common_header_info, profnum_var, lon_v
 
 def _match_to_tccon_site(lon, lat, date, tolerance=0.5):
     tccon_sites = tccon_site_info_for_date(date)
-    lauders = ('Lauder 01', 'Lauder 02')
+    lauders = ('lh', 'll')
+    jpls = ('jc', 'jf')
+    matched_site_id = None
+    matched_distance = tolerance
 
-    matched_site = None
+    # Loop through the sites, find all that are within the tolerance of the profile. If >1, choose the one that is
+    # closest. This handles cases like JPL/Pasadena where the two sites are within the usual tolerance of each other.
+    # However, what we really should do is modify the tccon_sites module to have time spans for ALL sites and only
+    # match if the TCCON is operational.
+    site_dict = {'name': 'NA', 'lon_180': lon, 'lat': lat}
     for site, info in tccon_sites.items():
         distance = (lon - info['lon_180'])**2 + (lat - info['lat'])**2
-        if distance < tolerance:
-            if matched_site is None:
-                matched_site = {'tccon_name': info['name'], 'tccon_lon': info['lon_180'], 'tccon_lat': info['lat']}
-            elif matched_site['tccon_name'] in lauders and info['name'] in lauders:
-                # Lauder is a special case that there's two instruments. Doesn't matter which one we match, so simplify
-                # the name (from "Lauder 01/02" to "Lauder") and keep it's lat/lon.
-                matched_site = {'tccon_name': 'Lauder', 'tccon_lon': info['lon_180'], 'tccon_lat': info['lat']}
-            else:
-                raise RuntimeError('Matched two TCCON sites: {} and {}'.format(matched_site['tccon_name'], info['name']))
+        if distance < matched_distance:
+            matched_site_id = site
+            matched_distance = distance
 
-    if matched_site is None:
-        matched_site = {'tccon_name': 'NA', 'tccon_lon': lon, 'tccon_lat': lat}
+    if matched_site_id is not None:
+        site_dict = deepcopy(tccon_sites[matched_site_id])
+
+    # Special cases - multiple instruments at one site. Just standardize the name
+    if matched_site_id in lauders:
+        site_dict['name'] = 'Lauder'
+    elif matched_site_id in jpls:
+        site_dict['name'] = 'JPL'
+
+    matched_site = {'tccon_name': site_dict['name'], 'tccon_lon': site_dict['lon_180'], 'tccon_lat': site_dict['lat']}
 
     return matched_site
 
@@ -216,6 +227,11 @@ def _write_single_atm_file(filename, data, utc_dates, var_mapping, header_info, 
 
         floor_time = data[alt_key].idxmin()
         floor_date = pd.Timestamp(floor_time.year, floor_time.month, floor_time.day)
+        start_time = utc_dates.min()
+        stop_time = utc_dates.max()
+        if stop_time - start_time > pd.Timedelta(days=1):
+            raise RuntimeError('When writing {}, found the start/stop times to be > 1 day apart. This seems unlikely '
+                               'and suggests that there was a problem grouping by profile number.')
 
         sigma_descr = 'aircraft_{}_error_2sigma_{}'.format(specie, unit)
         max_width = len(sigma_descr)
@@ -230,8 +246,8 @@ def _write_single_atm_file(filename, data, utc_dates, var_mapping, header_info, 
 
         fobj.write(format_header_line('flight_date', floor_date.strftime(_atm_date_fmt)))
         fobj.write(format_header_line('aircraft_floor_time_UTC', floor_time.strftime(_atm_datetime_fmt)))
-        fobj.write(format_header_line('aircraft_start_time_UTC', utc_dates.min().strftime(_atm_datetime_fmt)))
-        fobj.write(format_header_line('aircraft_stop_time_UTC', utc_dates.max().strftime(_atm_datetime_fmt)))
+        fobj.write(format_header_line('aircraft_start_time_UTC', start_time.strftime(_atm_datetime_fmt)))
+        fobj.write(format_header_line('aircraft_stop_time_UTC', stop_time.strftime(_atm_datetime_fmt)))
 
         fobj.write(format_header_line('altitude_source', var_mapping['altitude'][1]))
         fobj.write(format_header_line('pressure_source', var_mapping['pressure'][1]))
