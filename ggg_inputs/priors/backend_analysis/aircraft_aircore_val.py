@@ -236,6 +236,55 @@ def _get_subdirs_by_type(data_root, data_type, prof_type):
     return atm_dir, map_dir
 
 
+def _idl_maps_file(lon, ew, lat, ns, date_time):
+    subdir = 'maps_{lat:.2f}{ns}_{lon:.2f}{ew}'.format(lat=lat, ns=ns, lon=lon, ew=ew)
+    filename = 'xx{}.map'.format(date_time.strftime('%Y%m%d'))
+    return os.path.join(subdir, filename)
+
+
+def _py_maps_file(lon, ew, lat, ns, date_time):
+    # we need the extra round calls b/c in the list of dates/lats/lons, the lat/lons are rounded to 3 decimal places
+    # which means that in rare cases the rounding to 2 decimal places in the map directory names is different
+    # starting from 3 decimal places or unlimited, e.g. -21.43524898159509 vs -21.435 - the first rounds to -21.44,
+    # the second to -21.43
+    lon = round(lon, 3)
+    lat = round(lat, 3)
+    subdir = '{ymd}_{lon:.2f}{ew}_{lat:.2f}{ns}'.format(ymd=date_time.strftime('%Y%m%d'), lon=lon, ew=ew,
+                                                        lat=lat, ns=ns)
+    # the new files are given every three hours. Need to find the closest one in time
+    hrs = np.arange(0, 24, 3)
+    i_hr = np.argmin(np.abs(hrs - date_time.hour))
+    hr = hrs[i_hr]
+
+    filename = 'xx{lat:.0f}{ns}_{ymd}_{hr:02d}00.map'.format(lat=lat, ns=ns, ymd=date_time.strftime('%Y%m%d'),
+                                                             hr=hr)
+    return os.path.join(subdir, filename)
+
+
+def _choose_map_file_function(example_dirname):
+    if re.match('maps', example_dirname):
+        return _idl_maps_file
+    elif re.match(r'\d{8}', example_dirname):
+        return _py_maps_file
+    else:
+        raise RuntimeError('Do not know what format the maps directory "{}" is'.format(example_dirname))
+
+
+def _get_id_info_from_atm_file(atmf):
+    _, header_info = read_atm_file(atmf)
+    lat = header_info['TCCON_site_latitude_N']
+    ns = 'S' if lat < 0 else 'N'
+    lat = np.abs(lat)
+
+    lon = header_info['TCCON_site_longitude_E']
+    ew = 'W' if lon < 0 else 'E'
+    lon = np.abs(lon)
+
+    date_time = header_info['flight_date']
+
+    return lon, ew, lat, ns, date_time
+
+
 def iter_matched_data_by_type(data_root, data_type, prof_type, **kwargs):
     """
     Iterate over matched pairs of .map and .atm files assuming a standard directory structure
@@ -272,7 +321,7 @@ def iter_matched_data_by_type(data_root, data_type, prof_type, **kwargs):
 
 
 def iter_matched_data(atm_dir, map_dir, years=None, months=None, skip_missing_map=False, ret_filenames=False,
-                      include_filenames=False):
+                      include_filenames=False, specie=''):
     """
     Iterate over matched pairs of .atm and .map files.
 
@@ -309,65 +358,32 @@ def iter_matched_data(atm_dir, map_dir, years=None, months=None, skip_missing_ma
     :param include_filenames: set to ``True`` to return both data and filenames
     :type include_filenames: bool
 
+    :param specie: which chemical specie to read. Assumes that the .atm filename have this right before the .atm
+     extension, e.g. "korus_38.1N_131.2E_20160512_199018_N2O.atm". Default is an empty string, meaning that it will
+     match any .atm file in the ``atm_dir``.
+    :type specie: str
+
     :return: data loaded from the .atm and .map files, the .atm and .map file names, or tuples of both
     :rtype: iterator of (:class:`pandas.DataFrame`, :class:`pandas.DataFrame`) OR (str, str) OR
      ((:class:`pandas.DataFrame`, str), (:class:`pandas.DataFrame`, str)) pairs.
     """
-    def idl_maps_file(lon, ew, lat, ns, date_time):
-        subdir = 'maps_{lat:.2f}{ns}_{lon:.2f}{ew}'.format(lat=lat, ns=ns, lon=lon, ew=ew)
-        filename = 'xx{}.map'.format(date_time.strftime('%Y%m%d'))
-        return os.path.join(subdir, filename)
-
-    def py_maps_file(lon, ew, lat, ns, date_time):
-        subdir = '{ymd}_{lon:.2f}{ew}_{lat:.2f}{ns}'.format(ymd=date_time.strftime('%Y%m%d'), lon=lon, ew=ew, lat=lat,
-                                                            ns=ns)
-        # the new files are given every three hours. Need to find the closest one in time
-        hrs = np.arange(0, 24, 3)
-        i_hr = np.argmin(np.abs(hrs - date_time.hour))
-        hr = hrs[i_hr]
-
-        filename = 'xx{lat:.0f}{ns}_{ymd}_{hr:02d}00.map'.format(lat=lat, ns=ns, ymd=date_time.strftime('%Y%m%d'),
-                                                                 hr=hr)
-        return os.path.join(subdir, filename)
-
-    def choose_map_file_function(example_dirname):
-        if re.match('maps', example_dirname):
-            return idl_maps_file
-        elif re.match(r'\d{8}', example_dirname):
-            return py_maps_file
-        else:
-            raise RuntimeError('Do not know what format the maps directory "{}" is'.format(example_dirname))
-
-    def id_fxn(atmf):
-        _, header_info = read_atm_file(atmf)
-        lat = header_info['TCCON_site_latitude_N']
-        ns = 'S' if lat < 0 else 'N'
-        lat = np.abs(lat)
-
-        lon = header_info['TCCON_site_longitude_E']
-        ew = 'W' if lon < 0 else 'E'
-        lon = np.abs(lon)
-
-        date_time = header_info['aircraft_start_time_UTC']
-
-        return lon, ew, lat, ns, date_time
 
     # List the available obs files
-    atm_files = sorted(glob(os.path.join(atm_dir, '*CO2.atm')))
+    atm_files = sorted(glob(os.path.join(atm_dir, '*{}.atm'.format(specie))))
 
-    # List one map file directorie, just to determine which format they are. glob does not return . and ..
-    example_map_dir = glob(os.path.join(atm_dir, '*'))[0]
-    map_file_fxn = choose_map_file_function(example_map_dir)
+    # List one map file directory, just to determine which format they are. glob does not return . and ..
+    example_map_dir = glob(os.path.join(map_dir, '*'))[0]
+    map_file_fxn = _choose_map_file_function(os.path.basename(example_map_dir))
 
     missing = 0
     for atmf in atm_files:
-        lon, ew, lat, ns, date_time = id_fxn(atmf)
+        _, _, _, _, date_time = _get_id_info_from_atm_file(atmf)
         if years is not None and date_time.year not in years:
             continue
         elif months is not None and date_time.month not in months:
             continue
 
-        map_file = os.path.join(map_dir, map_file_fxn(lon, ew, lat, ns, date_time))
+        map_file = find_map_for_obs(atmf, map_dir, check_file_exists=False, map_file_fxn=map_file_fxn)
         if not os.path.exists(map_file):
             if skip_missing_map:
                 print('Could not find {} corresponding to atm file {}'.format(map_file, atmf))
@@ -388,7 +404,7 @@ def iter_matched_data(atm_dir, map_dir, years=None, months=None, skip_missing_ma
     print('missing {} of {} files'.format(missing, len(atm_files)))
 
 
-def find_map_for_obs_by_type(obs_file, data_type, prof_type, data_root=None):
+def find_map_for_obs_by_type(obs_file, data_type, prof_type, data_root=None, check_file_exists=True):
     """
     Find the map file that corresponds to an observation .atm file
 
@@ -410,23 +426,44 @@ def find_map_for_obs_by_type(obs_file, data_type, prof_type, data_root=None):
     if data_root is None:
         data_root = os.path.abspath(os.path.join(os.path.dirname(obs_file), '..', '..'))
 
-    obs_file = os.path.basename(obs_file)
-
-    for obsf, mapf in iter_matched_data_by_type(data_root, data_type, prof_type, ret_filenames=True):
-        if os.path.basename(obsf) == obs_file:
-            return mapf
-
-    return None
+    atm_dir, map_dir = _get_subdirs_by_type(data_root, data_type, prof_type)
+    return find_map_for_obs(obs_file, map_dir, check_file_exists=check_file_exists)
 
 
-def find_map_for_obs(obs_file, map_dir):
-    atm_dir = os.path.dirname(obs_file)
-    obs_file = os.path.basename(obs_file)
-    for obsf, mapf in iter_matched_data(atm_dir, map_dir, ret_filenames=True):
-        if os.path.basename(obsf) == obs_file:
-            return mapf
+def find_map_for_obs(obs_file, map_dir, check_file_exists=True, map_file_fxn=None):
+    """
+    Find a .map file that corresponds to a given observation .atm file
 
-    return None
+    :param obs_file: the .atm file to find the corresponding .map file for
+    :type obs_file: str
+
+    :param map_dir: the directory containing the .map subdirectories
+    :type map_dir: str
+
+    :param check_file_exists: by default, this function will check that the expected .map file exists and raise an
+     error if it does not. However, you can bypass this check by setting this to ``False``, either for speed, or because
+     you want to handle missing files specially.
+    :type check_file_exists: bool
+
+    :param map_file_fxn: the function that, given the longitude, ew, latitude, ns, and date of the .atm file will
+     generate the subdir + filename of the .map file. If not given, it will be chosen automatically based on the format
+     of the map subdirectory names.
+    :type map_file_fxn: callable
+
+    :return: the path to the .map file
+    :rtype: str
+    :raises IOError: if ``check_file_exists`` is ``True`` and the .map file does not exist
+    """
+    lon, ew, lat, ns, date_time = _get_id_info_from_atm_file(obs_file)
+    example_map_dir = glob(os.path.join(map_dir, '*'))[0]
+    if map_file_fxn is None:
+        map_file_fxn = _choose_map_file_function(os.path.basename(example_map_dir))
+
+    map_file = os.path.join(map_dir, map_file_fxn(lon, ew, lat, ns, date_time))
+    if check_file_exists and not os.path.isfile(map_file):
+        raise IOError('Could not find {} corresponding to atm file {}'.format(map_file, obs_file))
+
+    return map_file
 
 
 def load_as_array_by_type(data_root, data_type, prof_type, **kwargs):
@@ -471,7 +508,7 @@ def load_as_array(atm_dir, map_dir, ztype='pres', years=None, months=None):
     return z, obs_co2, prof_co2
 
 
-def load_binned_array(atm_dir, map_dir, ztype='pres', bin_edges=None, bin_op=np.nanmean):
+def load_binned_array(atm_dir, map_dir, specie, ztype='pres', bin_edges=None, bin_op=np.nanmean):
     """
     Load the observed and prior profiles as a 2D array.
 
@@ -491,24 +528,29 @@ def load_binned_array(atm_dir, map_dir, ztype='pres', bin_edges=None, bin_op=np.
 
     :param bin_op: see :func:`bin_data`
 
+    :param specie: see :func:`iter_matched_data`
+
     :return: observed profiles and prior profiles as 2D arrays with dimensions (n_profiles) x (n_bins)
     :rtype: :class:`numpy.ndarray`, :class:`numpy.ndarray`
     """
     if bin_edges is None:
-        bin_edges, _ = _get_std_bins(ztype)
+        bin_edges, bin_centers, = _get_std_bins(ztype)
 
     n_profs = num_atm_files(atm_dir)
     n_levels = np.size(bin_edges) - 1
     obs_profiles = np.full([n_profs, n_levels], np.nan)
     prior_profiles = np.full([n_profs, n_levels], np.nan)
 
-    for i, ((obsdat, obsfile), (mapdat, mapfile)) in enumerate(iter_matched_data(atm_dir, map_dir, include_filenames=True)):
-        this_obs_conc, this_prof_conc, this_z = interp_profile_to_obs(obsdat, mapdat, ztype=ztype, obs_file=obsfile,
-                                                                      map_dir=map_dir)
+    pbar = mod_utils.ProgressBar(n_profs, prefix='Loading profile', style='counter', suffix=' ')
+    for i, ((obsdat, obsfile), (mapdat, mapfile)) in enumerate(iter_matched_data(atm_dir, map_dir, specie=specie.upper(),
+                                                                                 include_filenames=True)):
+        pbar.print_bar(i)
+        this_obs_conc, this_prof_conc, this_z = interp_profile_to_obs(obsdat, mapdat, specie.lower(), ztype=ztype,
+                                                                      obs_file=obsfile, map_dir=map_dir)
         obs_profiles[i, :] = bin_data(this_obs_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
         prior_profiles[i, :] = bin_data(this_prof_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
 
-    return obs_profiles, prior_profiles
+    return obs_profiles, prior_profiles, bin_centers
 
 
 def interp_profile_to_obs_by_type(obsdat, mapdat, data_type=None, data_root=None, **kwargs):
@@ -536,7 +578,7 @@ def interp_profile_to_obs_by_type(obsdat, mapdat, data_type=None, data_root=None
     return interp_profile_to_obs(obsdat, mapdat, **kwargs)
 
 
-def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, map_dir=None, limit_by_zsurf=True):
+def interp_profile_to_obs(obsdat, mapdat, specie, ztype='pres', obs_file=None, map_dir=None, limit_by_zsurf=True):
     """
     Interpolate prior profile data to the observation's altitude
 
@@ -561,17 +603,32 @@ def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, map_dir=N
     :return: observed concentration, prior concentration, z-coordinates
     :rtype: three :class:`numpy.ndarray` instances
     """
+    def find_obs_z_var(df):
+        search_str = 'Pressure' if ztype == 'pres' else 'Altitude'
+        var_name = None
+        for k in df.keys():
+            if k.startswith(search_str) and var_name is None:
+                var_name = k
+            elif k.startswith(search_str) and var_name is not None:
+                raise RuntimeError('Found multiple column names starting with "{}", cannot determine which one is the '
+                                   'z-variable'.format(search_str))
+
+        if var_name is None:
+            raise RuntimeError('Could not find a column name starting with "{}" to be the z-variable'.format(search_str))
+
+        return var_name
+
     interp_mode = 'log-log' if ztype == 'pres' else 'linear'
-    obs_z_var = 'Pressure_hPa' if ztype == 'pres' else 'Altitude_m'
+    obs_z_var = find_obs_z_var(obsdat)
     obs_zscale = 1.0 if ztype == 'pres' else 0.001  # must convert meters to kilometers
     prof_z_var = 'Pressure' if ztype == 'pres' else 'Height'
 
-    # get the observed CO2 and vertical coordinate
-    this_obs_co2 = obsdat['CO2_profile_ppm'].values
+    # get the observed CO2 and vertical coordinate. Assume that the concentration is the last column in the .atm files
+    this_obs_conc = obsdat.iloc[:, -1].values
     this_obs_z = obsdat[obs_z_var].values * obs_zscale
 
     # get the profile CO2, interpolated to the observation points
-    this_prof_co2 = mapdat['co2'].values
+    this_prof_conc = mapdat[specie].values
     this_prof_z = mapdat[prof_z_var].values
 
     # if we only want profile levels above the surface, get the surface altitude and the altitude profile (regardless
@@ -586,7 +643,7 @@ def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, map_dir=N
         z_surf = full_py_mapdate['constants']['Surface altitude']
         z_alt = mapdat['Height'].values
         zz = z_alt >= z_surf
-        this_prof_co2 = this_prof_co2[zz]
+        this_prof_conc = this_prof_conc[zz]
         this_prof_z = this_prof_z[zz]
 
     # if we want this to be relative to the tropopause height, we need the python map files for the tropopause height
@@ -595,8 +652,8 @@ def interp_profile_to_obs(obsdat, mapdat, ztype='pres', obs_file=None, map_dir=N
     else:
         z_trop = 0.0
 
-    this_prof_co2 = mod_utils.mod_interpolation_new(this_obs_z, this_prof_z, this_prof_co2, interp_mode=interp_mode)
-    return this_obs_co2, this_prof_co2, this_obs_z - z_trop
+    this_prof_conc = mod_utils.mod_interpolation_new(this_obs_z, this_prof_z, this_prof_conc, interp_mode=interp_mode)
+    return this_obs_conc, this_prof_conc, this_obs_z - z_trop
 
 
 def fmt_lon(lon):
@@ -774,6 +831,28 @@ def plot_rmse_comparison(data_roots, data_type, bin_edges=None, bin_centers=None
         ax.legend()
 
     return fig, ax, all_binned_rmses
+
+
+def plot_bias_spaghetti(obs_profiles, prior_profiles, z, ax=None, color=None, mean_color=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+
+    if color is None and mean_color is None:
+        color = 'gray'
+        mean_color = 'black'
+    elif color is None:
+        color = 'gray'
+    elif mean_color is None:
+        mean_color = color
+
+    diff = (obs_profiles - prior_profiles).T
+    ax.plot(diff, z, color=color, linewidth=0.5)
+    ax.plot(np.nanmean(diff, axis=1), z, color=mean_color, linewidth=2)
+    ax.grid()
+
+    return fig, ax
 
 
 def plot_profiles_comparison(obs_file, data_roots, data_type, prof_type='py', ztype='pres', labels=None,
