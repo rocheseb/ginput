@@ -35,7 +35,7 @@ site_dict = {
     'll':{'name': 'Lauder 02','loc':'New Zealand','lat':-45.038,'lon':169.684,'alt':370},
     'tk':{'name': 'Tsukuba 02','loc':'Japan','lat':63.0513,'lon':140.1215,'alt':31},
     'ka':{'name': 'Karlsruhe','loc':'Germany','lat':49.1002,'lon':8.4385,'alt':119},
-    'ae':{'name': 'Ascenssion Island','loc':'United Kingdom','lat':-7.933333,'lon':345.583333,'alt':0},
+    'ae':{'name': 'Ascension Island','loc':'United Kingdom','lat':-7.933333,'lon':345.583333,'alt':0},
     'eu':{'name': 'Eureka','loc':'Canada','lat':80.05,'lon':273.58,'alt':610},
     'so':{'name': 'Sodankyla','loc':'Finland','lat':67.3668,'lon':26.6310,'alt':188},
     'iz':{'name': 'Izana','loc':'Spain','lat':28.0,'lon':344.0,'alt':2370},
