@@ -54,7 +54,7 @@ def read_info_file(info_filename):
     return info_dict
 
 
-def read_date_lat_lon_file(acinfo_filename):
+def read_date_lat_lon_file(acinfo_filename, date_fmt='str'):
     with open(acinfo_filename, 'r') as acfile:
         # Skip line 1 - header
         acfile.readline()
@@ -64,11 +64,18 @@ def read_date_lat_lon_file(acinfo_filename):
         for line in acfile:
             if line.startswith('#'):
                 continue
+            elif '#' in line:
+                line = line.split('#')[0].strip()
             line_parts = line.split(',')
             date_str = line_parts[0]
             date1 = dtime.strptime(date_str, '%Y-%m-%d')
-            date2 = date1 + tdel(days=1)
-            acdates.append(date1.strftime('%Y%m%d') + '-' + date2.strftime('%Y%m%d'))
+            if date_fmt == 'str':
+                date2 = date1 + tdel(days=1)
+                acdates.append(date1.strftime('%Y%m%d') + '-' + date2.strftime('%Y%m%d'))
+            elif date_fmt == 'datetime':
+                acdates.append(date1)
+            else:
+                raise ValueError('date_fmt must be either "str" or "datetime"')
 
             aclats.append(float(line_parts[1]))
             aclons.append(float(line_parts[2]))
