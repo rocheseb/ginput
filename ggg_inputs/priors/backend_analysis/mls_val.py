@@ -8,7 +8,7 @@ from sat_utils import mls
 from ggg_inputs.common_utils import mod_utils
 
 
-def write_mls_profile_list(mls_dirs, mls_specie, list_file, min_num_pts=10, every_n_days=1):
+def write_mls_profile_list(mls_dirs, mls_specie, list_file, min_num_pts=10, every_n_days=1, every_n_profs=1):
     with open(list_file, 'w') as wobj:
         wobj.write('DATES,LAT,LON\n')
         for this_dir in mls_dirs:
@@ -25,14 +25,26 @@ def write_mls_profile_list(mls_dirs, mls_specie, list_file, min_num_pts=10, ever
 
                 timestamps = profiles.coords['time'].to_pandas()
                 lines = ''
+
+                # This will one added on every nth profile. After we make a profile, it gets one subtracted so we
+                # don't add another one until the next nth profile. However, if we skip one because it isn't a good
+                # profile, this doesn't get subtracted, so it will try to make the right number of profiles.
+                profs_to_make = 0
                 for date, lat, lon, index, is_good in zip(timestamps, profiles.coords['lat'], profiles.coords['lon'],
                                                           prof_indices, xx):
-                    if not is_good:
+                    if index % every_n_profs == 0:
+                        profs_to_make += 1
+
+                    if profs_to_make == 0:
                         continue
+                    elif not is_good:
+                        continue
+
                     lines += '{date},{lat:.3f},{lon:.3f} # {filename}, profile {profnum}\n'.format(
                         date=date.strftime('%Y-%m-%d'), lat=lat.item(), lon=lon.item(), filename=os.path.basename(f),
                         profnum=index
                     )
+                    profs_to_make -= 1
                 wobj.write(lines)
 
             pbar.finish()
