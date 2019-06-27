@@ -214,7 +214,7 @@ class TraceGasTropicsRecord(object):
     _default_sbc_lag = relativedelta(months=2)
 
     # This sets the maximum degree of the polynomial used to fit and extend the MLO/SMO trends. Set to 1 to use linear,
-    # 2 for quadratic, etc.
+    # 2 for quadratic, etc. One special case: 'exp' will use an exponential, rather than polynomial, fit.
     _max_trend_poly_deg = 2
     _nyears_for_extrap_avg = 10
     _max_safe_extrap_forward = relativedelta(years=5)
@@ -1313,6 +1313,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
+    _max_trend_poly_deg = 'exp'
 
 
 class N2OTropicsRecord(TraceGasTropicsRecord):
