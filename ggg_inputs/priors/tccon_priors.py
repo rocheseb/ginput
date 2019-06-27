@@ -124,6 +124,13 @@ class GasRecordExtrapolationError(GasRecordError):
     pass
 
 
+class GasRecordDateError(GasRecordError):
+    """
+    Error to raise for any issues with dates in the gas records
+    """
+    pass
+
+
 def _init_prof(profs, n_lev, n_profs=0, fill_val=np.nan):
     """
     Initialize arrays for various profiles.
@@ -194,9 +201,9 @@ class TraceGasTropicsRecord(object):
     :type recalculate_strat_lut: bool or None
 
     :param save_strat: optional, set to ``False`` to avoid saving the stratospheric concentration lookup if it is
-     recalculated. Default is ``True``. This option has no effect if the stratospheric lookup table is read from the
-     netCDF file.
-    :type save_strat: bool
+     recalculated. Default is ``None``, which will save the LUT if recalculated unless it was recalculated to cover the
+     time frame requested. This option has no effect if the stratospheric lookup table is read from the netCDF file.
+    :type save_strat: bool or None
     """
 
     # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
@@ -221,6 +228,10 @@ class TraceGasTropicsRecord(object):
 
     # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
     _no_theta_coord = np.array([0.])
+
+    # Sets an assumption for how long the age spectra go back. Currently (2019-06-27) only used to modify the start date
+    # to ensure that there is strat data over the requested time.
+    _age_spectra_length = relativedelta(years=30)
 
     @classmethod
     def get_strat_lut_file(cls):
@@ -250,7 +261,7 @@ class TraceGasTropicsRecord(object):
         return self._last_record_date(self.conc_seasonal)
 
     def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None,
-                 strat_age_scale=1.0, recalculate_strat_lut=None, save_strat=True):
+                 strat_age_scale=1.0, recalculate_strat_lut=None, save_strat=None):
         first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
         self.mlo_file = mlo_file
         self.smo_file = smo_file
@@ -285,6 +296,22 @@ class TraceGasTropicsRecord(object):
             # the LUT
             logger.important('Using existing strat LUT as requested')
 
+        if not recalculate_strat_lut:
+            # If we're loading the strat lookup table, we need to pass the MLO and SMO files to check their SHA1 hashes
+            # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
+            # generate the strat table stored in the netCDF file.
+            logger.info('Loading {} strat LUT'.format(self.gas_name))
+            self.conc_strat = self._load_strat_arrays()
+            if not self._check_strat_dates(self.conc_strat, first_date, last_date):
+                logger.important('Cached strat LUT does not span enough time to cover the requested dates, must '
+                                 'recalculate.')
+                recalculate_strat_lut = True
+                save_strat = False if save_strat is None else save_strat
+
+        if save_strat is None:
+            save_strat = True
+
+        # May enter this if recalculation required by user, dependencies, or dates.
         if recalculate_strat_lut:
             logger.info('Calculating {} strat LUT'.format(self.gas_name))
             self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
@@ -293,28 +320,21 @@ class TraceGasTropicsRecord(object):
                     self._save_strat_arrays()
                 except PermissionError:
                     logger.important('Could not save strat LUT file due to permission error. This just means it will '
-                                      'need recalculated the next time this record is loaded')
+                                     'need recalculated the next time this record is loaded')
                 else:
 
                     logger.important('Saved {} strat LUT file as "{}"'.format(self.gas_name, os.path.abspath(self.get_strat_lut_file())))
-        else:
-            # If we're loading the strat lookup table, we need to pass the MLO and SMO files to check their SHA1 hashes
-            # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
-            # generate the strat table stored in the netCDF file.
-            logger.info('Loading {} strat LUT'.format(self.gas_name))
-            self.conc_strat = self._load_strat_arrays()
 
     @classmethod
     def _init_helper(cls, first_date, last_date, lag, mlo_file, smo_file):
         # For the stratosphere data, since the age spectra are defined over a 30 year window, we need to make sure
         # we have values back to slightly more than 30 years before the first TCCON data. Assuming that's around 2004,
         # a default age of 2000 - 30 = 1970 should be good.
-        age_spectra_length = relativedelta(years=30)
 
         if first_date is None:
-            first_date = dt.datetime(2000, 1, 1) - age_spectra_length
+            first_date = dt.datetime(2000, 1, 1) - cls._age_spectra_length
         else:
-            first_date -= age_spectra_length
+            first_date -= cls._age_spectra_length
 
         if last_date is None:
             # By default, we want to extrapolate to 2 years out from today; the max negative age-of-air in the
@@ -335,6 +355,20 @@ class TraceGasTropicsRecord(object):
             raise TypeError('Must give both MLO and SMO files or neither')
 
         return first_date, last_date, sbc_lag, mlo_file, smo_file
+
+    @classmethod
+    def _check_strat_dates(cls, strat_lut, first_date, last_date):
+        strat_first_date = strat_lut['tropics'].coords['date'].min()
+        strat_last_date = strat_lut['tropics'].coords['date'].max()
+
+        for region, lut in strat_lut.items():
+            if lut.coords['date'].min() != strat_first_date or lut.coords['date'].max() != strat_last_date:
+                raise GasRecordDateError('"{}" strat LUT has different start/end dates than "tropics" LUT'.format(region))
+
+        if strat_first_date > np.datetime64(first_date) or strat_last_date < np.datetime64(last_date)   :
+            return False
+        else:
+            return True
 
     @classmethod
     def _get_agespec_files(cls, region):
@@ -1283,7 +1317,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
         #   Saad et al. 2014, AMT, doi: 10.5194/amt-7-2907-2014
         #   Washenfelder et al. 2003, GRL, doi: 10.1029/2003GL017969
         if ch4_record is None:
-            ch4_record = CH4TropicsRecord(first_date=out_dates.min(), last_date=out_dates.max())
+            ch4_record = CH4TropicsRecord(first_date=out_dates.min() + cls._age_spectra_length, last_date=out_dates.max())
 
         bin_names, ch4_hf_slopes, ch4_hf_fit_params = cls._load_ch4_hf_slopes()
 
