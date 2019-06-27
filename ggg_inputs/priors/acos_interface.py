@@ -17,7 +17,7 @@ from multiprocessing import Pool
 import numpy as np
 import os
 
-from ..common_utils import mod_utils, ioutils, mod_constants
+from ..common_utils import mod_utils, mod_constants
 from ..common_utils.sat_utils import time_weight, datetime2datenum
 from ..common_utils.ggg_logging import logger, setup_logger
 from ..mod_maker import mod_maker
