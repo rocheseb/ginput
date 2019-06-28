@@ -13,6 +13,7 @@ import sys
 from .. import tccon_priors
 from ...mod_maker import mod_maker
 from ...common_utils import mod_utils
+from ...download import get_GEOS5
 
 # These should match the arg names in driver()
 _req_info_keys = ('gas_name', 'site_file', 'geos_top_dir', 'mod_top_dir', 'prior_top_dir')
@@ -28,8 +29,17 @@ _req_info_help = {'gas_name': 'The name of the gas to generate priors for.',
                   'prior_top_dir': 'The directory to save the .mod files to. Will be organized into subdirectories by '
                                    'date, lat, and lon automatically.'}
 
+_default_file_types = ('2dmet', '3dmet')
+
 def unfmt_lon(lonstr):
     mod_utils.format_lon(lonstr)
+
+
+def _date_range_str_to_dates(drange_str):
+    start_dstr, end_dstr = drange_str.split('-')
+    start_date = dtime.strptime(start_dstr, '%Y%m%d')
+    end_date = dtime.strptime(end_dstr, '%Y%m%d')
+    return start_date, end_date
 
 
 def read_info_file(info_filename):
@@ -88,14 +98,10 @@ def make_full_mod_dir(top_dir, product):
     return os.path.join(top_dir, product.lower(), 'xx', 'vertical')
 
 
-def download_geos(acdates, download_to_dir):
-    raise NotImplementedError('Not updated to work with packaged ggg_inputs')
+def download_geos(acdates, download_to_dir, file_types=_default_file_types):
     for dates in acdates:
-        try:
-            check_call(['python', 'get_GEOS5.py', dates, 'mode=FPIT', 'path={}'.format(download_to_dir)],
-                       cwd=download_bin_dir)
-        except CalledProcessError:
-            print('Could not download GEOS-FP for {}'.format(dates))
+        date_range = _date_range_str_to_dates(dates)
+        get_GEOS5.driver(date_range, mode='FPIT', path=download_to_dir, filetypes=file_types)
 
 
 def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
@@ -216,10 +222,10 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
             pool.starmap(prior_helper, prior_args)
 
 
-def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name):
+def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name, dl_file_types):
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
     if download:
-        download_geos(acdates, geos_top_dir)
+        download_geos(acdates, geos_top_dir, file_types=dl_file_types)
     else:
         print('Not downloading GEOS data')
 
@@ -244,6 +250,9 @@ def parse_args():
     parser.add_argument('--makepriors', action='store_true', help='Generate the priors as .map files.')
     parser.add_argument('-n', '--nprocs', default=0, help='Number of processors to use to run in parallel mode '
                                                           '(for --makemod and --makepriors only)')
+    parser.add_argument('--dl-file-types', default=_default_file_types, type=get_GEOS5._parse_file_types,
+                        help='Which GEOS file types to download with --download (no effect otherwise) as a '
+                             'comma-separated list. Allowed types are {}.'.format(', '.join(get_GEOS5._file_types)))
 
     return vars(parser.parse_args())
 
