@@ -105,20 +105,16 @@ def download_geos(acdates, download_to_dir, file_types=_default_file_types):
 
 
 def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
-    def mm_helper(date_range, mm_lon, mm_lat):
-        date_fmt = '%Y-%m-%d'
-        print('Generating .mod files for {} to {}'.format(date_range[0].strftime(date_fmt),
-                                                          date_range[1].strftime(date_fmt)))
-        mod_maker.driver(date_range, geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
-                         lon=mm_lon, lat=mm_lat, alt=0.0, muted=nprocs > 0)
 
     print('Will save to', out_dir)
     mod_dir = make_full_mod_dir(out_dir, 'fpit')
+    print('  (Listing GEOS files...)')
     geos_files = sorted(glob(os.path.join(geos_dir, 'Np', 'GEOS*.nc4')))
     geos_dates = set([dtime.strptime(re.search(r'\d{8}', f).group(), '%Y%m%d') for f in geos_files])
 
     mm_args = []
 
+    print('  (Making list of .mod files to generate...)')
     for (dates, lon, lat) in zip(acdates, aclons, aclats):
         start_date, end_date = [dtime.strptime(d, '%Y%m%d') for d in dates.split('-')]
         if start_date not in geos_dates:
@@ -136,15 +132,26 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
         else:
             print('One or more files for {} at {}/{} needs generated'.format(dates, lon, lat))
 
-        these_args = ([start_date, end_date], lon, lat)
+        these_args = ([start_date, end_date], lon, lat, geos_dir, out_dir, nprocs)
         mm_args.append(these_args)
 
     if nprocs == 0:
+        print('Making .mod files in serial mode')
         for args in mm_args:
             mm_helper(*args)
     else:
+        print('Making .mod file in parallel mode with {} processors'.format(nprocs))
         with Pool(processes=nprocs) as pool:
             pool.starmap(mm_helper, mm_args)
+
+
+def mm_helper(date_range, mm_lon, mm_lat, geos_dir, out_dir, nprocs):
+    date_fmt = '%Y-%m-%d'
+    print('Generating .mod files at {}/{} for {} to {}'.format(mm_lon, mm_lat,
+                                                               date_range[0].strftime(date_fmt),
+                                                               date_range[1].strftime(date_fmt)))
+    mod_maker.driver(date_range, geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
+                     lon=mm_lon, lat=mm_lat, alt=0.0, muted=nprocs > 0)
 
 
 def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0):
@@ -196,11 +203,6 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
     else:
         raise RuntimeError('No record defined for gas_name = "{}"'.format(gas_name))
 
-    def prior_helper(ph_f, ph_obs_date, ph_out_dir):
-        _fbase = os.path.basename(ph_f)
-        print('Processing {} ({}), saving to {}'.format(_fbase, ph_obs_date.strftime('%Y-%m-%d'), ph_out_dir))
-        tccon_priors.generate_single_tccon_prior(ph_f, ph_obs_date, tdel(hours=0), gas_rec, write_map=ph_out_dir,
-                                                 use_eqlat_strat=True)
 
     prior_args = []
 
@@ -211,18 +213,24 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
             datestr = re.search(r'^\d{8}_\d{4}Z', fbase).group()
             obs_date = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
 
-            these_args = (f, obs_date, this_out_dir)
+            these_args = (f, obs_date, this_out_dir, gas_rec)
             prior_args.append(these_args)
 
     if nprocs == 0:
         for args in prior_args:
-            prior_helper(*args)
+            _prior_helper(*args)
     else:
         with Pool(processes=nprocs) as pool:
-            pool.starmap(prior_helper, prior_args)
+            pool.starmap(_prior_helper, prior_args)
 
 
-def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name, dl_file_types):
+def _prior_helper(ph_f, ph_obs_date, ph_out_dir, gas_rec):
+    _fbase = os.path.basename(ph_f)
+    print('Processing {} ({}), saving to {}'.format(_fbase, ph_obs_date.strftime('%Y-%m-%d'), ph_out_dir))
+    tccon_priors.generate_single_tccon_prior(ph_f, ph_obs_date, tdel(hours=0), gas_rec, write_map=ph_out_dir,
+                                             use_eqlat_strat=True)
+
+def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name, nprocs, dl_file_types):
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
     if download:
         download_geos(acdates, geos_top_dir, file_types=dl_file_types)
@@ -230,13 +238,13 @@ def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, 
         print('Not downloading GEOS data')
 
     if makemod:
-        make_mod_files(acdates, aclons, aclats, geos_top_dir, mod_top_dir)
+        make_mod_files(acdates, aclons, aclats, geos_top_dir, mod_top_dir, nprocs=nprocs)
     else:
         print('Not making .mod files')
 
     if makepriors:
         make_priors(prior_top_dir, make_full_mod_dir(mod_top_dir, 'fpit'), gas_name,
-                    acdates=acdates, aclons=aclons, aclats=aclats)
+                    acdates=acdates, aclons=aclons, aclats=aclats, nprocs=nprocs)
     else:
         print('Not making priors')
 
@@ -248,7 +256,7 @@ def parse_args():
     parser.add_argument('--download', action='store_true', help='Download GEOS FP-IT files needed for these priors.')
     parser.add_argument('--makemod', action='store_true', help='Generate the .mod files for these priors.')
     parser.add_argument('--makepriors', action='store_true', help='Generate the priors as .map files.')
-    parser.add_argument('-n', '--nprocs', default=0, help='Number of processors to use to run in parallel mode '
+    parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use to run in parallel mode '
                                                           '(for --makemod and --makepriors only)')
     parser.add_argument('--dl-file-types', default=_default_file_types, type=get_GEOS5._parse_file_types,
                         help='Which GEOS file types to download with --download (no effect otherwise) as a '
