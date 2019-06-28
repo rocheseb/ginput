@@ -503,7 +503,7 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
     # Write the header, which starts with the number of header lines and data columns, then has the tropopause altitude,
     # profile date as a decimal year, and profile latitude. I'm going to skip the secular trends, seasonal cycle, and
     # latitude gradient because those are not necessary.
-    alt_fmt = '   {:.3f} '
+    alt_fmt = '{:9.3f} '
     gas_fmt = '{:.3E}  '
     table_header = ['Altitude'] + ['{:10}'.format(name) for name in gas_name_order]
     header_lines = [' ZTROP_VMR: {:.1f}'.format(tropopause_alt),
