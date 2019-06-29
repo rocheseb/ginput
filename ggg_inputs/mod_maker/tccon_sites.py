@@ -1,5 +1,6 @@
-from datetime import datetime
+from collections import OrderedDict
 from copy import deepcopy
+from datetime import datetime
 
 """
 site_dict is a dictionary mapping TCCON site abbreviations to their lat-lon-alt data, and full names
@@ -82,7 +83,7 @@ def tccon_site_info(site_dict_in=None):
             else:
                 site_dict_in[site]['lon_180'] = site_dict_in[site]['lon']
 
-    return site_dict_in
+    return OrderedDict(site_dict_in)
 
 
 def tccon_site_info_for_date(date):
