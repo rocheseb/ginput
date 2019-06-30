@@ -151,7 +151,54 @@ def svp_wv_over_ice(temp):
 
     return svp
 
-def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False,slant=False):
+mod_var_fmt_info = {'lev':     {'total_width': 13, 'format': '9.3e',  'scale': 1,   'name': 'Pressure', 'units': 'mbar'},
+                    'T':       {'total_width': 13, 'format': '11.3f',  'scale': 1,   'name': 'Temperature', 'units': 'Kelvin'},
+                    'H':       {'total_width': 9,  'format': '7.3f',  'scale': 1,   'name': 'Height', 'units': 'km'},
+                    'mmw':     {'total_width': 12, 'format': '7.4f',  'scale': 1,   'name': 'MMW', 'units': 'g/mole'},
+                    'H2O_DMF': {'total_width': 12, 'format': '10.3e', 'scale': 1,   'name': 'H2O', 'units': 'DMF'},
+                    'RH':      {'total_width': 8,  'format': '>6.1f', 'scale': 100, 'name': 'RH', 'units': '%'},
+                    'EPV':     {'total_width': 15, 'format': '10.3e', 'scale': 1,   'name': 'EPV', 'units': 'K.m+2/kg/s'},
+                    'PT':      {'total_width': 11, 'format': '8.3f',  'scale': 1,   'name': 'PT', 'units': 'Kelvin'},
+                    'EL':      {'total_width': 11, 'format': '7.3f',  'scale': 1,   'name': 'EL', 'units': 'degrees'},
+                    'O3':      {'total_width': 11, 'format': '9.3e',  'scale': 1,   'name': 'O3', 'units': 'kg/kg'},
+                    'CO':      {'total_width': 11, 'format': '7.3f',  'scale': 1e9, 'name': 'CO', 'units': 'ppb'}}
+
+
+def build_mod_fmt_strings(var_order):
+    # Units and names just need to have the right total width and be centered
+    header_fmt = ''
+    data_fmt = ''
+    var_names = dict()
+    var_units = dict()
+
+    spaces = '    '
+
+    for v in var_order:
+        var_info = mod_var_fmt_info[v]
+
+        this_fmt = var_info['format']
+        # Assuming the format is something like "9.3e" or "7.3f" the total width of the format is the number before
+        # the decimal. Get that and subtract from total width to figure out how many spaces to add to the end of the
+        # column.
+        fmt_width = int(re.search(r'\d+(?=\.)', this_fmt).group())
+        if fmt_width > var_info['total_width']:
+            raise NotImplementedError('The format width is greater than the total column width.')
+
+        full_fmt = '{{{}:{}}}'.format(v, this_fmt) + spaces
+        data_fmt += full_fmt
+
+        header_fmt += '{{{}:^{}}}'.format(v, fmt_width) + spaces
+        var_names[v] = var_info['name']
+        var_units[v] = var_info['units']
+
+    header_names = header_fmt.format(**var_names) + '\n'
+    header_units = header_fmt.format(**var_units) + '\n'
+    var_name_mapping = {v: k for k, v in var_names.items()}
+    data_fmt += '\n'
+    return header_names, header_units, var_name_mapping, data_fmt
+
+
+def write_mod(mod_path, version, site_lat, data=0, surf_data=0, func=None, muted=False, slant=False, chem_vars=False):
     """
     Creates a GGG-format .mod file
     INPUTS:
@@ -258,54 +305,58 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
         print('Warning: output dictionary for NCEP mode not implemented, will just be empty')
 
     else: # merra/geos mode
+        surf_var_order = ['PS', 'T2M', 'H', 'MMW', 'H2O_DMF', 'RH', 'SLP', 'TROPPB', 'TROPPV', 'TROPPT', 'TROPT', 'SZA']
+        prof_var_order = ['lev', 'T', 'H', 'mmw', 'H2O_DMF', 'RH', 'EPV', 'PT', 'O3']
+        computed_keys = ['mmw', 'PT', 'EL']
+        if func is not None:
+            # want equivalent latitude before O3, CO, etc.
+            prof_var_order.insert(-1, 'EL')
+        if chem_vars:
+            prof_var_order.append('CO')
+
         mod_constants.append(surf_data['TROPPB'])
         # The head of the .mod file
-        fmt1 = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
+        constants_fmt = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
+        surface_fmt = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}    {:7.3f}\n'
+        header_names, header_units, final_data_keys, fmt = build_mod_fmt_strings(prof_var_order)
+
         mod_content = []
-        if func is None: # without equivalent latitude
-            fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}\n'
-            mod_content+=[	'7  10\n',
-                              fmt1.format(*mod_constants),
-                              'Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT\n',
-                              fmt2.format(*[surf_data[key] for key in ['PS','T2M','H','MMW','H2O_DMF','RH','SLP','TROPPB','TROPPV','TROPPT','TROPT']]),
-                              version+'\n',
-                              ' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin     kg/kg\n',
-                              'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT         O3\n',	]
-
-            fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {O3:9.3e}\n' # format for writting the lines
-
-        else: # with equivalent latitude
-            fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}    {:7.3f}\n'
-            mod_content+=[	'7  10\n',
-                              fmt1.format(6378.137,6.000E-05,site_lat,9.81,data['H'][0],1013.25,surf_data['TROPPB']),
-                              'Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT       SZA\n',
-                              fmt2.format(*[surf_data[key] for key in ['PS','T2M','H','MMW','H2O_DMF','RH','SLP','TROPPB','TROPPV','TROPPT','TROPT','SZA']]),
-                              version+'\n',
-                              ' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin      degrees     kg/kg\n',
-                              'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT          EL         O3\n',	]
-
-            fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {EL:7.3f}    {O3:9.3e}\n' # format for writting the lines
+        # number of header rows, number of data columns
+        mod_content.append('7  {}\n'.format(len(prof_var_order)))
+        # constants
+        mod_content.append(constants_fmt.format(*mod_constants))
+        # surface variables
+        mod_content.append('Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT       SZA\n')
+        mod_content.append(surface_fmt.format(*[surf_data[key] for key in surf_var_order]))
+        # version info
+        mod_content.append(version+'\n')
+        # profile data headers
+        mod_content.append(header_units)
+        mod_content.append(header_names)
 
         # not sure if merra needs all the filters/corrections used for ncep data?
 
         # Export the Pressure, Temp and SHum
         prototype_array = np.full((len(data['H2O_DMF'],)), np.nan, dtype=np.float)
-        final_data_keys = {'Pressure': 'lev', 'Temperature': 'T', 'Height': 'H', 'MMW': 'mmw', 'H2O': 'H2O_DMF',
-                           'RH': 'RH', 'EPV': 'EPV', 'PT': 'PT', 'EL': 'EL', 'O3': 'O3'}
+
         output_dict = dict()
         for key in final_data_keys.keys():
             output_dict[key] = prototype_array.copy()
 
-        for k,elem in enumerate(data['H2O_DMF']):
+        for k, elem in enumerate(data['H2O_DMF']):
             # will use to output the final data to the .mod file and the returned dict
             line_dict = dict()
+
+            #############################################
+            # Check for and fix non-physical quantities #
+            #############################################
 
             svp = svp_wv_over_ice(data['T'][k])
             h2o_wmf = compute_h2o_wmf(data['H2O_DMF'][k]) # wet mole fraction of h2o
 
-            if 300<=data['lev'][k]<=1000:
+            if 300 <= data['lev'][k] <= 1000:
                 # Relace H2O mole fractions that are too small
-                if (data['RH'][k] < 30./data['T'][k]):
+                if data['RH'][k] < 30. / data['T'][k]:
                     if not muted:
                         print('Replacing too small H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0))
                     data['RH'][k] = 30./data['lev'][k]
@@ -314,16 +365,22 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
                     if not muted:
                         print('svp,h2o_wmf,h2o_dmf',svp,h2o_wmf,data['H2O_DMF'][k],data['RH'][k])
 
-            # Relace H2O mole fractions that are too large (super-saturated)  GCT 2015-08-05
-            if (data['RH'][k] > 1.0):
+            # Replace H2O mole fractions that are too large (super-saturated)  GCT 2015-08-05
+            if data['RH'][k] > 1.0:
                 if not muted:
                     print('Replacing too large H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0))
                 data['RH'][k] = 1.0
                 h2o_wmf = svp*data['RH'][k]/data['T'][k]
                 data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
 
-            for key in ('lev', 'T', 'H', 'H2O_DMF', 'RH', 'EPV', 'O3'):
-                line_dict[key] = data[key][k]
+            for key in prof_var_order:
+                if key not in computed_keys:
+                    line_dict[key] = data[key][k]
+
+            #################################
+            # Calculated derived quantities #
+            #################################
+
             line_dict['mmw'] = compute_mmw(h2o_wmf)
             # compute potential temperature
             line_dict['PT'] = data['T'][k]*(1000.0/data['lev'][k])**0.286
@@ -334,7 +391,7 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
                 line_dict['EL'] = func(line_dict['EPV']*1e6, line_dict['PT'])[0]
 
             for key in line_dict.keys():
-                scale = output_scaling[key] if key in output_scaling else 1.0
+                scale = mod_var_fmt_info[key]['scale']
                 line_dict[key] *= scale
 
             mod_content += [fmt.format(**line_dict)]
