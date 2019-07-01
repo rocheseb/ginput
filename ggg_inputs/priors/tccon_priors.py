@@ -1466,13 +1466,13 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
 
 class COTropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co'
-    gas_unit = '?'
+    gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.2
 
 
 # Make the list of available gases' records
-gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord]}#,
-                                       #COTropicsRecord]}
+gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord,
+                                       COTropicsRecord]}
 
 
 def regenerate_gas_strat_lut_files():
