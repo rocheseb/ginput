@@ -1,6 +1,6 @@
 from __future__ import print_function
 import argparse
-from datetime import datetime as dtime, timedelta as tdel
+from datetime import datetime as dtime, timedelta as tdel, date as date
 from glob import glob
 from multiprocessing import Pool
 import numpy as np
@@ -99,7 +99,8 @@ def make_full_mod_dir(top_dir, product):
 
 
 def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
-    acdates = [d.split('-')[0].strptime('%Y%m%d') for d in acdates]
+    import pdb
+    acdates = [dtime.strptime(d.split('-')[0], '%Y%m%d') for d in acdates]
     types_name_args = {'2dmet': {'file_type': 'Nx', 'chem': False},
                        '3dmet': {'file_type': 'Np', 'chem': False},
                        '3dchm': {'file_type': 'Nv', 'chem': True}}
@@ -109,16 +110,21 @@ def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
         file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', utc_dates=acdates, **name_args)
         for f, d in zip(file_names, file_dates):
             d = d.date()
+            if d == date(2009,2,7):
+                pdb.set_trace()
             ffull = os.path.join(download_to_dir, name_args['file_type'], f)
             if not os.path.isfile(ffull):
                 if d in missing_files:
-                    missing_files[d] += 1
+                    missing_files[d].append(f)
                 else:
-                    missing_files[d] = 1
+                    missing_files[d] = [f]
 
     for d in sorted(missing_files.keys()):
-        print('{date}: {n}'.format(date=d.strftime('%Y-%m-%d'), n=missing_files[d]))
+        nmissing = len(missing_files[d])
+        missingf = set(missing_files[d])
+        print('{date}: {n} ({files})'.format(date=d.strftime('%Y-%m-%d'), n=min(8, nmissing), files=', '.join(missingf)))
 
+    print('{} of {} dates missing at least one file'.format(len(missing_files), len(acdates)))
 
 def download_geos(acdates, download_to_dir, file_types=_default_file_types):
     for dates in acdates:
@@ -222,6 +228,8 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
         gas_rec = tccon_priors.CH4TropicsRecord()
     elif gas_name.lower() == 'hf':
         gas_rec = tccon_priors.HFTropicsRecord()
+    elif gas_name.lower() == 'co':
+        gas_rec = tccon_priors.COTropicsRecord()
     else:
         raise RuntimeError('No record defined for gas_name = "{}"'.format(gas_name))
 
