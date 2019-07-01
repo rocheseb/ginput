@@ -262,6 +262,7 @@ class TraceGasTropicsRecord(object):
 
     def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None,
                  strat_age_scale=1.0, recalculate_strat_lut=None, save_strat=None):
+        has_custom_dates = first_date is not None or last_date is not None
         first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
         self.mlo_file = mlo_file
         self.smo_file = smo_file
@@ -306,7 +307,13 @@ class TraceGasTropicsRecord(object):
                 logger.important('Cached strat LUT does not span enough time to cover the requested dates, must '
                                  'recalculate.')
                 recalculate_strat_lut = True
-                save_strat = False if save_strat is None else save_strat
+                if has_custom_dates:
+                    # If custom dates were specified, then only save the strat LUT if the user explicitly requested it
+                    save_strat = False if save_strat is None else save_strat
+                else:
+                    # If custom dates were not specified, then resave the LUT because it probably means we had to extend
+                    # into a new month
+                    save_strat = True
 
         if save_strat is None:
             save_strat = True
@@ -339,8 +346,10 @@ class TraceGasTropicsRecord(object):
         if last_date is None:
             # By default, we want to extrapolate to 2 years out from today; the max negative age-of-air in the
             # troposphere should be about 6 months at most, but we need to allow some room for the rolling average to
-            # get the trend.
-            last_date = dt.datetime.today() + relativedelta(years=2)
+            # get the trend. We need to make sure that we extend the record by whole months so go two years, one month
+            # into the future. E.g. if in July 2019, then end date will be Aug 2021. This helps with caching the strat
+            # LUT.
+            last_date = mod_utils.start_of_month(dt.datetime.today()) + relativedelta(years=2, months=1)
 
         if lag is None:
             sbc_lag = cls._default_sbc_lag
