@@ -98,6 +98,28 @@ def make_full_mod_dir(top_dir, product):
     return os.path.join(top_dir, product.lower(), 'xx', 'vertical')
 
 
+def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
+    acdates = [d.split('-')[0].strptime('%Y%m%d') for d in acdates]
+    types_name_args = {'2dmet': {'file_type': 'Nx', 'chem': False},
+                       '3dmet': {'file_type': 'Np', 'chem': False},
+                       '3dchm': {'file_type': 'Nv', 'chem': True}}
+    missing_files = dict()
+    for ftype in file_types:
+        name_args = types_name_args[ftype]
+        file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', utc_dates=acdates, **name_args)
+        for f, d in zip(file_names, file_dates):
+            d = d.date()
+            ffull = os.path.join(download_to_dir, name_args['file_type'], f)
+            if not os.path.isfile(ffull):
+                if d in missing_files:
+                    missing_files[d] += 1
+                else:
+                    missing_files[d] = 1
+
+    for d in sorted(missing_files.keys()):
+        print('{date}: {n}'.format(date=d.strftime('%Y-%m-%d'), n=missing_files[d]))
+
+
 def download_geos(acdates, download_to_dir, file_types=_default_file_types):
     for dates in acdates:
         date_range = _date_range_str_to_dates(dates)
@@ -203,7 +225,6 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
     else:
         raise RuntimeError('No record defined for gas_name = "{}"'.format(gas_name))
 
-
     prior_args = []
 
     for k, files in grouped_mod_files.items():
@@ -230,8 +251,13 @@ def _prior_helper(ph_f, ph_obs_date, ph_out_dir, gas_rec):
     tccon_priors.generate_single_tccon_prior(ph_f, ph_obs_date, tdel(hours=0), gas_rec, write_map=ph_out_dir,
                                              use_eqlat_strat=True)
 
-def driver(download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name, nprocs, dl_file_types):
+
+def driver(check_geos, download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name,
+           nprocs, dl_file_types):
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
+    if check_geos:
+        check_geos_files(acdates, geos_top_dir, file_types=dl_file_types)
+
     if download:
         download_geos(acdates, geos_top_dir, file_types=dl_file_types)
     else:
@@ -253,6 +279,7 @@ def parse_args():
     parser = argparse.ArgumentParser('Run priors for a set of dates, lats, and lons')
     parser.add_argument('info_file', help='The file that defines the configuration variables. Pass "format" as this '
                                           'argument for more details on the format.')
+    parser.add_argument('--check-geos', action='store_true', help='Check if the required GEOS files are already downloaded')
     parser.add_argument('--download', action='store_true', help='Download GEOS FP-IT files needed for these priors.')
     parser.add_argument('--makemod', action='store_true', help='Generate the .mod files for these priors.')
     parser.add_argument('--makepriors', action='store_true', help='Generate the priors as .map files.')
