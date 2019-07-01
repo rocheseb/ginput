@@ -5,12 +5,16 @@ from ggg_inputs.priors import acos_interface as aci
 from ggg_inputs.mod_maker import mod_maker
 from ggg_inputs.download import get_GEOS5
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Call various pieces of ggg_inputs')
     subparsers = parser.add_subparsers(help='The following subcommands execute different parts of ggg_inputs')
 
-    aci_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the OCO/GOSAT algorithm')
-    aci.parse_args(aci_parser)
+    oco_parser = subparsers.add_parser('oco', help='Generate .h5 file for input into the OCO algorithm')
+    aci.parse_args(oco_parser)
+
+    # Albert Chang prefers to have a flag for whether reading OCO or GOSAT input files
+    # acos_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the GOSAT algorithm')
 
     mm_parser = subparsers.add_parser('mod', help='Generate .mod (model) files for GGG')
     mod_maker.parse_args(mm_parser)
