@@ -1597,7 +1597,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
             else:
                 ew = 'W'
 
-            mod_name = mod_file_name(local_date,timedelta(hours=3),site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec,in_utc=save_in_utc)
+            mod_name = 'FPIT_'+mod_file_name(local_date,timedelta(hours=3),site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec,in_utc=save_in_utc)
             if not muted:
                 print('\t\t\t{:<20s} : {}'.format(site_dict[site]['name'], mod_name))
 
@@ -1644,6 +1644,13 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 
     If any of alt/lat/lon is given, the other two must be given too
     """
+    if 'merra' in mode:
+        prefix = 'MERRA2_'
+    elif 'ncep' in mode:
+        prefix = 'NCEP_'
+    else:
+        prefix = 'FPIT_'
+
     if 'merradap' in mode: # get the earthdata credentials
         try:
             username,account,password = netrc.netrc().authenticators('urs.earthdata.nasa.gov')
@@ -1817,7 +1824,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
             ew = 'W'
 
         # use the local date for the name of the .mod file
-        mod_name = mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec)
+        mod_name = prefix+mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec)
         mod_file_path = os.path.join(mod_path,mod_name)
         if not muted:
             print('\n',mod_name)
