@@ -1471,8 +1471,8 @@ class COTropicsRecord(TraceGasTropicsRecord):
 
 
 # Make the list of available gases' records
-gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord,
-                                       COTropicsRecord]}
+gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord]}
+                                       #COTropicsRecord]}
 
 
 def regenerate_gas_strat_lut_files():
@@ -1858,8 +1858,8 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
                       'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}
 
 
-def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, gas_record,
-                    profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
+def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres, tropopause_theta, tropopause_pres,
+                    gas_record, profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
     """
     Add the stratospheric trace gas to a TCCON prior profile
 
@@ -1906,7 +1906,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
 
     # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
     # restrict to >= 380 K later.
-    xx_overworld = prof_theta >= 380
+    xx_overworld = (prof_theta >= 380) & (prof_pres <= tropopause_pres)
     prof_world_flag[xx_overworld] = const.overworld_flag
     # Need the +1 because Jan 1 will be frac_year = 0, but CLAMS expects 1 <= doy <= 366
     retrieval_doy = int(mod_utils.clams_day_of_year(retrieval_date))
@@ -2074,8 +2074,8 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, theta_trop_met,
-                                         concentration_record, profs_latency=latency_profs,
+    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, p_prof, theta_trop_met,
+                                         p_trop_met, concentration_record, profs_latency=latency_profs,
                                          prof_world_flag=stratum_flag, gas_record_dates=gas_date_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
 
