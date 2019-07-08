@@ -1468,7 +1468,10 @@ def extrapolate_to_surface(var_to_interp, INTERP_DATA, SLANT_DATA=None):
         chk_var = list(var_to_interp.keys())[0]
         chk_mask = data_dict[chk_var].mask.copy()  # make a copy to avoid changing this mask as we fill values
         for v in var_to_interp:
-            if not np.array_equal(chk_mask, data_dict[v].mask):
+            # using array_equiv here should directly handle cases where the check mask is a scalar `False`
+            # but the variable's mask is a vector of all `False` values, since the former can be broadcast
+            # to be the same as the latter.
+            if not np.array_equiv(chk_mask, data_dict[v].mask):
                 raise ValueError('All variables to interpolate in input data must have the same mask')
         return chk_mask
 
@@ -1548,8 +1551,8 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
 
     When giving dates with _HHMM, dates must correspond exactly to GEOS5 times, so 3 hourly UTC times starting at HHMM=0000
     """
-
-    if lat: # True when lat!=None, a custom location was given
+    
+    if lat is not None: # a custom location was given
         site_abbrv = 'xx' if site_abbrv is None else site_abbrv
         locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
     elif site_abbrv: # if not custom location is given, but a site abbreviation is given, just do that one site
