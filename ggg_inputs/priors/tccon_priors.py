@@ -1727,7 +1727,7 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
 
 
 def adjust_zgrid(z_grid, z_trop, z_obs):
-    
+    z_grid = z_grid.copy()
     idx_min = abs(z_grid - z_obs).argmin()
     z_min = z_grid[idx_min]
     dz = z_obs - z_min
