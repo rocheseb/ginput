@@ -21,7 +21,10 @@ def _getvar(container, varid):
 
 def iter_varids(varids):
     for vid in varids:
-        key = vid if isinstance(vid, str) else vid[-1]
+        if vid == ('scalar', 'Height'):
+            key = 'SurfAlt'
+        else:
+            key = vid if isinstance(vid, str) else vid[-1]
         yield vid, key
 
 
@@ -29,7 +32,7 @@ def _make_data_dict(varids):
     return {k: [] for _, k in iter_varids(varids)}
 
 
-def read_acos_var(h5obj, varid, inds=slice(None)):
+def read_acos_var(h5obj, varid, inds=slice(None), is_gosat=False):
     """
     Read a variable from an ACOS .h5 file
 
@@ -49,7 +52,14 @@ def read_acos_var(h5obj, varid, inds=slice(None)):
     :return: the array of data with fill values replaced and subset as requested
     """
     var = _getvar(h5obj, varid)
-    data = var[inds]
+    if is_gosat:
+        # For the GOSAT files, there's extra dimensions in the met file that need dealt with
+        if 3 <= var.ndim <= 4:
+            data = var[inds, 0, 0]
+        elif var.ndim == 1:
+            data = var[inds]
+    else:
+        data = var[inds]
     if not np.issubdtype(data.dtype, np.number):
         return data
 
@@ -61,7 +71,7 @@ def read_acos_var(h5obj, varid, inds=slice(None)):
     return data
 
 
-def read_acos_for_lat_lons(h5obj, lons, lats, varids):
+def read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=False):
     """
     Read variables from an ACOS file for specific lat/lons
 
@@ -89,21 +99,23 @@ def read_acos_for_lat_lons(h5obj, lons, lats, varids):
         acos_lat = h5obj['priors']['sounding_latitude'][:]
 
     data = _make_data_dict(varids)
+    acos_inds = []
 
     for this_lon, this_lat in zip(lons, lats):
         ind = np.nanargmin((acos_lon - this_lon)**2 + (acos_lat - this_lat)**2)
         ind = np.unravel_index(ind, acos_lon.shape)
+        acos_inds.append(ind)
         for vid, key in iter_varids(varids):
-            data[key].append(read_acos_var(h5obj, vid, inds=ind))
+            data[key].append(read_acos_var(h5obj, vid, inds=ind, is_gosat=is_gosat))
 
     for k, v in data.items():
         # Should be 1D vectors
         data[k] = np.vstack(v)
 
-    return data
+    return data, acos_inds
 
 
-def read_acos_matching_mod_files(h5obj, mod_files, varids):
+def read_acos_matching_mod_files(h5obj, mod_files, varids, is_gosat=False):
     def extract_mod_lon_lat(filename):
         lonstr = _lon_re.search(filename).group()
         lon = mod_utils.format_lon(lonstr)
@@ -112,10 +124,10 @@ def read_acos_matching_mod_files(h5obj, mod_files, varids):
         return lon, lat
 
     lons, lats = zip(*[extract_mod_lon_lat(os.path.basename(f)) for f in mod_files])
-    return read_acos_for_lat_lons(h5obj, lons, lats, varids)
+    return read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=is_gosat)
 
 
-def read_acos_matching_map_files(h5obj, map_files, varids):
+def read_acos_matching_map_files(h5obj, map_files, varids, is_gosat=False):
     def extract_map_lon_lat(filepath):
         loc_dir = filepath.split(os.path.sep)[-2]
         lonstr = _lon_re.search(loc_dir).group()
@@ -125,7 +137,7 @@ def read_acos_matching_map_files(h5obj, map_files, varids):
         return lon, lat
 
     lons, lats = zip(*[extract_map_lon_lat(f) for f in map_files])
-    return read_acos_for_lat_lons(h5obj, lons, lats, varids)
+    return read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=is_gosat)
 
 
 def _read_concat_tccon(tccon_files, reader_fxn, varids):
@@ -141,7 +153,7 @@ def _read_concat_tccon(tccon_files, reader_fxn, varids):
     return data
 
 
-def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids):
+def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids, is_gosat=False):
 
     if tccon_files[0].endswith('.mod'):
         acos_read_fxn = read_acos_matching_mod_files
@@ -170,7 +182,7 @@ def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids):
     if acos_alt_varid not in acos_varids:
         acos_varids.append(acos_alt_varid)
 
-    acos_data = acos_read_fxn(h5obj, tccon_files, acos_varids)
+    acos_data, acos_inds = acos_read_fxn(h5obj, tccon_files, acos_varids, is_gosat=is_gosat)
     tccon_data = _read_concat_tccon(tccon_files, tccon_read_fxn, tccon_varids)
 
     # Now handle interpolating the ACOS data to TCCON altitudes
@@ -190,7 +202,7 @@ def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids):
 
         acos_data[acos_key] = new_acos_arr
 
-    return acos_data, tccon_data
+    return acos_data, tccon_data, acos_inds
 
 
 def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_datetime, acos_datetimes):
