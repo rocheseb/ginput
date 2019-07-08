@@ -11,7 +11,9 @@ def parse_args():
     subparsers = parser.add_subparsers(help='The following subcommands execute different parts of ggg_inputs')
 
     oco_parser = subparsers.add_parser('oco', help='Generate .h5 file for input into the OCO algorithm')
-    aci.parse_args(oco_parser)
+    aci.parse_args(oco_parser, oco_or_gosat='oco')
+    gosat_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the GOSAT algorithm')
+    aci.parse_args(gosat_parser, oco_or_gosat='gosat')
 
     # Albert Chang prefers to have a flag for whether reading OCO or GOSAT input files
     # acos_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the GOSAT algorithm')

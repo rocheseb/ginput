@@ -33,7 +33,7 @@ _fill_val = -999999
 _string_fill = b'N/A'
 
 
-def acos_interface_main(met_resampled_file, geos_files, output_file, mlo_co2_file=None, smo_co2_file=None,
+def acos_interface_main(instrument, met_resampled_file, geos_files, output_file, mlo_co2_file=None, smo_co2_file=None,
                         cache_strat_lut=False, nprocs=0):
     """
     The primary interface to create CO2 priors for the ACOS algorithm
@@ -65,7 +65,12 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, mlo_co2_fil
 
     :return: None, writes results to the HDF5 ``output_file``.
     """
-    met_data = read_resampled_met(met_resampled_file)
+    if instrument == 'oco':
+        met_data = read_oco_resampled_met(met_resampled_file)
+    elif instrument == 'gosat':
+        met_data = read_gosat_resampled_met(met_resampled_file)
+    else:
+        raise ValueError('instrument must be "oco" or "gosat"')
 
     # Reshape the met data from (soundings, footprints, levels) to (profiles, level)
     orig_shape = met_data['pv'].shape
@@ -130,6 +135,14 @@ def acos_interface_main(met_resampled_file, geos_files, output_file, mlo_co2_fil
     # And convert the stratum to a short integer and update the unit to be more descriptive
     profiles['atmospheric_stratum'] = profiles['atmospheric_stratum'].astype(np.uint8)
     units['atmospheric_stratum'] = 'flag (1 = troposphere, 2 = middleworld, 3 = overworld)'
+
+    # If running for GOSAT, we have an extra dimension between the exposure and level which is just 1 long and was only
+    # a placeholder to provide compatibility with the loops over sounding group/sounding for OCO. Remove those singleton
+    # dimensions to keep the GOSAT files clean
+    if instrument == 'gosat':
+        for key, value in profiles.items():
+            profiles[key] = value.squeeze()
+            logger.debug('GOSAT array "{}" squeezed from {} to {}'.format(key, value.shape, profiles[key].shape))
 
     # Write the priors to the file requested.
     write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
@@ -532,12 +545,103 @@ def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qfl
     return sounding_eqlat
 
 
-def read_resampled_met(met_file):
+def read_oco_resampled_met(met_file):
+    met_group = 'Meteorology'
+    sounding_group = 'SoundingGeometry'
+    var_dict = {'pv': [met_group, 'epv_profile_met'],
+                'temperature': [met_group, 'temperature_profile_met'],
+                'pressure': [met_group, 'vector_pressure_levels_met'],
+                'date_strings': [sounding_group, 'sounding_time_string'],
+                'altitude': [met_group, 'height_profile_met'],
+                'latitude': [sounding_group, 'sounding_latitude'],
+                'longitude': [sounding_group, 'sounding_longitude'],
+                'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
+                'trop_temperature': [met_group, 'tropopause_temperature_met'],
+                'surf_gph': [met_group, 'gph_met'],
+                'quality_flags': [sounding_group, 'sounding_qual_flag']
+                }
+
+    return read_resampled_met(met_file, var_dict)
+
+
+def read_gosat_resampled_met(met_file):
+    met_group = 'Meteorology'
+    sounding_group = 'SoundingGeometry'
+    sounding_header = 'SoundingHeader'
+    var_dict = {'pv': [met_group, 'epv_profile_met'],
+                'temperature': [met_group, 'temperature_profile_met'],
+                'pressure': [met_group, 'vector_pressure_levels_met'],
+                'date_strings': [sounding_header, 'sounding_time_string'],
+                'altitude': [met_group, 'height_profile_met'],
+                'latitude': [sounding_group, 'sounding_latitude'],
+                'longitude': [sounding_group, 'sounding_longitude'],
+                'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
+                'trop_temperature': [met_group, 'tropopause_temperature_met'],
+                'surf_gph': [met_group, 'gph_met'],
+                'quality_flags': [sounding_header, 'sounding_qual_flag']
+                }
+
+    # To be compatible with the OCO code, the arrays need to have at most 3 dimensions: sounding group, footprint,
+    # level. GOSAT arrays have exposure, band, polarization, and level. To ensure compatibility, make them have
+    # [exposure, 1, level] or [exposure, 1] if they should be 2D.
+
+    data = read_resampled_met(met_file, var_dict)
+    for name, arr in data.items():
+        data[name] = _gosat_normalize_shape(arr, name)
+    return data
+
+
+def _gosat_normalize_shape(arr, name):
+    def check_band_pol(a):
+        diffs = np.diff(a, axis=1)
+        reldiffs = np.abs(diffs / arr[0, 0:1])
+        reldiffs[np.isnan(reldiffs)] = 0
+        max_allowed_rdiff = 1e-6
+        if np.any(reldiffs) > max_allowed_rdiff:
+            logger.warning('Relative differences in "{}" exceed 1 part in {} along the band/polarization '
+                           'dimensions (max relative difference = {}).'.format(name, 1/max_allowed_rdiff, np.max(reldiffs)))
+    nlev = 72
+    nband = 3
+    npol = 2
+    if arr.ndim == 4:
+        if arr.shape[1:] != (nband, npol, nlev):
+            raise NotImplementedError('4D GOSAT array "{}" does not appear to have dimensions '
+                                      'exposure x band x polarization x level'.format(name))
+
+        logger.debug('Collapsing "{}" from {} to ({}, 1, {})'.format(name, arr.shape, arr.shape[0], nlev))
+        arr = arr.reshape(-1, nband*npol, nlev)
+        check_band_pol(arr)
+        return arr[:, 0:1, :]
+
+    elif arr.ndim == 3:
+        if arr.shape[1:] != (nband, npol):
+            raise NotImplementedError('3D GOSAT array "{}" does not appear to have dimensions '
+                                      'exposure x band x polarization'.format(name))
+
+        logger.debug('Collapsing "{}" from {} to ({}, 1)'.format(name, arr.shape, arr.shape[0]))
+        arr = arr.reshape(-1, nband*npol)
+        check_band_pol(arr)
+        return arr[:, 0:1]
+
+    elif arr.ndim == 1:
+        logger.debug('Expanding "{}" from {} to ({}, 1)'.format(name, arr.shape, arr.shape[0]))
+        return arr.reshape(-1, 1)
+
+    else:
+        raise NotImplementedError('Do not know how to handle a {}D GOSAT array'.format(arr.ndim))
+
+
+def read_resampled_met(met_file, var_dict):
     """
     Read the required data from the HDF5 file containing the resampled met data.
 
     :param met_file: the path to the met file
     :type met_file: str
+
+    :param var_dict: a dictionary mapping the output variables to the datasets in the HDF5 file. Keys must be the
+     output variables (listed below) and the values must be two-element lists, the first element gives the group name
+     and the second the dataset name within that group to read.
+    :type var_dict: dict
 
     :return: a dictionary with variables both read directly from the met file and derived from those values. Keys are:
 
@@ -558,20 +662,6 @@ def read_resampled_met(met_file):
 
     :rtype: dict
     """
-    met_group = 'Meteorology'
-    sounding_group = 'SoundingGeometry'
-    var_dict = {'pv': [met_group, 'epv_profile_met'],
-                'temperature': [met_group, 'temperature_profile_met'],
-                'pressure': [met_group, 'vector_pressure_levels_met'],
-                'date_strings': [sounding_group, 'sounding_time_string'],
-                'altitude': [met_group, 'height_profile_met'],
-                'latitude': [sounding_group, 'sounding_latitude'],
-                'longitude': [sounding_group, 'sounding_longitude'],
-                'trop_pressure': [met_group, 'blended_tropopause_pressure_met'],
-                'trop_temperature': [met_group, 'tropopause_temperature_met'],
-                'surf_gph': [met_group, 'gph_met'],
-                'quality_flags': [sounding_group, 'sounding_qual_flag']
-                }
     data_dict = dict()
     with h5py.File(met_file, 'r') as h5obj:
         for out_var, (group_name, var_name) in var_dict.items():
@@ -809,7 +899,7 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
     return mod_dict
 
 
-def parse_args(parser=None):
+def parse_args(parser=None, oco_or_gosat=None):
     def comma_list(argin):
         return tuple([a.strip() for a in argin.split(',')])
 
@@ -855,9 +945,11 @@ def parse_args(parser=None):
     parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use in parallelization')
 
     if i_am_main:
+        parser.set_defaults(instrument='oco')
         return vars(parser.parse_args())
     else:
         # if not main, no need to return, modified in-place. Will be called by exterior command line interface function.
+        parser.set_defaults(instrument=oco_or_gosat)
         parser.set_defaults(driver_fxn=cl_driver)
 
 
