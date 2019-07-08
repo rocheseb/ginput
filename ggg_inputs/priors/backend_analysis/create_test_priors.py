@@ -99,7 +99,6 @@ def make_full_mod_dir(top_dir, product):
 
 
 def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
-    import pdb
     acdates = [dtime.strptime(d.split('-')[0], '%Y%m%d') for d in acdates]
     types_name_args = {'2dmet': {'file_type': 'Nx', 'chem': False},
                        '3dmet': {'file_type': 'Np', 'chem': False},
@@ -110,8 +109,6 @@ def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
         file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', utc_dates=acdates, **name_args)
         for f, d in zip(file_names, file_dates):
             d = d.date()
-            if d == date(2009,2,7):
-                pdb.set_trace()
             ffull = os.path.join(download_to_dir, name_args['file_type'], f)
             if not os.path.isfile(ffull):
                 if d in missing_files:

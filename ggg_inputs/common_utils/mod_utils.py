@@ -1626,7 +1626,7 @@ def decimal_year_to_date(dec_year, date_type=dt.datetime):
 
     try:
         dec_year[0]
-    except TypeError:
+    except (TypeError, IndexError):
         dec_year = [dec_year]
         return_as_scalar = True
     else:
