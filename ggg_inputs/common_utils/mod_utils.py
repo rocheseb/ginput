@@ -147,7 +147,7 @@ def check_depedencies_newer(out_file, *dependency_files):
     return False
 
 
-def _get_num_header_lines(filename):
+def get_num_header_lines(filename):
     """
     Get the number of header lines in a standard GGG file
 
@@ -188,7 +188,7 @@ def read_mod_file(mod_file, as_dataframes=False):
      dictionaries or data frames, depending on ``as_dataframes``.
     :rtype: dict
     """
-    n_header_lines = _get_num_header_lines(mod_file)
+    n_header_lines = get_num_header_lines(mod_file)
     # Read the constants from the second line of the file. There's no header for these, we just have to rely on the
     # same constants being in the same position.
     constant_vars = pd.read_csv(mod_file, sep='\s+', header=None, nrows=1, skiprows=1,
@@ -239,7 +239,7 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
      respectively. The form of these values depends on ``as_dataframes``.
     :rtype: dict
     """
-    n_header_lines = _get_num_header_lines(map_file)
+    n_header_lines = get_num_header_lines(map_file)
     constants = dict()
     if not skip_header:
         with open(map_file, 'r') as mapf:
@@ -288,7 +288,7 @@ def read_isotopes(isotopes_file, gases_only=False):
     :return: tuple of isotope or gas names
     :rtype: tuple(str)
     """
-    nheader = _get_num_header_lines(isotopes_file)
+    nheader = get_num_header_lines(isotopes_file)
     with open(isotopes_file, 'r') as fobj:
         for i in range(nheader):
             fobj.readline()
@@ -525,7 +525,7 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
 
 
 def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True):
-    nheader = _get_num_header_lines(vmr_file)
+    nheader = get_num_header_lines(vmr_file)
     header_data = dict()
     with open(vmr_file, 'r') as fobj:
         # Skip the line with the number of header lines and columns

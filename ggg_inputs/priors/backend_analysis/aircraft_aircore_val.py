@@ -110,6 +110,13 @@ def format_y_axis(ax, ztype):
         ax.invert_yaxis()
 
 
+def _lon_ew(lon):
+    return 'W' if lon < 0 else 'E'
+
+
+def _lat_ns(lat):
+    return 'S' if lat < 0 else 'N'
+
 def bin_data(data, data_z, bin_edges, bin_op=np.nanmean):
     """
     Bin aircraft/aircore data into vertical bins
@@ -242,6 +249,10 @@ def _idl_maps_file(lon, ew, lat, ns, date_time):
     return os.path.join(subdir, filename)
 
 
+def py_map_file_subpath(lon, lat, date_time):
+    return _py_maps_file(np.abs(lon), _lon_ew(lon), np.abs(lat), _lat_ns(lat), date_time)
+
+
 def _py_maps_file(lon, ew, lat, ns, date_time):
     # we need the extra round calls b/c in the list of dates/lats/lons, the lat/lons are rounded to 3 decimal places
     # which means that in rare cases the rounding to 2 decimal places in the map directory names is different
@@ -270,15 +281,17 @@ def _choose_map_file_function(example_dirname):
         raise RuntimeError('Do not know what format the maps directory "{}" is'.format(example_dirname))
 
 
-def _get_id_info_from_atm_file(atmf):
+def _get_id_info_from_atm_file(atmf, as_abs=True):
     _, header_info = read_atm_file(atmf)
     lat = header_info['TCCON_site_latitude_N']
-    ns = 'S' if lat < 0 else 'N'
-    lat = np.abs(lat)
+    ns = _lat_ns(lat)
 
     lon = header_info['TCCON_site_longitude_E']
-    ew = 'W' if lon < 0 else 'E'
-    lon = np.abs(lon)
+    ew = _lon_ew(lon)
+
+    if as_abs:
+        lat = np.abs(lat)
+        lon = np.abs(lon)
 
     date_time = header_info['flight_date']
 
