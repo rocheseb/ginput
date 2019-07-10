@@ -553,17 +553,19 @@ def load_binned_array(atm_dir, map_dir, specie, ztype='pres', bin_edges=None, bi
     n_levels = np.size(bin_edges) - 1
     obs_profiles = np.full([n_profs, n_levels], np.nan)
     prior_profiles = np.full([n_profs, n_levels], np.nan)
+    prof_info = {'lon': np.full([n_profs], np.nan), 'lat': np.full([n_profs], np.nan), 'date': np.full([n_profs], None)}
 
     pbar = mod_utils.ProgressBar(n_profs, prefix='Loading profile', style='counter', suffix=' ')
     for i, ((obsdat, obsfile), (mapdat, mapfile)) in enumerate(iter_matched_data(atm_dir, map_dir, specie=specie.upper(),
                                                                                  include_filenames=True)):
         pbar.print_bar(i)
+        prof_info['lon'][i], _, prof_info['lat'][i], _, prof_info['date'][i] = _get_id_info_from_atm_file(obsfile, as_abs=False)
         this_obs_conc, this_prof_conc, this_z = interp_profile_to_obs(obsdat, mapdat, specie.lower(), ztype=ztype,
                                                                       obs_file=obsfile, map_dir=map_dir)
         obs_profiles[i, :] = bin_data(this_obs_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
         prior_profiles[i, :] = bin_data(this_prof_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
 
-    return obs_profiles, prior_profiles, bin_centers
+    return obs_profiles, prior_profiles, bin_centers, prof_info
 
 
 def interp_profile_to_obs_by_type(obsdat, mapdat, data_type=None, data_root=None, **kwargs):
