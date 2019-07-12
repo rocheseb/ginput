@@ -83,7 +83,7 @@ _code_dep_files[os.path.splitext(os.path.basename(__file__))[0]] = os.path.abspa
 
 _data_dir = const.data_dir
 _clams_file = os.path.join(_data_dir, 'clams_age_clim_scaled.nc')
-
+_excess_co_file = os.path.join(_data_dir, 'ace_excess_co_lut.nc')
 
 ###########################################
 # FUNCTIONS SUPPORTING PRIORS CALCUALTION #
@@ -1906,7 +1906,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres,
 
     # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
     # restrict to >= 380 K later.
-    xx_overworld = (prof_theta >= 380) & (prof_pres <= tropopause_pres)
+    xx_overworld = mod_utils.is_overworld(prof_theta, prof_pres, tropopause_pres)
     prof_world_flag[xx_overworld] = const.overworld_flag
     # Need the +1 because Jan 1 will be frac_year = 0, but CLAMS expects 1 <= doy <= 366
     retrieval_doy = int(mod_utils.clams_day_of_year(retrieval_date))
@@ -1941,6 +1941,98 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres,
 
     return prof_gas, {'latency': profs_latency, 'gas_record_dates': gas_record_dates, 'age_of_air': prof_aoa,
                       'stratum': prof_world_flag}
+
+
+def _load_co_lut(lut_file, transition_width=None):
+    def copy_slice(lut, ind, new_doy):
+        new_slice = lut.isel(doy=ind)
+        new_slice.coords['doy'] = new_doy
+        return new_slice
+
+    with xr.open_dataset(lut_file) as ds:
+        co_lut = ds['co_excess']
+
+    # We'll trick it into doing period validation by duplicating the last season at the beginning and the first season
+    # at the end. Tried using a proper periodic boundary condition but couldn't figure out how to access the CubicSpline
+    # interpolator through the xarray interp method.
+
+        co_first_slice = co_lut.isel(doy=0)
+        co_first_slice.coords['doy'] = co_first_slice.doy + mod_utils.days_per_year
+        co_last_slice = co_lut.isel(doy=-1)
+        co_last_slice.coords['doy'] = co_last_slice.doy - mod_utils.days_per_year
+
+    co = xr.concat([co_last_slice, co_lut, co_first_slice], dim='doy')
+
+    if transition_width is None:
+        return co
+    elif transition_width < 1:
+        raise ValueError('transition_width cannot be < 1')
+    else:
+        co_slices = [co.isel(doy=0)]
+        boundary_doys = 0.5*(co.doy[:-1].data + co.doy[1:].data)
+        for i, doy in enumerate(boundary_doys):
+            co_slices.append(copy_slice(co, i, doy-transition_width/2))
+            co_slices.append(copy_slice(co, i+1, doy+transition_width/2))
+
+        return xr.concat(co_slices, dim='doy')
+
+
+def modify_strat_co(base_co_profile, z_grid, pres_profile, pt_profile, trop_pres, prof_eqlat, prof_date,
+                    excess_co_lut=_excess_co_file, transition_width_days=None):
+    """
+    Takes the baseline GEOS CO profile and adds the mesospheric contribution to the stratosphere.
+
+    The GEOS FP-IT product includes CO profiles, however it does not account for CO drawn down from the mesosphere into
+    the stratosphere. This function adds an estimated contribution of mesospheric CO, derived from ACE-FTS data.
+
+    :param base_co_profile: the baseline CO profile in ppb.
+    :type base_co_profile: array-like
+
+    :param z_grid: the altitudes that the CO profile is defined on, in kilometers.
+    :type z_grid: array-like
+
+    :param pres_profile: the pressure levels that the CO profile is defined on.
+    :type pres_profile: array-like
+
+    :param pt_profile: the potential temperature profile on the same levels as the CO profile, in Kelvin.
+    :type pt_profile: array-like
+
+    :param trop_pres: the tropopause pressure, in the same units as the pressure profile.
+    :type trop_pres: float
+
+    :param prof_eqlat: the equivalent latitude profile, in degrees north.
+    :type prof_eqlat: arrary-like
+
+    :param prof_date: the date of the profile
+    :type prof_date: datetime-like
+
+    :param excess_co_lut: the path to the lookup table with the excess mesospheric CO. If not given, the standard table
+     file included in the repo is used. This file is created with
+     :func:`ggg_inputs.priors.backend_analysis.ace_fts_analysis.make_excess_co_lut`.
+    :type excess_co_lut: str
+
+    :return: the CO profile with the CO from mesospheric descent added.
+    :rtype: array-like
+    """
+    prof_doy = mod_utils.day_of_year(prof_date)
+
+    co_lut = _load_co_lut(excess_co_lut, transition_width=transition_width_days)
+
+    # Get the profile for the right day of year, using periodic boundary condition interpolation
+    co_lut = co_lut.interp(doy=prof_doy, method='linear')
+
+    # Get the profile for the right equivalent latitude for each altitude
+    xx_overworld = mod_utils.is_overworld(pt_profile, pres_profile, trop_pres)
+
+    level_ind = np.arange(np.size(base_co_profile))[xx_overworld]
+    prof_eqlat = xr.DataArray(prof_eqlat[xx_overworld], coords=[('idx', level_ind)])
+    z_grid = xr.DataArray(z_grid[xx_overworld], coords=[('idx', level_ind)])
+
+    extra_co_prof = co_lut.interp(altitude=z_grid, lat_bin=prof_eqlat).data
+    extra_co_prof[extra_co_prof < 0] = 0  # only want to add extra CO from the mesospheric descent
+    base_co_profile[xx_overworld] += extra_co_prof
+
+    return base_co_profile
 
 
 def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentration_record, site_abbrev='xx',

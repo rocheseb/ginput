@@ -865,6 +865,7 @@ def plot_bias_spaghetti(obs_profiles, prior_profiles, z, ax=None, color=None, me
     diff = (obs_profiles - prior_profiles).T
     ax.plot(diff, z, color=color, linewidth=0.5)
     ax.plot(np.nanmean(diff, axis=1), z, color=mean_color, linewidth=2)
+    ax.set_xlabel('Observations - priors')
     ax.grid()
 
     return fig, ax

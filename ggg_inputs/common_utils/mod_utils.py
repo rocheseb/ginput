@@ -1494,6 +1494,10 @@ def is_midlat(lat, doy, ages):
     return ~is_tropics(lat, doy, ages) & ~is_vortex(lat, doy, ages)
 
 
+def is_overworld(potential_temp, pressure, trop_pres):
+    return (potential_temp >= 380) & (pressure <= trop_pres)
+
+
 def date_to_decimal_year(date_in):
     """
     Convert a datetime object to a decimal year.

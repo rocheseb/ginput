@@ -12,6 +12,7 @@ import os
 from scipy.optimize import curve_fit
 from statsmodels.robust.robust_linear_model import RLM
 from statsmodels.robust.norms import TukeyBiweight
+import xarray as xr
 
 from ...common_utils import mod_utils, ioutils, sat_utils
 from ...common_utils.ggg_logging import logger
@@ -760,3 +761,146 @@ def save_ace_age_file(ace_out_file, vars_to_copy, orig_ace_file, eqlat, age):
         ioutils.add_creation_info(nhwrite, creation_note='ace_fts_analysis.generate_ace_age_file')
         nhwrite.setncattr('template_ace_file', orig_ace_file)
         ioutils.add_dependent_file_hash(nhwrite, 'template_ace_sha1', orig_ace_file)
+
+
+def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
+    R = 8.314 * 100 ** 3 / 100 / 6.626e23
+
+    def ndens_air(T, P):
+        return P / (R * T)
+
+    def kCO_OH(nair):
+        return 1.57e-13 + 3.54e-33 * nair
+
+    def kCH4_OH(T):
+        return 2.8e-14 * T ** 0.667 * np.exp(-1575 / T)
+
+    ndens = ndens_air(T, P)
+    age = age * 365.25 * 24 * 3600
+    ss = gamma * kCH4_OH(T) * ch4 / kCO_OH(ndens)
+    bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
+    return ss + bc
+
+
+def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='eq'):
+    R = 8.314 * 100 ** 3 / 100 / 6.626e23
+    lat_bins = np.array([-90., -55., -20., 20., 55., 90.])
+
+    def ndens_air(T, P):
+        return P / (R * T)
+
+    def kCO_OH(nair):
+        return 1.57e-13 + 3.54e-33 * nair
+
+    def kCH4_OH(T):
+        return 2.8e-14 * T ** 0.667 * np.exp(-1575 / T)
+
+    def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
+        ndens = ndens_air(T, P)
+        age = age * 365.25 * 24 * 3600
+        ss = gamma * kCH4_OH(T) * ch4 / kCO_OH(ndens)
+        bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
+        return ss + bc
+
+    #################
+    # Load ACE data #
+    #################
+
+    with ncdf.Dataset(ace_age_file) as ds:
+        ace_dates = read_ace_date(ds)
+        if lat == 'geog':
+            ace_lat = read_ace_var(ds, 'latitude', None)
+        elif lat == 'eq':
+            ace_lat = read_ace_var(ds, 'eqlat', None)
+            # 55 km up is just above where the excess CO start to become apparent, so it's a good level to base
+            # equivalent latitude on.
+            ace_lat = ace_lat[:, 55]
+        else:
+            raise ValueError('lat must be "geog" or "eq"')
+
+        ace_alt = read_ace_var(ds, 'altitude', None)
+
+        qflags = read_ace_var(ds, 'quality_flag', None)
+        ace_t = read_ace_var(ds, 'temperature', qflags)
+        ace_p = read_ace_var(ds, 'pressure', qflags) * 1013.25  # atm -> hPa
+        ace_age = read_ace_var(ds, 'age', qflags)
+
+    with ncdf.Dataset(ace_ch4_file) as ds:
+        qflags = read_ace_var(ds, 'quality_flag', None)
+        ace_ch4 = read_ace_var(ds, 'CH4', qflags)
+
+    with ncdf.Dataset(ace_co_file) as ds:
+        qflags = read_ace_var(ds, 'quality_flag', None)
+        all_ace_co = read_ace_var(ds, 'CO', qflags)
+
+    ace_dates = pd.DatetimeIndex(ace_dates)
+
+    ########################################################
+    # Calculate the excess CO for each latitude bin/season #
+    ########################################################
+
+    season_months = OrderedDict([('DJF', [12, 1, 2]),
+                                 ('MAM', [3, 4, 5]),
+                                 ('JJA', [6, 7, 8]),
+                                 ('SON', [9, 10, 11])])
+
+    seasons = OrderedDict([(k, np.isin(ace_dates.month, v)) for k, v in season_months.items()])
+
+    season_mid_doys = [(k, mod_utils.day_of_year(dt.datetime(2001, v[1], 15))) for k, v in season_months.items()]
+    season_mid_doys = OrderedDict(season_mid_doys)
+
+    co_calc = strat_co(ace_ch4, ace_t, ace_p, ace_age, 50.0e-9)
+    xx = np.isnan(all_ace_co) | np.isnan(co_calc)
+    all_ace_co[xx] = np.nan
+    co_calc[xx] = np.nan
+
+    n_lev = np.size(ace_alt)
+    n_seas = len(seasons)
+    n_bins = len(lat_bins) - 1
+
+    diff_array = np.full([n_lev, n_seas, n_bins], np.nan)
+    pres_array = np.full([n_lev, n_seas, n_bins], np.nan)
+
+    for iseas, xx_seas in enumerate(seasons.values()):
+        for ibin in range(len(lat_bins)-1):
+            bin_start = lat_bins[ibin]
+            bin_stop = lat_bins[ibin+1]
+
+            xx_lat = (ace_lat >= bin_start) & (ace_lat < bin_stop)
+            xx_this = xx_seas & xx_lat
+
+            this_calc_co = np.nanmean(co_calc[xx_this], axis=0)
+            this_ace_co = np.nanmean(all_ace_co[xx_this], axis=0)
+            diff_array[:, iseas, ibin] = (this_ace_co - this_calc_co)*1e9
+            pres_array[:, iseas, ibin] = np.nanmean(ace_p[xx_this], axis=0)
+
+    _save_excess_co_lut(save_file=save_file, co_excess=diff_array, lat_bins=lat_bins, pressure=pres_array, lat_type=lat,
+                        seasons=season_mid_doys, altitude=ace_alt, ace_co_file=ace_co_file,
+                        ace_ch4_file=ace_ch4_file, ace_age_file=ace_age_file)
+
+
+def _save_excess_co_lut(save_file, co_excess, pressure, lat_bins, seasons, altitude, lat_type,
+                        ace_co_file, ace_ch4_file, ace_age_file):
+    lat_bin_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
+    season_names = np.array(list(seasons.keys()))
+    doys = np.array(list(seasons.values()))
+
+    with ncdf.Dataset(save_file, 'w') as nh:
+        alt_dim = ioutils.make_ncdim_helper(nh, 'altitude', altitude, unit='km')
+        doy_dim = ioutils.make_ncdim_helper(nh, 'doy', doys, unit='day of year')
+        lat_dim = ioutils.make_ncdim_helper(nh, 'lat_bin', lat_bin_centers, unit='degrees_north')
+
+        ioutils.make_ncdim_helper(nh, 'lat_bin_edges', lat_bins)
+        ioutils.make_ncvar_helper(nh, 'seasons', season_names, [doy_dim])
+
+        ioutils.make_ncvar_helper(nh, 'co_excess', co_excess, [alt_dim, doy_dim, lat_dim],
+                                  unit='ppb', description='Excess CO in ACE-FTS data beyond that predicted by a '
+                                                          'kinetic model of the CO chemistry in the stratosphere.')
+        ioutils.make_ncvar_helper(nh, 'pressure', pressure, [alt_dim, doy_dim, lat_dim],
+                                  unit='hPa', description='Average pressure levels for the CO excess profiles')
+
+        ioutils.add_dependent_file_hash(nh, 'ace_co_file', ace_co_file)
+        ioutils.add_dependent_file_hash(nh, 'ace_ch4_file', ace_ch4_file)
+        ioutils.add_dependent_file_hash(nh, 'ace_age_file', ace_age_file)
+        ioutils.add_creation_info(nh, 'ace_fts_analysis.create_excess_co_lut')
+        nh.setncattr('latitude_type', 'Binned by {} latitude'.format(lat_type))
