@@ -782,9 +782,10 @@ def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
     return ss + bc
 
 
-def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='eq'):
+def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='eq', min_req_pts=10):
     R = 8.314 * 100 ** 3 / 100 / 6.626e23
     lat_bins = np.array([-90., -55., -20., 20., 55., 90.])
+    lat_bin_centers = np.array([-55., -37.5, 0., 37.5, 55.])
 
     def ndens_air(T, P):
         return P / (R * T)
@@ -850,9 +851,9 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='
     season_mid_doys = OrderedDict(season_mid_doys)
 
     co_calc = strat_co(ace_ch4, ace_t, ace_p, ace_age, 50.0e-9)
-    xx = np.isnan(all_ace_co) | np.isnan(co_calc)
-    all_ace_co[xx] = np.nan
-    co_calc[xx] = np.nan
+    xx_nans = np.isnan(all_ace_co) | np.isnan(co_calc)
+    all_ace_co[xx_nans] = np.nan
+    co_calc[xx_nans] = np.nan
 
     n_lev = np.size(ace_alt)
     n_seas = len(seasons)
@@ -871,17 +872,20 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='
 
             this_calc_co = np.nanmean(co_calc[xx_this], axis=0)
             this_ace_co = np.nanmean(all_ace_co[xx_this], axis=0)
+            these_counts = np.sum(~xx_nans[xx_this], axis=0)
             diff_array[:, iseas, ibin] = (this_ace_co - this_calc_co)*1e9
+            diff_array[these_counts < min_req_pts, iseas, ibin] = np.nan
             pres_array[:, iseas, ibin] = np.nanmean(ace_p[xx_this], axis=0)
+            pres_array[these_counts < min_req_pts, iseas, ibin] = np.nan
 
-    _save_excess_co_lut(save_file=save_file, co_excess=diff_array, lat_bins=lat_bins, pressure=pres_array, lat_type=lat,
-                        seasons=season_mid_doys, altitude=ace_alt, ace_co_file=ace_co_file,
-                        ace_ch4_file=ace_ch4_file, ace_age_file=ace_age_file)
+    _save_excess_co_lut(save_file=save_file, co_excess=diff_array, lat_bins=lat_bins, lat_bin_centers=lat_bin_centers,
+                        pressure=pres_array, lat_type=lat, seasons=season_mid_doys, altitude=ace_alt,
+                        ace_co_file=ace_co_file, ace_ch4_file=ace_ch4_file, ace_age_file=ace_age_file)
 
 
-def _save_excess_co_lut(save_file, co_excess, pressure, lat_bins, seasons, altitude, lat_type,
+def _save_excess_co_lut(save_file, co_excess, pressure, lat_bins, lat_bin_centers, seasons, altitude, lat_type,
                         ace_co_file, ace_ch4_file, ace_age_file):
-    lat_bin_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
+    #lat_bin_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
     season_names = np.array(list(seasons.keys()))
     doys = np.array(list(seasons.values()))
 
