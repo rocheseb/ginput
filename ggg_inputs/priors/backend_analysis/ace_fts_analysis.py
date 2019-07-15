@@ -840,14 +840,22 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='
     # Calculate the excess CO for each latitude bin/season #
     ########################################################
 
-    season_months = OrderedDict([('DJF', [12, 1, 2]),
-                                 ('MAM', [3, 4, 5]),
-                                 ('JJA', [6, 7, 8]),
-                                 ('SON', [9, 10, 11])])
+    season_months = OrderedDict([('Jan', [1]),
+                                 ('Feb', [2]),
+                                 ('Mar', [3]),
+                                 ('Apr', [4]),
+                                 ('May', [5]),
+                                 ('Jun', [6]),
+                                 ('Jul', [7]),
+                                 ('Aug', [8]),
+                                 ('Sep', [9]),
+                                 ('Oct', [10]),
+                                 ('Nov', [11]),
+                                 ('Dec', [12])])
 
     seasons = OrderedDict([(k, np.isin(ace_dates.month, v)) for k, v in season_months.items()])
 
-    season_mid_doys = [(k, mod_utils.day_of_year(dt.datetime(2001, v[1], 15))) for k, v in season_months.items()]
+    season_mid_doys = [(k, mod_utils.day_of_year(dt.datetime(2001, v[0], 15))) for k, v in season_months.items()]
     season_mid_doys = OrderedDict(season_mid_doys)
 
     co_calc = strat_co(ace_ch4, ace_t, ace_p, ace_age, 50.0e-9)
