@@ -782,10 +782,8 @@ def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
     return ss + bc
 
 
-def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='eq', min_req_pts=10):
+def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_type='eq', min_req_pts=10):
     R = 8.314 * 100 ** 3 / 100 / 6.626e23
-    lat_bins = np.array([-90., -55., -20., 20., 55., 90.])
-    lat_bin_centers = np.array([-55., -37.5, 0., 37.5, 55.])
 
     def ndens_air(T, P):
         return P / (R * T)
@@ -803,27 +801,37 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='
         bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
         return ss + bc
 
+    def doy_periodic_interp(ds):
+        orig_doy_min = ds.coords['doy'].min()
+        orig_doy_max = ds.coords['doy'].max()
+        ds0 = ds.copy()
+        # can't use -= and += because that affects the original dataset coordinates
+        ds0.coords['doy'] = ds0.coords['doy'] - (orig_doy_max + 1)
+        ds1 = ds.copy()
+        ds1.coords['doy'] = ds1.coords['doy'] + (orig_doy_max + 1)
+        cat_ds = xr.concat([ds0, ds, ds1], dim='doy').interpolate_na(dim='doy', method='linear')
+        return cat_ds.sel(doy=slice(orig_doy_min, orig_doy_max))
+
+
     #################
     # Load ACE data #
     #################
 
     with ncdf.Dataset(ace_age_file) as ds:
         ace_dates = read_ace_date(ds)
-        if lat == 'geog':
+        qflags = read_ace_var(ds, 'quality_flag', None)
+
+        if lat_type == 'geog':
             ace_lat = read_ace_var(ds, 'latitude', None)
-        elif lat == 'eq':
+            ace_lat = np.broadcast_to(ace_lat.reshape(-1, 1), qflags.shape)
+        elif lat_type == 'eq':
             ace_lat = read_ace_var(ds, 'eqlat', None)
-            # 55 km up is just above where the excess CO start to become apparent, so it's a good level to base
-            # equivalent latitude on.
-            ace_lat = ace_lat[:, 55]
         else:
             raise ValueError('lat must be "geog" or "eq"')
 
-        ace_alt = read_ace_var(ds, 'altitude', None)
-
-        qflags = read_ace_var(ds, 'quality_flag', None)
         ace_t = read_ace_var(ds, 'temperature', qflags)
         ace_p = read_ace_var(ds, 'pressure', qflags) * 1013.25  # atm -> hPa
+        ace_pt = read_ace_theta(ds, qflags=qflags)
         ace_age = read_ace_var(ds, 'age', qflags)
 
     with ncdf.Dataset(ace_ch4_file) as ds:
@@ -834,82 +842,96 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat='
         qflags = read_ace_var(ds, 'quality_flag', None)
         all_ace_co = read_ace_var(ds, 'CO', qflags)
 
-    ace_dates = pd.DatetimeIndex(ace_dates)
-
-    ########################################################
-    # Calculate the excess CO for each latitude bin/season #
-    ########################################################
-
-    season_months = OrderedDict([('Jan', [1]),
-                                 ('Feb', [2]),
-                                 ('Mar', [3]),
-                                 ('Apr', [4]),
-                                 ('May', [5]),
-                                 ('Jun', [6]),
-                                 ('Jul', [7]),
-                                 ('Aug', [8]),
-                                 ('Sep', [9]),
-                                 ('Oct', [10]),
-                                 ('Nov', [11]),
-                                 ('Dec', [12])])
-
-    seasons = OrderedDict([(k, np.isin(ace_dates.month, v)) for k, v in season_months.items()])
-
-    season_mid_doys = [(k, mod_utils.day_of_year(dt.datetime(2001, v[0], 15))) for k, v in season_months.items()]
-    season_mid_doys = OrderedDict(season_mid_doys)
+    ace_doys = np.array([mod_utils.day_of_year(d) for d in ace_dates])
+    ace_doys = np.broadcast_to(ace_doys.reshape(-1, 1), all_ace_co.shape)
 
     co_calc = strat_co(ace_ch4, ace_t, ace_p, ace_age, 50.0e-9)
-    xx_nans = np.isnan(all_ace_co) | np.isnan(co_calc)
-    all_ace_co[xx_nans] = np.nan
-    co_calc[xx_nans] = np.nan
+    excess_co = (all_ace_co - co_calc)*1e9  # calculate excess and convert to ppb
+    notnans = ~np.isnan(excess_co)
+    excess_co = excess_co[notnans]
 
-    n_lev = np.size(ace_alt)
-    n_seas = len(seasons)
-    n_bins = len(lat_bins) - 1
+    lat_bins = np.arange(-90, 91, 10)
+    doy_bins = np.arange(0, 375, 5)
+    theta_bins = np.arange(350, 4150, 100)
+    all_bins = [lat_bins, doy_bins, theta_bins]
+    all_coords = [ace_lat[notnans], ace_doys[notnans], ace_pt[notnans]]
 
-    diff_array = np.full([n_lev, n_seas, n_bins], np.nan)
-    pres_array = np.full([n_lev, n_seas, n_bins], np.nan)
+    ####################################################
+    # Use pandas groupby() to bin the data efficiently #
+    ####################################################
 
-    for iseas, xx_seas in enumerate(seasons.values()):
-        for ibin in range(len(lat_bins)-1):
-            bin_start = lat_bins[ibin]
-            bin_stop = lat_bins[ibin+1]
+    df_dict = {'data': excess_co}
+    coord_cols = []
+    for i, (coord, bin) in enumerate(zip(all_coords, all_bins)):
+        inds = np.digitize(coord.flatten(), bin) - 1
+        colname = 'ind{}'.format(i)
+        df_dict[colname] = inds
+        coord_cols.append(colname)
 
-            xx_lat = (ace_lat >= bin_start) & (ace_lat < bin_stop)
-            xx_this = xx_seas & xx_lat
+    df = pd.DataFrame(df_dict)
+    all_bin_centers = [0.5 * (b[:-1] + b[1:]) for b in all_bins]
+    bin_names = ['lat', 'doy', 'theta']
+    bin_units = ['degrees_north', 'day of year (0-based)', 'K']
 
-            this_calc_co = np.nanmean(co_calc[xx_this], axis=0)
-            this_ace_co = np.nanmean(all_ace_co[xx_this], axis=0)
-            these_counts = np.sum(~xx_nans[xx_this], axis=0)
-            diff_array[:, iseas, ibin] = (this_ace_co - this_calc_co)*1e9
-            diff_array[these_counts < min_req_pts, iseas, ibin] = np.nan
-            pres_array[:, iseas, ibin] = np.nanmean(ace_p[xx_this], axis=0)
-            pres_array[these_counts < min_req_pts, iseas, ibin] = np.nan
+    means = np.full([np.size(b) - 1 for b in all_bins], np.nan if np.issubdtype(excess_co.dtype, np.floating) else 0)
+    means = xr.DataArray(means, coords=all_bin_centers, dims=bin_names)
+    stds = means.copy()
 
-    _save_excess_co_lut(save_file=save_file, co_excess=diff_array, lat_bins=lat_bins, lat_bin_centers=lat_bin_centers,
-                        pressure=pres_array, lat_type=lat, seasons=season_mid_doys, altitude=ace_alt,
+    flags = np.zeros(means.shape, dtype=np.int)
+    flag_bits = {'clip': 2**0, 'toofew': 2**1, 'filled': 2**2}
+    flag_units = 'Bit meanings (least significant first): 1 = value <0 clipped, 2 = fewer than {} points, 3 = NaN filled'.format(min_req_pts)
+
+    for inds, grp in df.groupby(coord_cols):
+        subdata = grp['data']
+        if subdata.size < min_req_pts:
+            flags[inds] = np.bitwise_or(flags[inds], flag_bits['toofew'])
+            continue
+
+        if any(i < 0 for i in inds):
+            # negative index indicates that the value is below the minimum bin so we skip it
+            continue
+        try:
+            means[inds] = np.nanmean(subdata)
+            stds[inds] = np.nanstd(subdata)
+        except IndexError:
+            # inds will be too large if any of the values is outside the right edge of the last bin, so just skip those
+            # since we don't want to bin them. We caught any outside the left edge of the bin checking if any are < 0
+            continue
+
+    ########################################################################################
+    # Fill in NaNs and clip to positive values. Track these actions in the flags variables #
+    ########################################################################################
+    flags[means.data < 0] = np.bitwise_or(flags[means.data < 0], flag_bits['clip'])
+    means = means.clip(0)
+    was_nans = np.isnan(means.data)
+    dataset = xr.Dataset({'means': means, 'stds': stds})
+    dataset = doy_periodic_interp(dataset)
+    nans_filled = was_nans & ~np.isnan(dataset['means'].data)
+    flags[nans_filled] = np.bitwise_or(flags[nans_filled], flag_bits['filled'])
+
+    _save_excess_co_lut(save_file=save_file, co_excess=dataset['means'].data, co_excess_std=dataset['stds'].data,
+                        flags=flags, bin_edges=all_bins, bin_centers=all_bin_centers, bin_names=bin_names,
+                        bin_units=bin_units, flag_description=flag_units, lat_type=lat_type,
                         ace_co_file=ace_co_file, ace_ch4_file=ace_ch4_file, ace_age_file=ace_age_file)
 
 
-def _save_excess_co_lut(save_file, co_excess, pressure, lat_bins, lat_bin_centers, seasons, altitude, lat_type,
-                        ace_co_file, ace_ch4_file, ace_age_file):
-    #lat_bin_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
-    season_names = np.array(list(seasons.keys()))
-    doys = np.array(list(seasons.values()))
+def _save_excess_co_lut(save_file, co_excess, co_excess_std, flags, bin_edges, bin_centers, bin_names, bin_units,
+                        flag_description, lat_type, ace_co_file, ace_ch4_file, ace_age_file):
 
     with ncdf.Dataset(save_file, 'w') as nh:
-        alt_dim = ioutils.make_ncdim_helper(nh, 'altitude', altitude, unit='km')
-        doy_dim = ioutils.make_ncdim_helper(nh, 'doy', doys, unit='day of year')
-        lat_dim = ioutils.make_ncdim_helper(nh, 'lat_bin', lat_bin_centers, unit='degrees_north')
+        dims = []
+        for name, centers, edges, units in zip(bin_names, bin_centers, bin_edges, bin_units):
+            this_dim = ioutils.make_ncdim_helper(nh, name, centers, unit=units)
+            dims.append(this_dim)
+            ioutils.make_ncdim_helper(nh, name + '_bin_edges', edges, unit=units)
 
-        ioutils.make_ncdim_helper(nh, 'lat_bin_edges', lat_bins)
-        ioutils.make_ncvar_helper(nh, 'seasons', season_names, [doy_dim])
-
-        ioutils.make_ncvar_helper(nh, 'co_excess', co_excess, [alt_dim, doy_dim, lat_dim],
+        ioutils.make_ncvar_helper(nh, 'co_excess', co_excess, dims=dims,
                                   unit='ppb', description='Excess CO in ACE-FTS data beyond that predicted by a '
                                                           'kinetic model of the CO chemistry in the stratosphere.')
-        ioutils.make_ncvar_helper(nh, 'pressure', pressure, [alt_dim, doy_dim, lat_dim],
-                                  unit='hPa', description='Average pressure levels for the CO excess profiles')
+        ioutils.make_ncvar_helper(nh, 'co_excess_std', co_excess_std, dims=dims,
+                                  unit='hPa', description='Standard deviation of the excess CO in this bin.')
+        ioutils.make_ncvar_helper(nh, 'co_excess_flags', flags, dims=dims,
+                                  unit='Bit array flag', description=flag_description)
 
         ioutils.add_dependent_file_hash(nh, 'ace_co_file', ace_co_file)
         ioutils.add_dependent_file_hash(nh, 'ace_ch4_file', ace_ch4_file)
