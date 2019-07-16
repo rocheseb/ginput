@@ -213,6 +213,7 @@ class TraceGasTropicsRecord(object):
     gas_name = ''
     gas_unit = ''
     gas_seas_cyc_coeff = None
+    gas_trop_lifetime_yrs = np.inf
 
     months_avg_for_trend = 12
     age_spec_regions = ('tropics', 'midlat', 'vortex')
@@ -1356,6 +1357,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
+    gas_trop_lifetime_yrs = 200.0  # estimated from Box 6.1 of Ch 6 of the IPCC AR5 (p. 473)
     _max_trend_poly_deg = 'exp'
 
 
@@ -1363,6 +1365,7 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
     gas_name = 'n2o'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.0
+    gas_trop_lifetime_yrs = 121.0  # from table 8.A.1 of IPCC AR5, Ch 8, p. 731
 
     _ace_fn2o_file = os.path.join(_data_dir, 'ace_fn2o_lut.nc')
 
@@ -1406,6 +1409,7 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'ch4'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.012
+    gas_trop_lifetime_yrs = 12.4  # from Table 8.A.1 of IPCC AR5, Ch 8, p. 731
 
     _nyears_for_extrap_avg = 5
 
@@ -1841,7 +1845,11 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
     prof_world_flag[xx_trop] = const.trop_flag
 
     gas_df = gas_record.get_gas_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
-    prof_gas[xx_trop] = gas_df['dmf_mean'].values
+
+    # Apply a correction to account for chemical loss between the emission and MLO/SMO measurement or between the
+    # prior location and MLO/SMO.
+    lifetime_adj = np.exp(-air_age / gas_record.gas_trop_lifetime_yrs)
+    prof_gas[xx_trop] = gas_df['dmf_mean'].values * lifetime_adj
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop] = gas_df['latency'].values
     # Record the date that the CO2 was taken from
