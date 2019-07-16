@@ -213,7 +213,12 @@ class TraceGasTropicsRecord(object):
     gas_name = ''
     gas_unit = ''
     gas_seas_cyc_coeff = None
+    # The lifetime is used to account for chemical loss between emission and the prior location. Setting to infinity
+    # will effectively disable this correction, since e^(-x/infinity) = 1.0.
     gas_trop_lifetime_yrs = np.inf
+    # The latitudinal corrections apply to the troposphere only. Give the northern and southern hemisphere correction
+    # as a dictionary with values in ppx/degree, the unit "ppx" will be ppm, ppb, etc., whatever the base record is in.
+    gas_lat_correction = {'nh': 0.0, 'sh': 0.0}
 
     months_avg_for_trend = 12
     age_spec_regions = ('tropics', 'midlat', 'vortex')
@@ -1357,7 +1362,9 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
-    gas_trop_lifetime_yrs = 200.0  # estimated from Box 6.1 of Ch 6 of the IPCC AR5 (p. 473)
+    # the default of infinity is kept for GGG2019 as the priors code was delivered to JPL before the necessity of this
+    # correction was realized.
+    # gas_trop_lifetime_yrs = 200.0 # estimated from Box 6.1 of Ch 6 of the IPCC AR5 (p. 473).
     _max_trend_poly_deg = 'exp'
 
 
@@ -1410,6 +1417,9 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.012
     gas_trop_lifetime_yrs = 12.4  # from Table 8.A.1 of IPCC AR5, Ch 8, p. 731
+    # Values determined from the binned boundary layer (p > 800 hPa) differences between priors and ATom/HIPPO quantum
+    # cascade laser CH4, filtering out over-land data. The bias increased from ~0 at the equator to ~60 ppb at 80 deg N.
+    gas_lat_correction = {'nh': 0.75, 'sh': 0.0}
 
     _nyears_for_extrap_avg = 5
 
@@ -1847,9 +1857,12 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
     gas_df = gas_record.get_gas_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
 
     # Apply a correction to account for chemical loss between the emission and MLO/SMO measurement or between the
-    # prior location and MLO/SMO.
+    # prior location and MLO/SMO. For some gases we also apply a latitudinal correction.
     lifetime_adj = np.exp(-air_age / gas_record.gas_trop_lifetime_yrs)
-    prof_gas[xx_trop] = gas_df['dmf_mean'].values * lifetime_adj
+    lat_correction_factor = gas_record.gas_lat_correction['nh'] if obs_lat >= 0 else gas_record.gas_lat_correction['sh']
+    lat_correction = lat_correction_factor * obs_lat
+
+    prof_gas[xx_trop] = gas_df['dmf_mean'].values * lifetime_adj + lat_correction
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop] = gas_df['latency'].values
     # Record the date that the CO2 was taken from
