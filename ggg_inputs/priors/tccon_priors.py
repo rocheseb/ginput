@@ -1943,42 +1943,22 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres,
                       'stratum': prof_world_flag}
 
 
-def _load_co_lut(lut_file, transition_width=None):
-    def copy_slice(lut, ind, new_doy):
-        new_slice = lut.isel(doy=ind)
-        new_slice.coords['doy'] = new_doy
-        return new_slice
-
+def _load_co_lut(lut_file):
     with xr.open_dataset(lut_file) as ds:
         co_lut = ds['co_excess']
 
-    # We'll trick it into doing period validation by duplicating the last season at the beginning and the first season
-    # at the end. Tried using a proper periodic boundary condition but couldn't figure out how to access the CubicSpline
-    # interpolator through the xarray interp method.
+    # We'll trick this into doing periodic interpolation in day of year by repeating the first and last slices in that
+    # dimension
+    co_first_slice = co_lut.isel(doy=0)
+    co_first_slice.coords['doy'] = co_first_slice.coords['doy'] + mod_utils.days_per_year
+    co_last_slice = co_lut.isel(doy=-1)
+    co_last_slice.coords['doy'] = co_last_slice.doy - mod_utils.days_per_year
 
-        co_first_slice = co_lut.isel(doy=0)
-        co_first_slice.coords['doy'] = co_first_slice.doy + mod_utils.days_per_year
-        co_last_slice = co_lut.isel(doy=-1)
-        co_last_slice.coords['doy'] = co_last_slice.doy - mod_utils.days_per_year
-
-    co = xr.concat([co_last_slice, co_lut, co_first_slice], dim='doy')
-
-    if transition_width is None:
-        return co
-    elif transition_width < 1:
-        raise ValueError('transition_width cannot be < 1')
-    else:
-        co_slices = [co.isel(doy=0)]
-        boundary_doys = 0.5*(co.doy[:-1].data + co.doy[1:].data)
-        for i, doy in enumerate(boundary_doys):
-            co_slices.append(copy_slice(co, i, doy-transition_width/2))
-            co_slices.append(copy_slice(co, i+1, doy+transition_width/2))
-
-        return xr.concat(co_slices, dim='doy')
+    return xr.concat([co_last_slice, co_lut, co_first_slice], dim='doy')
 
 
-def modify_strat_co(base_co_profile, z_grid, pres_profile, pt_profile, trop_pres, prof_eqlat, prof_date,
-                    excess_co_lut=_excess_co_file, transition_width_days=None):
+def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_eqlat, prof_date,
+                    excess_co_lut=_excess_co_file):
     """
     Takes the baseline GEOS CO profile and adds the mesospheric contribution to the stratosphere.
 
@@ -1988,8 +1968,8 @@ def modify_strat_co(base_co_profile, z_grid, pres_profile, pt_profile, trop_pres
     :param base_co_profile: the baseline CO profile in ppb.
     :type base_co_profile: array-like
 
-    :param z_grid: the altitudes that the CO profile is defined on, in kilometers.
-    :type z_grid: array-like
+    :param pt_profile: the altitudes that the CO profile is defined on, in kilometers.
+    :type pt_profile: array-like
 
     :param pres_profile: the pressure levels that the CO profile is defined on.
     :type pres_profile: array-like
@@ -2016,20 +1996,18 @@ def modify_strat_co(base_co_profile, z_grid, pres_profile, pt_profile, trop_pres
     """
     prof_doy = mod_utils.day_of_year(prof_date)
 
-    co_lut = _load_co_lut(excess_co_lut, transition_width=transition_width_days)
-
-    # Get the profile for the right day of year, using periodic boundary condition interpolation
-    co_lut = co_lut.interp(doy=prof_doy, method='linear')
+    co_lut = _load_co_lut(excess_co_lut)
 
     # Get the profile for the right equivalent latitude for each altitude
     xx_overworld = mod_utils.is_overworld(pt_profile, pres_profile, trop_pres)
 
     level_ind = np.arange(np.size(base_co_profile))[xx_overworld]
-    prof_eqlat = xr.DataArray(prof_eqlat[xx_overworld], coords=[('idx', level_ind)])
-    z_grid = xr.DataArray(z_grid[xx_overworld], coords=[('idx', level_ind)])
+    level_coords = [('idx', level_ind)]
+    prof_eqlat = xr.DataArray(prof_eqlat[xx_overworld], coords=level_coords)
+    pt_profile = xr.DataArray(pt_profile[xx_overworld], coords=level_coords)
+    doy_grid = xr.DataArray(np.full(prof_eqlat.shape, prof_doy), coords=level_coords)
 
-    extra_co_prof = co_lut.interp(altitude=z_grid, lat_bin=prof_eqlat).data
-    extra_co_prof[extra_co_prof < 0] = 0  # only want to add extra CO from the mesospheric descent
+    extra_co_prof = co_lut.interp(theta=pt_profile, lat=prof_eqlat, doy=doy_grid).data
     base_co_profile[xx_overworld] += extra_co_prof
 
     return base_co_profile

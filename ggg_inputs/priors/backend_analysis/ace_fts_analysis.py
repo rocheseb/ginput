@@ -801,16 +801,34 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
         bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
         return ss + bc
 
-    def doy_periodic_interp(ds):
-        orig_doy_min = ds.coords['doy'].min()
-        orig_doy_max = ds.coords['doy'].max()
-        ds0 = ds.copy()
-        # can't use -= and += because that affects the original dataset coordinates
-        ds0.coords['doy'] = ds0.coords['doy'] - (orig_doy_max + 1)
-        ds1 = ds.copy()
-        ds1.coords['doy'] = ds1.coords['doy'] + (orig_doy_max + 1)
-        cat_ds = xr.concat([ds0, ds, ds1], dim='doy').interpolate_na(dim='doy', method='linear')
-        return cat_ds.sel(doy=slice(orig_doy_min, orig_doy_max))
+    def fill_nans(ds):
+        # We want to interpolate/extrapolate along theta first. I tried originally doing periodic interpolation along
+        # the day-of-year axis, but there's not enough data in the northen hemisphere polar summer to get the decrease
+        # right. However, there are some columns that have 0 or 1 non-NaN values which the interpolator then chokes
+        # on, so we need to find those columns and replace the NaNs with a fill value temporarily to avoid trying
+        # to handle them here.
+        all_nans = dict()
+        for key, variable in ds.items():
+            var_not_nans = ~np.isnan(variable)
+            this_most_nans = var_not_nans.sum(dim='theta') < 2
+            this_most_nans = np.broadcast_to(this_most_nans.data.reshape(this_most_nans.shape + (1,)), variable.shape)
+            # only replace NaNs in columns with 0 or 1 non-NaN values. Leave non-NaN values in those columns alone,
+            # and leave NaNs elsewhere alone.
+            this_most_nans = this_most_nans & ~var_not_nans.data
+            variable.data[this_most_nans] = -999
+            all_nans[key] = this_most_nans
+
+        ds = ds.interpolate_na(dim='theta', method='linear', fill_value='extrapolate')
+
+        for key, this_most_nans in all_nans.items():
+            ds[key].data[this_most_nans] = np.nan
+
+        # Interpolate along latitude and day-of-year to fill in the columns missing most of their values. I chose to do
+        # latitude first because it looked like interp/extrap in lat would get most of those columns and a linear
+        # extrapolation would generally stay with reasonable upper strat values.
+        ds = ds.interpolate_na(dim='lat', method='linear', fill_value='extrapolate').interpolate_na(dim='doy', method='linear')
+
+        return ds
 
 
     #################
@@ -851,7 +869,8 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
     excess_co = excess_co[notnans]
 
     lat_bins = np.arange(-90, 91, 10)
-    doy_bins = np.arange(0, 375, 5)
+    doy_bins = np.arange(0, 370, 5)
+    doy_bins[-1] = 366  # account for leap years
     theta_bins = np.arange(350, 4150, 100)
     all_bins = [lat_bins, doy_bins, theta_bins]
     all_coords = [ace_lat[notnans], ace_doys[notnans], ace_pt[notnans]]
@@ -905,7 +924,7 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
     means = means.clip(0)
     was_nans = np.isnan(means.data)
     dataset = xr.Dataset({'means': means, 'stds': stds})
-    dataset = doy_periodic_interp(dataset)
+    dataset = fill_nans(dataset)
     nans_filled = was_nans & ~np.isnan(dataset['means'].data)
     flags[nans_filled] = np.bitwise_or(flags[nans_filled], flag_bits['filled'])
 
