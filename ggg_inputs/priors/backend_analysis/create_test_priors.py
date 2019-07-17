@@ -98,23 +98,24 @@ def make_full_mod_dir(top_dir, product):
     return os.path.join(top_dir, product.lower(), 'xx', 'vertical')
 
 
-def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
+def check_geos_files(acdates, download_to_dir, file_type=get_GEOS5._default_file_type,
+                     levels=get_GEOS5._default_level_type):
     acdates = [dtime.strptime(d.split('-')[0], '%Y%m%d') for d in acdates]
-    types_name_args = {'2dmet': {'file_type': 'Nx', 'chem': False},
-                       '3dmet': {'file_type': 'Np', 'chem': False},
-                       '3dchm': {'file_type': 'Nv', 'chem': True}}
+    is_chem = file_type == 'chm'
+    types_name_args = {'surf': {'file_type': 'Nx', 'chem': is_chem},
+                       'p': {'file_type': 'Np', 'chem': is_chem},
+                       'eta': {'file_type': 'Nv', 'chem': is_chem}}
     missing_files = dict()
-    for ftype in file_types:
-        name_args = types_name_args[ftype]
-        file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', utc_dates=acdates, **name_args)
-        for f, d in zip(file_names, file_dates):
-            d = d.date()
-            ffull = os.path.join(download_to_dir, name_args['file_type'], f)
-            if not os.path.isfile(ffull):
-                if d in missing_files:
-                    missing_files[d].append(f)
-                else:
-                    missing_files[d] = [f]
+    name_args = types_name_args[levels]
+    file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', utc_dates=acdates, **name_args)
+    for f, d in zip(file_names, file_dates):
+        d = d.date()
+        ffull = os.path.join(download_to_dir, name_args['file_type'], f)
+        if not os.path.isfile(ffull):
+            if d in missing_files:
+                missing_files[d].append(f)
+            else:
+                missing_files[d] = [f]
 
     for d in sorted(missing_files.keys()):
         nmissing = len(missing_files[d])
@@ -123,10 +124,11 @@ def check_geos_files(acdates, download_to_dir, file_types=_default_file_types):
 
     print('{} of {} dates missing at least one file'.format(len(missing_files), len(acdates)))
 
-def download_geos(acdates, download_to_dir, file_types=_default_file_types):
+
+def download_geos(acdates, download_to_dir, file_type=get_GEOS5._default_file_type, levels=get_GEOS5._default_level_type):
     for dates in acdates:
         date_range = _date_range_str_to_dates(dates)
-        get_GEOS5.driver(date_range, mode='FPIT', path=download_to_dir, filetypes=file_types)
+        get_GEOS5.driver(date_range, mode='FPIT', path=download_to_dir, filetypes=file_type, levels=levels)
 
 
 def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
@@ -258,13 +260,13 @@ def _prior_helper(ph_f, ph_obs_date, ph_out_dir, gas_rec):
 
 
 def driver(check_geos, download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name,
-           nprocs, dl_file_types):
+           nprocs, dl_file_types, dl_levels):
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
     if check_geos:
-        check_geos_files(acdates, geos_top_dir, file_types=dl_file_types)
+        check_geos_files(acdates, geos_top_dir, file_type=dl_file_types, levels=dl_levels)
 
     if download:
-        download_geos(acdates, geos_top_dir, file_types=dl_file_types)
+        download_geos(acdates, geos_top_dir, file_type=dl_file_types,levels=dl_levels)
     else:
         print('Not downloading GEOS data')
 
@@ -290,9 +292,10 @@ def parse_args():
     parser.add_argument('--makepriors', action='store_true', help='Generate the priors as .map files.')
     parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use to run in parallel mode '
                                                           '(for --makemod and --makepriors only)')
-    parser.add_argument('--dl-file-types', default=_default_file_types, type=get_GEOS5._parse_file_types,
-                        help='Which GEOS file types to download with --download (no effect otherwise) as a '
-                             'comma-separated list. Allowed types are {}.'.format(', '.join(get_GEOS5._file_types)))
+    parser.add_argument('--dl-file-types', default=get_GEOS5._default_file_type, choices=get_GEOS5._file_types,
+                        help='Which GEOS file types to download with --download (no effect if --download not specified).')
+    parser.add_argument('--dl-levels', default=get_GEOS5._default_level_type, choices=get_GEOS5._level_types,
+                        help='Which GEOS levels to download with --download (no effect if --download not specified).')
 
     return vars(parser.parse_args())
 
