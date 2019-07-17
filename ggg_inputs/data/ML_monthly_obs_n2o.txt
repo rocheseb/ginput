@@ -15,7 +15,7 @@
 # comment: may be appropriate.  This should be discussed at an early stage in
 # comment: the work.  Manuscripts using the ESRL data should be sent to ESRL
 # comment: for review before they are submitted for publication so we can
-# comment: insure that the quality and limitations of the data are accurately
+# comment: ensure that the quality and limitations of the data are accurately
 # comment: represented.
 # comment:  
 # comment: Every effort is made to produce the most accurate and precise
@@ -60,7 +60,7 @@
 # description_project-abbr: ccg_surface
 # description_strategy-abbr: flask
 # description_analysis-constraints: flag:..%
-# description_creation-time: 2018-08-02 13:12:21
+# description_creation-time: 2019-07-16 13:51:30
 # comment:
 # comment:  ************ DATA DOCUMENTATION ***************
 # comment:
@@ -312,8 +312,19 @@ MLO 2017  5   330.04
 MLO 2017  6   330.10
 MLO 2017  7   330.30
 MLO 2017  8   330.48
-MLO 2017  9   330.52
+MLO 2017  9   330.51
 MLO 2017 10   330.52
-MLO 2017 11   330.67
+MLO 2017 11   330.69
 MLO 2017 12   330.84
-
+MLO 2018  1   330.76
+MLO 2018  2   330.77
+MLO 2018  3   330.97
+MLO 2018  4   331.02
+MLO 2018  5   330.99
+MLO 2018  6   331.15
+MLO 2018  7   331.32
+MLO 2018  8   331.32
+MLO 2018  9   331.44
+MLO 2018 10   331.74
+MLO 2018 11   331.98
+MLO 2018 12   332.05
