@@ -521,7 +521,8 @@ def load_as_array(atm_dir, map_dir, ztype='pres', years=None, months=None):
     return z, obs_co2, prof_co2
 
 
-def load_binned_array(atm_dir, map_dir, specie, ztype='pres', bin_edges=None, bin_op=np.nanmean):
+def load_binned_array(atm_dir, map_dir, specie, ztype='pres', bin_edges=None, bin_op=np.nanmean, prof_var=None,
+                      interp_mode=None):
     """
     Load the observed and prior profiles as a 2D array.
 
@@ -543,11 +544,22 @@ def load_binned_array(atm_dir, map_dir, specie, ztype='pres', bin_edges=None, bi
 
     :param specie: see :func:`iter_matched_data`
 
+    :param prof_var: profile variable from the prior's files to read in. If not given, the default will be the lowercase
+     version of the ``specie``.
+
+    :param interp_mode: interpolation mode passed to :func:`mod_utils.mod_interpolation_new`. Used to interpolate the
+      prior profiles to the observation z-coordinates. If not given it will use "log-log" if the ztype is "pres" and
+      "linear" otherwise.
+    :type interp_mode: str or None
+
     :return: observed profiles and prior profiles as 2D arrays with dimensions (n_profiles) x (n_bins)
     :rtype: :class:`numpy.ndarray`, :class:`numpy.ndarray`
     """
     if bin_edges is None:
         bin_edges, bin_centers, = _get_std_bins(ztype)
+
+    if prof_var is None:
+        prof_var = specie.lower()
 
     n_profs = num_atm_files(atm_dir)
     n_levels = np.size(bin_edges) - 1
@@ -560,8 +572,9 @@ def load_binned_array(atm_dir, map_dir, specie, ztype='pres', bin_edges=None, bi
                                                                                  include_filenames=True)):
         pbar.print_bar(i)
         prof_info['lon'][i], _, prof_info['lat'][i], _, prof_info['date'][i] = _get_id_info_from_atm_file(obsfile, as_abs=False)
-        this_obs_conc, this_prof_conc, this_z = interp_profile_to_obs(obsdat, mapdat, specie.lower(), ztype=ztype,
-                                                                      obs_file=obsfile, map_dir=map_dir)
+        this_obs_conc, this_prof_conc, this_z = interp_profile_to_obs(obsdat, mapdat, prof_var, ztype=ztype,
+                                                                      obs_file=obsfile, map_dir=map_dir,
+                                                                      interp_mode=interp_mode)
         obs_profiles[i, :] = bin_data(this_obs_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
         prior_profiles[i, :] = bin_data(this_prof_conc, this_z, bin_edges=bin_edges, bin_op=bin_op)
 
@@ -593,7 +606,8 @@ def interp_profile_to_obs_by_type(obsdat, mapdat, data_type=None, data_root=None
     return interp_profile_to_obs(obsdat, mapdat, **kwargs)
 
 
-def interp_profile_to_obs(obsdat, mapdat, specie, ztype='pres', obs_file=None, map_dir=None, limit_by_zsurf=True):
+def interp_profile_to_obs(obsdat, mapdat, specie, ztype='pres', obs_file=None, map_dir=None, limit_by_zsurf=True,
+                          interp_mode=None):
     """
     Interpolate prior profile data to the observation's altitude
 
@@ -615,6 +629,9 @@ def interp_profile_to_obs(obsdat, mapdat, specie, ztype='pres', obs_file=None, m
     :param limit_by_zsurf: if ``True``, only data above the surface altitude for this prior will be used.
     :type limit_by_zsurf: bool
 
+    :param interp_mode: interpolation mode passed to :func:`mod_utils.mod_interpolation_new`. If not given it will use
+     "log-log" if the ztype is "pres" and "linear" otherwise.
+
     :return: observed concentration, prior concentration, z-coordinates
     :rtype: three :class:`numpy.ndarray` instances
     """
@@ -633,7 +650,8 @@ def interp_profile_to_obs(obsdat, mapdat, specie, ztype='pres', obs_file=None, m
 
         return var_name
 
-    interp_mode = 'log-log' if ztype == 'pres' else 'linear'
+    if interp_mode is None:
+        interp_mode = 'log-log' if ztype == 'pres' else 'linear'
     obs_z_var = find_obs_z_var(obsdat)
     obs_zscale = 1.0 if ztype == 'pres' else 0.001  # must convert meters to kilometers
     prof_z_var = 'Pressure' if ztype == 'pres' else 'Height'
