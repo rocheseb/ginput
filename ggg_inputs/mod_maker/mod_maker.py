@@ -86,6 +86,7 @@ The slant .mod files are only generated when the SZA is above 90 degrees.
 There is dictionary of sites with their respective lat/lon in tccon_sites.py, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
 """
 import argparse
+from copy import deepcopy
 import glob
 import os, sys
 import numpy.ma as ma
@@ -1381,8 +1382,6 @@ def load_chem_variables(geos_file, geos_vars, target_site_dicts, pres_levels=mod
     # Interpolate to the standard pressure levels. Do this in log-log space since pressure and concentration typically
     # vary exponentially with altitude.
     std_pres_log = np.log(pres_levels)
-    import pdb;
-    pdb.set_trace()
     for i in range(nsites):
         pres_log = np.log(interp_geos_data['pres'][:, i])
         for var in geos_vars:
@@ -1485,9 +1484,7 @@ def combine_profile_surface_data(interp_profile_data, interp_surf_data, local_si
         temp_data[site] = {}
         temp_data[site]['prof'] = {}
         for var in interp_profile_data:
-            if var == 'lev':
-                temp_data[site]['prof'][var] = interp_profile_data[var]
-            elif var == 'PHIS':
+            if var == 'PHIS':
                 continue
             else:
                 temp_data[site]['prof'][var] = interp_profile_data[var][:, i]
@@ -1550,7 +1547,10 @@ def extrapolate_to_surface(var_to_interp, INTERP_DATA, SLANT_DATA=None):
             patch = {'surf': {}, 'first': {}}
             if np.any(elem['lev'].mask):
                 raise NotImplementedError('The "lev" variable has masked elements, this is not supported')
-            level_pres = elem['lev'].data
+            # This function expects 1D pressure levels. Since we're interpolating pressure like other 3D variables now
+            # to support native GEOS files, pressure levels come in as nlev-by-1 arrays that need squeezed down or we
+            # get an error at the `elem[var][H_mask] = f(missing_p)` line.
+            level_pres = elem['lev'].data.squeeze()
             missing_p = level_pres[H_mask]  # pressure levels with masked data
             if len(missing_p) != 0:
                 surf_p = INTERP_DATA[site]['surf']['PS']  # surface pressure
@@ -1636,7 +1636,7 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
     if slant and do_load_chem:
         raise NotImplementedError('Slant path chemistry variables have not yet been implemented')
 
-    varlist = ['T','QV','RH','H','EPV','O3','PHIS']
+    varlist = ['T','QV','RH','H','EPV','O3','PHIS', 'lev']
     surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']
 
     select_files, select_dates = GEOS_files(os.path.join(GEOS_path,'Np'),start_date,end_date)
@@ -1652,7 +1652,6 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
 
     for date_ID, UTC_date in enumerate(select_dates):
         mod_dicts[UTC_date] = dict()
-
         start_it = time.time()
 
         DATA = {}
@@ -1660,13 +1659,28 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
             print('\nNOW DOING date {:4d} / {} :'.format(date_ID+1,len(select_dates)),UTC_date.strftime("%Y-%m-%d %H:%M"),' UTC')
             print('\t-Read global data ...')
 
+        file_is_native = mod_utils.is_geos_on_native_grid(select_files[date_ID])
         with netCDF4.Dataset(select_files[date_ID],'r') as dataset:
-
             for var in varlist:
+                if var == 'lev':
+                    # 'lev' needs handle specially because we want it to always be pressure, but in the native files
+                    # it is eta.
+                    continue
+
                 # Taking dataset[var][0] is equivalent to dataset[var][0,:,:,:], which since there's only one time per
                 # file just cuts the data from 4D to 3D
                 DATA[var] = dataset[var][0]
-            pres_levels = dataset['lev'][:]
+                if file_is_native:
+                    # The native 72 eta level files are organized space-to-surface vertically; the 42 fixed pressure
+                    # level files are surface-to-space. We want the latter so we need to flip the vertical (first)
+                    # dimension if it is a native file.
+                    DATA[var] = np.flipud(DATA[var])
+
+            if file_is_native:
+                pres_levels = mod_utils.convert_geos_eta_coord(dataset['DELP'])
+            else:
+                pres_levels = dataset['lev'][:]
+                pres_levels = np.broadcast_to(pres_levels.reshape(-1, 1, 1), DATA[varlist[0]].shape)
             DATA['lev'] = pres_levels
 
             lat = dataset['lat'][:]
@@ -1697,8 +1711,12 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
         if not muted:
             print('\t-Interpolate to (lat,lon) of sites ...')
 
+        # interpolate pressure levels along with the rest of the 3D variables. If we're using a native file, we're not
+        # on fixed pressure levels, and need to interpolate anyway. If using a fixed pressure level file, we've
+        # broadcast the pressure levels to be the same size as the rest of the 3D variables.
         INTERP_DATA = interp_geos_data_to_sites(DATA, lat=lat, lon=lon, site_dict=site_dict, varlist=varlist,
                                                 muted=muted)
+
         INTERP_SURF_DATA = interp_geos_data_to_sites(SURF_DATA, lat=lat, lon=lon, site_dict=site_dict,
                                                      varlist=surf_varlist, muted=muted)
 
@@ -1710,10 +1728,7 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
         for var in surf_varlist:
             INTERP_SURF_DATA[var] = INTERP_SURF_DATA[var].reshape(nsite)
 
-        # Add the level dimension variable to the profile dict
-        INTERP_DATA['lev'] = DATA['lev'].copy()
-
-        # Convert pressure fields to hPa
+        # Convert pressure fields to hPa. 'lev' is already in hPa.
         for varname in ['PS','SLP','TROPPB','TROPPV','TROPPT']:
             INTERP_SURF_DATA[varname] = INTERP_SURF_DATA[varname] / 100.0  # convert Pa to hPa
 
@@ -1847,9 +1862,13 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
 
         if not muted:
             print('\t-Patch fill values ...')
-        extrap_vars = {'RH': 'RH', 'QV': 'QV2M', 'T': 'T2M', 'H': 'H', 'EPV': None, 'O3': None}
-        extrap_vars.update({k: None for k in chem_variables})
-        extrapolate_to_surface(extrap_vars, INTERP_DATA, SLANT_DATA=SLANT_DATA)
+
+        if not file_is_native:
+            # Fixed pressure level files will result in NaNs for pressure levels below the surface. We want to fill
+            # those in. Native files are terrain following so this should not be an issue.
+            extrap_vars = {'RH': 'RH', 'QV': 'QV2M', 'T': 'T2M', 'H': 'H', 'EPV': None, 'O3': None}
+            extrap_vars.update({k: None for k in chem_variables})
+            extrapolate_to_surface(extrap_vars, INTERP_DATA, SLANT_DATA=SLANT_DATA)
 
         for site in site_dict:
             if slant:
@@ -2148,7 +2167,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 
 
 def driver(date_range, met_path, save_path=None, keep_latlon_prec=False, save_in_utc=True, muted=False,
-           slant=False, alt=None, lon=None, lat=None, site_abbrv=None, mode=None, **kwargs):
+           slant=False, alt=None, lon=None, lat=None, site_abbrv=None, mode=_default_mode, **kwargs):
     """
     Function that when called executes the full mod maker process as if called from the command line
 
