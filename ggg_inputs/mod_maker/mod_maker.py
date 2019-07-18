@@ -108,6 +108,17 @@ from .slantify import * # code to make slant paths
 from .tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites
 
 
+####################
+# Module constants #
+####################
+
+_old_modmaker_modes = ('ncep','merradap42','merradap72','merraglob','fpglob','fpitglob')
+_new_fixedp_mode = 'fpit'
+_new_native_mode = 'fpit-eta'
+_new_modmaker_modes = (_new_fixedp_mode, _new_native_mode)
+_default_mode = _new_fixedp_mode
+
+
 def shell_error(msg, ecode=1):
     print(msg)
     sys.exit(ecode)
@@ -1040,7 +1051,12 @@ def parse_args(parser=None):
     parser.add_argument('--site', dest='site_abbrv', choices=valid_site_ids, help='Two-letter site abbreviation. '
                                                                                   'Providing this will produce .mod '
                                                                                   'files only for that site.')
-    parser.add_argument('--mode',help="if specified uses the old code with time interpolation",choices=['ncep','merradap42','merradap72','merraglob','fpglob','fpitglob'])
+    parser.add_argument('--mode', choices=_old_modmaker_modes + _new_modmaker_modes, default=_default_mode,
+                        help='If one of {old} is chosen, mod_maker uses the old code with time interpolation. If one '
+                             'of {new} is chosen, it uses the new code that generates 8x mod files per day. "{fixedp}" '
+                             'expects fixed pressure level GEOS files; "{eta}" expects native 72 level GEOS files.'
+                             .format(old=', '.join(_old_modmaker_modes), new=', '.join(_new_modmaker_modes),
+                                     fixedp=_new_fixedp_mode, eta=_new_native_mode))
 
     if am_i_main:
         arg_dict = vars(parser.parse_args())
@@ -1124,6 +1140,37 @@ def equivalent_latitude_functions_geos(GEOS_path, start_date=None, end_date=None
     return equivalent_latitude_functions_from_geos_files(select_files, select_dates, muted=muted)
 
 
+def equivalent_latitude_functions_native_geos(GEOS_path, start_date=None, end_date=None, muted=False, **kwargs):
+    """
+    Generate equivalent latitude interpolators from native (72 eta level) GEOS files.
+
+    :param GEOS_path: full path to the folder containing GEOS5-fpit native level files, an 'Nv' folder with 3-hourly
+     files is expected under that path.
+    :type GEOS_path: str
+
+    :param start_date: the first datetime to generate eq. lat. interpolators for
+    :type start_date: datetime-like
+
+    :param end_date: the last datetime to generate eq. lat. interpolators for
+    :type end_date: datetime-like
+
+    :param muted: set to ``True`` to disable logging to the console.
+    :type muted: bool
+
+    :param kwargs: unused, swallows extra keyword arguments.
+
+    :return: dictionary of equivalent latitude intepolators, the keys will be the datetime of the interpolators
+    :rtype: dict
+    """
+    GEOS_path = os.path.join(GEOS_path, 'Nv')
+    select_files, select_dates = GEOS_files(GEOS_path, start_date, end_date)
+
+    if not muted:
+        print('\nGenerating equivalent latitude functions for {} native GEOS files'.format(len(select_dates)))
+
+    return equivalent_latitude_functions_from_native_geos_files(select_files, select_dates, muted=muted)
+
+
 def equivalent_latitude_functions_from_geos_files(geos_np_files, geos_dates, muted=False):
     # Use any file for stuff that is the same in all files
     with netCDF4.Dataset(geos_np_files[0], 'r') as dataset:
@@ -1180,6 +1227,23 @@ def equivalent_latitude_functions_from_geos_files(geos_np_files, geos_dates, mut
 
 
 def equivalent_latitude_functions_from_native_geos_files(geos_nv_files, geos_dates, muted=False):
+    """
+    Generate equivalent latitude interpolators from native GEOS FP(-IT) files
+
+    :param geos_nv_files: a list of the native GEOS files to construct eq. lat. interpolators for
+    :type geos_nv_files: list(str)
+
+    :param geos_dates: the datetimes of the GEOS files given as the first argument. Must be in the same order, i.e.
+     ``geos_dates[i]`` must be the datetime of ``geos_nv_files[i]``.
+    :type geos_dates: list(datetime-like)
+
+    :param muted: set to ``True`` to disable some logging to console.
+    :type muted: bool
+
+    :return: a dictionary of equivalent latitude interpolators. THe keys will be the dates of the GEOS files, there will
+     be one interpolator per GEOS file.
+    :rtype: dict
+    """
     func_dict = dict()
     for idx, (geos_file, date) in enumerate(zip(geos_nv_files, geos_dates)):
         with netCDF4.Dataset(geos_file, 'r') as dataset:
@@ -2083,22 +2147,108 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
         print(len(local_date_list),'mod files written')
 
 
-def driver(date_range, GEOS_path, save_path=None, keep_latlon_prec=False, save_in_utc=True, muted=False,
+def driver(date_range, met_path, save_path=None, keep_latlon_prec=False, save_in_utc=True, muted=False,
            slant=False, alt=None, lon=None, lat=None, site_abbrv=None, mode=None, **kwargs):
+    """
+    Function that when called executes the full mod maker process as if called from the command line
 
+    The parameters ``alt``, ``lat``, ``lon``, and ``site_abbrv`` set where the .mod file should be made for. They can be
+    used in one of three combinations:
+
+        * If none of them are given, .mod files for all of the standard TCCON sites are made.
+        * If site_abbrv is given, just the .mod files for that TCCON site are made.
+        * If ``alt``, ``lat``, and ``lon`` are also given, the .mod file will be made for those locations. In this mode,
+          ``site_abbrv`` just specifies what abbreviation is used in the .mod file names.
+
+    :param date_range: a two-element collection that specifies the start and end datetime of the period to generate
+     .mod files for. The end datetime is exclusive.
+    :type date_range: list(datetime-like)
+
+    :param met_path: the path to the met files. Different expectations based on ``mode``:
+        * If running in "fpit" mode, must contain Nx and Np subdirectories holding the surface and profile files.
+        * If running in "fpit-eta" mode, must contain Nx and NV subdirectories holding the surface and profile files.
+        * If running in "ncep" mode, must contain "air.yyyy.nc", "hgt.yyyy.nc" and "shum.yyyy.nc" files, where "yyyy" is
+          the year. May be omitted (set to ``None``), in which case it defaults to ``$GGGPATH/ncdf`` (``$GGGPATH`` being
+          an environmental variable.)
+        * If running in "merraglob", "fpglob", or "fpitglob" modes, must contain files with "MERRA", "_fp_" or "_fpit_",
+          respectively, in the file names.
+        * If running in "merradap" mode, this is not used.
+    :type met_path: str
+
+    :param save_path: path to save the .mod files to. If ``mode`` is "fpit" or "fpit-eta", then the mod files will be
+     saved in "<save_path>/fpit/<site_id>/<vertical or slant>". If one of the other modes, the subdirectories will be
+     the same except there will not be a vertical or slant directory. If this parameter is not specified (is ``None``),
+     then it will try to use ``$GGGPATH/models/gnd``.
+    :type save_path: str
+
+    :param keep_latlon_prec: if ``True``, lat/lon precision in the .mod file names is kept at 2 decimal places. If
+     ``False``, it is rounded to the nearest degree.
+    :type keep_latlon_prec: bool
+
+    :param save_in_utc: if ``True``, then the time in the .mod file name will be in UTC. If ``False``, it will be in
+     local time, estimated using the site longitude.
+    :type save_in_utc: bool
+
+    :param muted: set to ``True`` to suppress most logging to the console.
+    :type muted: bool
+
+    :param slant: set to ``True`` to output .mod files along a the slant path following the solar zenith angle. Only has
+     an effect using the new mod_maker code, i.e. if ``mode`` is "fpit" or "fpit-eta".
+    :type slant: bool
+
+    :param mode: which met data mode to use. Options are:
+
+        * "ncep" - uses yearly NCEP met files
+        * "merraglob", "fpglob", "fpitglob" - uses MERRA, GEOS-FP, or GEOS-FPIT files with old-style time interpolation.
+        * "merradap42", "merradap72" - uses MERRA data via DAP remote access protocol.
+        * "fpit", "fpit-eta" - uses GEOS-FPIT files on fixed pressure levels or eta levels, respectively, with new-style
+          8x per day files.
+    :type mode: str
+
+    :param alt: altitude above sea (?) level in meters. If not given, the standard altitude specified for the TCCON
+     site(s) is used.
+    :type alt: None or float
+
+    :param lon: the longitude at which the .mod file should be produced. If not given, the standard longitude specified
+     for the TCCON site(s) is used.
+    :type lon: None or float
+
+    :param lat: the latitude at which the .mod file should be produced. If not given, the standard latitude specified
+     for the TCCON site(s) is used.
+    :type lat: None or float
+
+    :param site_abbrv: the two-letter abbreviation of the TCCON site for which to generate .mod files. If not specified
+     and ``lat`` is not specified, then mod files are generated for all predefined TCCON sites. If specified and
+     ``lat`` not specified, then just .mod files for that TCCON site are made. If ``lat`` is specified, then this is the
+     abbreviation used in the .mod file names. If not given in this case, it defaults to "xx".
+    :type site_abbrv: None or str
+
+    :param kwargs: unused, swallows extra keyword arguments
+
+    :return: nothing, writes .mod files to the output directory.
+    """
     start_date, end_date = date_range
 
-    if mode is not None:
+    if mode in _old_modmaker_modes:
         mod_maker(site_abbrv=site_abbrv, start_date=start_date, end_date=end_date, locations=site_dict,
                   HH=12, MM=0, time_step=24, muted=muted, lat=lat, lon=lon, alt=alt, save_path=save_path,
-                  ncdf_path=GEOS_path, keep_latlon_prec=keep_latlon_prec, mode=mode)
-    else:
-        func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
-                                                       muted=muted)
+                  ncdf_path=met_path, keep_latlon_prec=keep_latlon_prec, mode=mode)
+    elif mode in _new_modmaker_modes:
+        if mode == _new_fixedp_mode:
+            eqlat_fxn = equivalent_latitude_functions_geos
+        elif mode == _new_native_mode:
+            eqlat_fxn = equivalent_latitude_functions_native_geos
+        else:
+            raise NotImplementedError('No equivalent latitude function defined for mode == "{}"'.format(mode))
+        func_dict = eqlat_fxn(GEOS_path=met_path, start_date=start_date, end_date=end_date, muted=muted)
 
-        mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=GEOS_path, slant=slant,
+        mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=met_path, slant=slant,
                       locations=site_dict, muted=muted, lat=lat, lon=lon, alt=alt, site_abbrv=site_abbrv,
                       save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc)
+    else:
+        raise ValueError('mode "{}" is not one of the allowed values: {}'.format(
+            mode, ', '.join(_old_modmaker_modes + _new_modmaker_modes)
+        ))
 
 
 if __name__ == "__main__": # this is only executed when the code is used directly (e.g. not executed when imported from another python code)
