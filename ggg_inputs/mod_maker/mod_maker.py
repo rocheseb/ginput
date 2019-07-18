@@ -1586,7 +1586,7 @@ def extrapolate_to_surface(var_to_interp, INTERP_DATA, SLANT_DATA=None):
 
 def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None, locations=site_dict, slant=False,
                   muted=False, lat=None, lon=None, alt=None, site_abbrv=None, save_path=None, keep_latlon_prec=False,
-                  save_in_utc=True, chem_variables=tuple(), **kwargs):
+                  save_in_utc=True, native_files=False, chem_variables=tuple(), **kwargs):
     """
     This code only works with GEOS-5 FP-IT data.
     It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1639,7 +1639,8 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
     varlist = ['T','QV','RH','H','EPV','O3','PHIS', 'lev']
     surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']
 
-    select_files, select_dates = GEOS_files(os.path.join(GEOS_path,'Np'),start_date,end_date)
+    profile_subdir = 'Nv' if native_files else 'Np'
+    select_files, select_dates = GEOS_files(os.path.join(GEOS_path, profile_subdir),start_date,end_date)
     select_surf_files, select_surf_dates = GEOS_files(os.path.join(GEOS_path,'Nx'),start_date,end_date)
     if do_load_chem:
         # Assumes that chemistry files are the only ones in the Nv directory
@@ -1660,6 +1661,9 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
             print('\t-Read global data ...')
 
         file_is_native = mod_utils.is_geos_on_native_grid(select_files[date_ID])
+        if file_is_native != native_files:
+            raise RuntimeError('Loaded a native level GEOS file but expected a fixed pressure file, or vice versa')
+
         with netCDF4.Dataset(select_files[date_ID],'r') as dataset:
             for var in varlist:
                 if var == 'lev':
@@ -1677,7 +1681,8 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
                     DATA[var] = np.flipud(DATA[var])
 
             if file_is_native:
-                pres_levels = mod_utils.convert_geos_eta_coord(dataset['DELP'])
+                pres_levels = mod_utils.convert_geos_eta_coord(dataset['DELP'][0])
+                pres_levels = np.flipud(pres_levels)
             else:
                 pres_levels = dataset['lev'][:]
                 pres_levels = np.broadcast_to(pres_levels.reshape(-1, 1, 1), DATA[varlist[0]].shape)
@@ -2247,6 +2252,7 @@ def driver(date_range, met_path, save_path=None, keep_latlon_prec=False, save_in
     :return: nothing, writes .mod files to the output directory.
     """
     start_date, end_date = date_range
+    import pdb; pdb.set_trace()
 
     if mode in _old_modmaker_modes:
         mod_maker(site_abbrv=site_abbrv, start_date=start_date, end_date=end_date, locations=site_dict,
@@ -2255,15 +2261,18 @@ def driver(date_range, met_path, save_path=None, keep_latlon_prec=False, save_in
     elif mode in _new_modmaker_modes:
         if mode == _new_fixedp_mode:
             eqlat_fxn = equivalent_latitude_functions_geos
+            native_files = False
         elif mode == _new_native_mode:
             eqlat_fxn = equivalent_latitude_functions_native_geos
+            native_files = True
         else:
             raise NotImplementedError('No equivalent latitude function defined for mode == "{}"'.format(mode))
         func_dict = eqlat_fxn(GEOS_path=met_path, start_date=start_date, end_date=end_date, muted=muted)
 
         mod_maker_new(start_date=start_date, end_date=end_date, func_dict=func_dict, GEOS_path=met_path, slant=slant,
                       locations=site_dict, muted=muted, lat=lat, lon=lon, alt=alt, site_abbrv=site_abbrv,
-                      save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc)
+                      save_path=save_path, keep_latlon_prec=keep_latlon_prec, save_in_utc=save_in_utc,
+                      native_files=native_files)
     else:
         raise ValueError('mode "{}" is not one of the allowed values: {}'.format(
             mode, ', '.join(_old_modmaker_modes + _new_modmaker_modes)

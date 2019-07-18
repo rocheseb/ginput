@@ -2098,7 +2098,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     z_met = mod_file_data['profile']['Height']
     p_met = mod_file_data['profile']['Pressure']
     theta_met = mod_file_data['profile']['PT']
-    eq_lat_met = mod_file_data['profile']['EL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
+    eq_lat_met = mod_file_data['profile']['EqL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
 
     # We need the tropopause potential temperature. The GEOS FP-IT files give the temperature itself, and the pressure,
     # so we can calculate the potential temperature. Pressure needs to be in hPa, which it is by default.
@@ -2173,14 +2173,14 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     # Finally prepare the output, writing a .map file if needed.
     gas_name = concentration_record.gas_name
     gas_unit = concentration_record.gas_unit
-    map_dict = {'Height': z_prof, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EL': eq_lat_prof,
+    map_dict = {'Height': z_prof, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EqL': eq_lat_prof,
                 gas_name: gas_prof, 'mean_latency': latency_profs, 'trop_age_of_air': aoa_prof_trop,
                 'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'gas_date': gas_date_prof,
                 'gas_record_dates': gas_date_prof}
-    units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EL': 'degrees', gas_name: gas_unit,
+    units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EqL': 'degrees', gas_name: gas_unit,
                   'mean_latency': 'yr', 'trop_age_of_air': 'yr', 'strat_age_of_air': 'yr', 'atm_stratum': 'flag',
                   'gas_date': 'yr', 'gas_date_width': 'yr', 'gas_record_dates': 'UTC date'}
-    var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EL', gas_name, 'mean_latency', 'trop_age_of_air',
+    var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EqL', gas_name, 'mean_latency', 'trop_age_of_air',
                  'strat_age_of_air', 'atm_stratum', 'gas_date')
     map_constants = {'site_lat': obs_lat, 'trop_eqlat': trop_eqlat, 'prof_ref_lat': trop_ref_lat, 'surface_alt': z_surf,
                      'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
@@ -2290,7 +2290,7 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
     # MAIN LOOP #
     # Loop over the requested profiles, creating a prior for each gas requested. Check that the other variables are all
     # the same for each gas, then combine them to make a single .map file or dict for each profile
-    ancillary_variables = ('Height', 'Temp', 'Pressure', 'PT', 'EL')
+    ancillary_variables = ('Height', 'Temp', 'Pressure', 'PT', 'EqL')
     vmr_gases = dict()
     for iprofile in range(num_profiles):
         var_order = list(ancillary_variables)
@@ -2383,7 +2383,7 @@ def save_gridded_priors(save_name, co2, geos_prof_data, geos_dates):
         ioutils.make_ncvar_helper(nch, 'co2', co2, (timedim, levdim, latdim, londim),
                                   units='dry air mole fraction * 10^-6',
                                   description='CO2 profiles calculated using the TCCON prior algorithm')
-        ioutils.make_ncvar_helper(nch, 'eqlat', geos_prof_data['EL'], (timedim, levdim, latdim, londim),
+        ioutils.make_ncvar_helper(nch, 'eqlat', geos_prof_data['EqL'], (timedim, levdim, latdim, londim),
                                   units='degrees_north',
                                   description='Equivalent latitude calculated from Ertels Potential Vorticity')
 
@@ -2414,9 +2414,9 @@ def generate_gridded_co2_priors(start_date, end_date, geos_path, save_name=None,
 
     if use_eqlat_strat:
         area = mod_utils.calculate_area(geos_prof_data['lat'], geos_prof_data['lon'])
-        geos_prof_data['EL'] = mod_utils.calculate_eq_lat_on_grid(geos_prof_data['EPV']*1e6, geos_prof_data['PT'], area)
+        geos_prof_data['EqL'] = mod_utils.calculate_eq_lat_on_grid(geos_prof_data['EPV']*1e6, geos_prof_data['PT'], area)
     else:
-        geos_prof_data['EL'] = np.full_like(geos_prof_data['PT'], np.nan)
+        geos_prof_data['EqL'] = np.full_like(geos_prof_data['PT'], np.nan)
 
     # Third, pass each column to as a mod file-like dictionary, passing it to generate_single_tccon_prior, and storing
     # the result in a CO2 array.
