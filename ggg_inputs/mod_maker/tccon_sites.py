@@ -1,3 +1,5 @@
+from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime
 
 """
@@ -34,7 +36,7 @@ site_dict = {
     'll':{'name': 'Lauder 02','loc':'New Zealand','lat':-45.038,'lon':169.684,'alt':370},
     'tk':{'name': 'Tsukuba 02','loc':'Japan','lat':63.0513,'lon':140.1215,'alt':31},
     'ka':{'name': 'Karlsruhe','loc':'Germany','lat':49.1002,'lon':8.4385,'alt':119},
-    'ae':{'name': 'Ascenssion Island','loc':'United Kingdom','lat':-7.933333,'lon':345.583333,'alt':0},
+    'ae':{'name': 'Ascension Island','loc':'United Kingdom','lat':-7.933333,'lon':345.583333,'alt':0},
     'eu':{'name': 'Eureka','loc':'Canada','lat':80.05,'lon':273.58,'alt':610},
     'so':{'name': 'Sodankyla','loc':'Finland','lat':67.3668,'lon':26.6310,'alt':188},
     'iz':{'name': 'Izana','loc':'Spain','lat':28.0,'lon':344.0,'alt':2370},
@@ -58,22 +60,39 @@ site_dict = {
     'zs':{'name':'Zugspitze','loc':'Germany','lat':47.42,'lon':10.98,'alt':34.5},
 }
 
-def tccon_site_info(site_dict):
+
+def tccon_site_info(site_dict_in=None):
     """
     Takes the site_dict dictionary and adds longitudes in the [-180,180] range
     """
+    if site_dict_in is None:
+        site_dict_in = site_dict
 
-    for site in site_dict:
-        if 'time_spans' in site_dict[site].keys():
-            for time_span in site_dict[site]['time_spans']:
-                if site_dict[site]['time_spans'][time_span]['lon']>180:
-                    site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']-360
+    site_dict_in = deepcopy(site_dict_in)
+
+    for site in site_dict_in:
+        if 'time_spans' in site_dict_in[site].keys():
+            for time_span in site_dict_in[site]['time_spans']:
+                if site_dict_in[site]['time_spans'][time_span]['lon']>180:
+                    site_dict_in[site]['time_spans'][time_span]['lon_180'] = site_dict_in[site]['time_spans'][time_span]['lon'] - 360
                 else:
-                    site_dict[site]['time_spans'][time_span]['lon_180'] = site_dict[site]['time_spans'][time_span]['lon']
+                    site_dict_in[site]['time_spans'][time_span]['lon_180'] = site_dict_in[site]['time_spans'][time_span]['lon']
         else:
-            if site_dict[site]['lon']>180:
-                site_dict[site]['lon_180'] = site_dict[site]['lon']-360
+            if site_dict_in[site]['lon']>180:
+                site_dict_in[site]['lon_180'] = site_dict_in[site]['lon'] - 360
             else:
-                site_dict[site]['lon_180'] = site_dict[site]['lon']
+                site_dict_in[site]['lon_180'] = site_dict_in[site]['lon']
 
-    return site_dict
+    return OrderedDict(site_dict_in)
+
+
+def tccon_site_info_for_date(date):
+    new_site_dict = tccon_site_info()
+    for site, info in new_site_dict.items():
+        if 'time_spans' in info:
+            time_spans = info.pop('time_spans')
+            for date_range, values in time_spans.items():
+                if date_range[0] <= date < date_range[1]:
+                    info.update(values)
+                    break
+    return new_site_dict

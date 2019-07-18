@@ -12,6 +12,7 @@ import os
 from scipy.optimize import curve_fit
 from statsmodels.robust.robust_linear_model import RLM
 from statsmodels.robust.norms import TukeyBiweight
+import xarray as xr
 
 from ...common_utils import mod_utils, ioutils, sat_utils
 from ...common_utils.ggg_logging import logger
@@ -760,3 +761,199 @@ def save_ace_age_file(ace_out_file, vars_to_copy, orig_ace_file, eqlat, age):
         ioutils.add_creation_info(nhwrite, creation_note='ace_fts_analysis.generate_ace_age_file')
         nhwrite.setncattr('template_ace_file', orig_ace_file)
         ioutils.add_dependent_file_hash(nhwrite, 'template_ace_sha1', orig_ace_file)
+
+
+def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
+    R = 8.314 * 100 ** 3 / 100 / 6.626e23
+
+    def ndens_air(T, P):
+        return P / (R * T)
+
+    def kCO_OH(nair):
+        return 1.57e-13 + 3.54e-33 * nair
+
+    def kCH4_OH(T):
+        return 2.8e-14 * T ** 0.667 * np.exp(-1575 / T)
+
+    ndens = ndens_air(T, P)
+    age = age * 365.25 * 24 * 3600
+    ss = gamma * kCH4_OH(T) * ch4 / kCO_OH(ndens)
+    bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
+    return ss + bc
+
+
+def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_type='eq', min_req_pts=10):
+    R = 8.314 * 100 ** 3 / 100 / 6.626e23
+
+    def ndens_air(T, P):
+        return P / (R * T)
+
+    def kCO_OH(nair):
+        return 1.57e-13 + 3.54e-33 * nair
+
+    def kCH4_OH(T):
+        return 2.8e-14 * T ** 0.667 * np.exp(-1575 / T)
+
+    def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
+        ndens = ndens_air(T, P)
+        age = age * 365.25 * 24 * 3600
+        ss = gamma * kCH4_OH(T) * ch4 / kCO_OH(ndens)
+        bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
+        return ss + bc
+
+    def fill_nans(ds):
+        # We want to interpolate/extrapolate along theta first. I tried originally doing periodic interpolation along
+        # the day-of-year axis, but there's not enough data in the northen hemisphere polar summer to get the decrease
+        # right. However, there are some columns that have 0 or 1 non-NaN values which the interpolator then chokes
+        # on, so we need to find those columns and replace the NaNs with a fill value temporarily to avoid trying
+        # to handle them here.
+        all_nans = dict()
+        for key, variable in ds.items():
+            var_not_nans = ~np.isnan(variable)
+            this_most_nans = var_not_nans.sum(dim='theta') < 2
+            this_most_nans = np.broadcast_to(this_most_nans.data.reshape(this_most_nans.shape + (1,)), variable.shape)
+            # only replace NaNs in columns with 0 or 1 non-NaN values. Leave non-NaN values in those columns alone,
+            # and leave NaNs elsewhere alone.
+            this_most_nans = this_most_nans & ~var_not_nans.data
+            variable.data[this_most_nans] = -999
+            all_nans[key] = this_most_nans
+
+        ds = ds.interpolate_na(dim='theta', method='linear', fill_value='extrapolate')
+
+        for key, this_most_nans in all_nans.items():
+            ds[key].data[this_most_nans] = np.nan
+
+        # Interpolate along latitude and day-of-year to fill in the columns missing most of their values. I chose to do
+        # latitude first because it looked like interp/extrap in lat would get most of those columns and a linear
+        # extrapolation would generally stay with reasonable upper strat values.
+        ds = ds.interpolate_na(dim='lat', method='linear', fill_value='extrapolate').interpolate_na(dim='doy', method='linear')
+
+        return ds
+
+
+    #################
+    # Load ACE data #
+    #################
+
+    with ncdf.Dataset(ace_age_file) as ds:
+        ace_dates = read_ace_date(ds)
+        qflags = read_ace_var(ds, 'quality_flag', None)
+
+        if lat_type == 'geog':
+            ace_lat = read_ace_var(ds, 'latitude', None)
+            ace_lat = np.broadcast_to(ace_lat.reshape(-1, 1), qflags.shape)
+        elif lat_type == 'eq':
+            ace_lat = read_ace_var(ds, 'eqlat', None)
+        else:
+            raise ValueError('lat must be "geog" or "eq"')
+
+        ace_t = read_ace_var(ds, 'temperature', qflags)
+        ace_p = read_ace_var(ds, 'pressure', qflags) * 1013.25  # atm -> hPa
+        ace_pt = read_ace_theta(ds, qflags=qflags)
+        ace_age = read_ace_var(ds, 'age', qflags)
+
+    with ncdf.Dataset(ace_ch4_file) as ds:
+        qflags = read_ace_var(ds, 'quality_flag', None)
+        ace_ch4 = read_ace_var(ds, 'CH4', qflags)
+
+    with ncdf.Dataset(ace_co_file) as ds:
+        qflags = read_ace_var(ds, 'quality_flag', None)
+        all_ace_co = read_ace_var(ds, 'CO', qflags)
+
+    ace_doys = np.array([mod_utils.day_of_year(d) for d in ace_dates])
+    ace_doys = np.broadcast_to(ace_doys.reshape(-1, 1), all_ace_co.shape)
+
+    co_calc = strat_co(ace_ch4, ace_t, ace_p, ace_age, 50.0e-9)
+    excess_co = (all_ace_co - co_calc)*1e9  # calculate excess and convert to ppb
+    notnans = ~np.isnan(excess_co)
+    excess_co = excess_co[notnans]
+
+    lat_bins = np.arange(-90, 91, 10)
+    doy_bins = np.arange(0, 370, 5)
+    doy_bins[-1] = 366  # account for leap years
+    theta_bins = np.arange(350, 4150, 100)
+    all_bins = [lat_bins, doy_bins, theta_bins]
+    all_coords = [ace_lat[notnans], ace_doys[notnans], ace_pt[notnans]]
+
+    ####################################################
+    # Use pandas groupby() to bin the data efficiently #
+    ####################################################
+
+    df_dict = {'data': excess_co}
+    coord_cols = []
+    for i, (coord, bin) in enumerate(zip(all_coords, all_bins)):
+        inds = np.digitize(coord.flatten(), bin) - 1
+        colname = 'ind{}'.format(i)
+        df_dict[colname] = inds
+        coord_cols.append(colname)
+
+    df = pd.DataFrame(df_dict)
+    all_bin_centers = [0.5 * (b[:-1] + b[1:]) for b in all_bins]
+    bin_names = ['lat', 'doy', 'theta']
+    bin_units = ['degrees_north', 'day of year (0-based)', 'K']
+
+    means = np.full([np.size(b) - 1 for b in all_bins], np.nan if np.issubdtype(excess_co.dtype, np.floating) else 0)
+    means = xr.DataArray(means, coords=all_bin_centers, dims=bin_names)
+    stds = means.copy()
+
+    flags = np.zeros(means.shape, dtype=np.int)
+    flag_bits = {'clip': 2**0, 'toofew': 2**1, 'filled': 2**2}
+    flag_units = 'Bit meanings (least significant first): 1 = value <0 clipped, 2 = fewer than {} points, 3 = NaN filled'.format(min_req_pts)
+
+    for inds, grp in df.groupby(coord_cols):
+        subdata = grp['data']
+        if subdata.size < min_req_pts:
+            flags[inds] = np.bitwise_or(flags[inds], flag_bits['toofew'])
+            continue
+
+        if any(i < 0 for i in inds):
+            # negative index indicates that the value is below the minimum bin so we skip it
+            continue
+        try:
+            means[inds] = np.nanmean(subdata)
+            stds[inds] = np.nanstd(subdata)
+        except IndexError:
+            # inds will be too large if any of the values is outside the right edge of the last bin, so just skip those
+            # since we don't want to bin them. We caught any outside the left edge of the bin checking if any are < 0
+            continue
+
+    ########################################################################################
+    # Fill in NaNs and clip to positive values. Track these actions in the flags variables #
+    ########################################################################################
+    flags[means.data < 0] = np.bitwise_or(flags[means.data < 0], flag_bits['clip'])
+    means = means.clip(0)
+    was_nans = np.isnan(means.data)
+    dataset = xr.Dataset({'means': means, 'stds': stds})
+    dataset = fill_nans(dataset)
+    nans_filled = was_nans & ~np.isnan(dataset['means'].data)
+    flags[nans_filled] = np.bitwise_or(flags[nans_filled], flag_bits['filled'])
+
+    _save_excess_co_lut(save_file=save_file, co_excess=dataset['means'].data, co_excess_std=dataset['stds'].data,
+                        flags=flags, bin_edges=all_bins, bin_centers=all_bin_centers, bin_names=bin_names,
+                        bin_units=bin_units, flag_description=flag_units, lat_type=lat_type,
+                        ace_co_file=ace_co_file, ace_ch4_file=ace_ch4_file, ace_age_file=ace_age_file)
+
+
+def _save_excess_co_lut(save_file, co_excess, co_excess_std, flags, bin_edges, bin_centers, bin_names, bin_units,
+                        flag_description, lat_type, ace_co_file, ace_ch4_file, ace_age_file):
+
+    with ncdf.Dataset(save_file, 'w') as nh:
+        dims = []
+        for name, centers, edges, units in zip(bin_names, bin_centers, bin_edges, bin_units):
+            this_dim = ioutils.make_ncdim_helper(nh, name, centers, unit=units)
+            dims.append(this_dim)
+            ioutils.make_ncdim_helper(nh, name + '_bin_edges', edges, unit=units)
+
+        ioutils.make_ncvar_helper(nh, 'co_excess', co_excess, dims=dims,
+                                  unit='ppb', description='Excess CO in ACE-FTS data beyond that predicted by a '
+                                                          'kinetic model of the CO chemistry in the stratosphere.')
+        ioutils.make_ncvar_helper(nh, 'co_excess_std', co_excess_std, dims=dims,
+                                  unit='hPa', description='Standard deviation of the excess CO in this bin.')
+        ioutils.make_ncvar_helper(nh, 'co_excess_flags', flags, dims=dims,
+                                  unit='Bit array flag', description=flag_description)
+
+        ioutils.add_dependent_file_hash(nh, 'ace_co_file', ace_co_file)
+        ioutils.add_dependent_file_hash(nh, 'ace_ch4_file', ace_ch4_file)
+        ioutils.add_dependent_file_hash(nh, 'ace_age_file', ace_age_file)
+        ioutils.add_creation_info(nh, 'ace_fts_analysis.create_excess_co_lut')
+        nh.setncattr('latitude_type', 'Binned by {} latitude'.format(lat_type))

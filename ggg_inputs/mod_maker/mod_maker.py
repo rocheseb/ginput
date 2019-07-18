@@ -101,7 +101,8 @@ import xarray
 import warnings
 
 from ..common_utils import mod_utils
-from ..common_utils.mod_utils  import gravity
+from ..common_utils.mod_utils import gravity
+from ..common_utils.mod_constants import ratio_molec_mass as rmm
 from ..common_utils.ggg_logging import logger
 from .slantify import * # code to make slant paths
 from .tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites
@@ -151,7 +152,54 @@ def svp_wv_over_ice(temp):
 
     return svp
 
-def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False,slant=False):
+mod_var_fmt_info = {'lev':     {'total_width': 13, 'format': '9.3e',  'scale': 1,   'name': 'Pressure', 'units': 'mbar'},
+                    'T':       {'total_width': 13, 'format': '11.3f',  'scale': 1,   'name': 'Temperature', 'units': 'Kelvin'},
+                    'H':       {'total_width': 9,  'format': '7.3f',  'scale': 1,   'name': 'Height', 'units': 'km'},
+                    'mmw':     {'total_width': 12, 'format': '7.4f',  'scale': 1,   'name': 'MMW', 'units': 'g/mole'},
+                    'H2O_DMF': {'total_width': 12, 'format': '10.3e', 'scale': 1,   'name': 'H2O', 'units': 'DMF'},
+                    'RH':      {'total_width': 8,  'format': '>6.1f', 'scale': 100, 'name': 'RH', 'units': '%'},
+                    'EPV':     {'total_width': 15, 'format': '10.3e', 'scale': 1,   'name': 'EPV', 'units': 'K.m+2/kg/s'},
+                    'PT':      {'total_width': 11, 'format': '8.3f',  'scale': 1,   'name': 'PT', 'units': 'Kelvin'},
+                    'EL':      {'total_width': 11, 'format': '7.3f',  'scale': 1,   'name': 'EqL', 'units': 'degrees'},
+                    'O3':      {'total_width': 11, 'format': '9.3e',  'scale': 1,   'name': 'O3', 'units': 'kg/kg'},
+                    'CO':      {'total_width': 11, 'format': '7.3f',  'scale': 1e9, 'name': 'CO', 'units': 'ppb'}}
+
+
+def build_mod_fmt_strings(var_order):
+    # Units and names just need to have the right total width and be centered
+    header_fmt = ''
+    data_fmt = ''
+    var_names = dict()
+    var_units = dict()
+
+    spaces = '    '
+
+    for v in var_order:
+        var_info = mod_var_fmt_info[v]
+
+        this_fmt = var_info['format']
+        # Assuming the format is something like "9.3e" or "7.3f" the total width of the format is the number before
+        # the decimal. Get that and subtract from total width to figure out how many spaces to add to the end of the
+        # column.
+        fmt_width = int(re.search(r'\d+(?=\.)', this_fmt).group())
+        if fmt_width > var_info['total_width']:
+            raise NotImplementedError('The format width is greater than the total column width.')
+
+        full_fmt = '{{{}:{}}}'.format(v, this_fmt) + spaces
+        data_fmt += full_fmt
+
+        header_fmt += '{{{}:^{}}}'.format(v, fmt_width) + spaces
+        var_names[v] = var_info['name']
+        var_units[v] = var_info['units']
+
+    header_names = header_fmt.format(**var_names) + '\n'
+    header_units = header_fmt.format(**var_units) + '\n'
+    var_name_mapping = {v: k for k, v in var_names.items()}
+    data_fmt += '\n'
+    return header_names, header_units, var_name_mapping, data_fmt
+
+
+def write_mod(mod_path, version, site_lat, data=0, surf_data=0, func=None, muted=False, slant=False, chem_vars=False):
     """
     Creates a GGG-format .mod file
     INPUTS:
@@ -258,54 +306,59 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
         print('Warning: output dictionary for NCEP mode not implemented, will just be empty')
 
     else: # merra/geos mode
+        surf_var_order = ['PS', 'T2M', 'H', 'MMW', 'H2O_DMF', 'RH', 'SLP', 'TROPPB', 'TROPPV', 'TROPPT', 'TROPT', 'SZA']
+        prof_var_order = ['lev', 'T', 'H', 'mmw', 'H2O_DMF', 'RH', 'EPV', 'PT', 'O3']
+        computed_keys = ['mmw', 'PT', 'EL']
+        if func is not None:
+            # want equivalent latitude before O3, CO, etc.
+            prof_var_order.insert(-1, 'EL')
+        if chem_vars:
+            prof_var_order.append('CO')
+
         mod_constants.append(surf_data['TROPPB'])
         # The head of the .mod file
-        fmt1 = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
+        constants_fmt = '{:8.3f} {:11.4e} {:7.3f} {:5.3f} {:8.3f} {:8.3f} {:8.3f}\n'
+        surface_fmt = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}    {:7.3f}\n'
+        header_names, header_units, final_data_keys, fmt = build_mod_fmt_strings(prof_var_order)
+
         mod_content = []
-        if func is None: # without equivalent latitude
-            fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}\n'
-            mod_content+=[	'7  10\n',
-                              fmt1.format(*mod_constants),
-                              'Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT\n',
-                              fmt2.format(*[surf_data[key] for key in ['PS','T2M','H','MMW','H2O_DMF','RH','SLP','TROPPB','TROPPV','TROPPT','TROPT']]),
-                              version+'\n',
-                              ' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin     kg/kg\n',
-                              'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT         O3\n',	]
 
-            fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {O3:9.3e}\n' # format for writting the lines
-
-        else: # with equivalent latitude
-            fmt2 = '{:9.3e}    {:7.3f}    {:7.3f}    {:7.4f}    {:9.3e}{:>6.1f}    {:9.3e}    {:9.3e}    {:9.3e}    {:9.3e}    {:7.3f}    {:7.3f}\n'
-            mod_content+=[	'7  10\n',
-                              fmt1.format(6378.137,6.000E-05,site_lat,9.81,data['H'][0],1013.25,surf_data['TROPPB']),
-                              'Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT       SZA\n',
-                              fmt2.format(*[surf_data[key] for key in ['PS','T2M','H','MMW','H2O_DMF','RH','SLP','TROPPB','TROPPV','TROPPT','TROPT','SZA']]),
-                              version+'\n',
-                              ' mbar        Kelvin         km      g/mole        DMF        %       k.m+2/kg/s   Kelvin      degrees     kg/kg\n',
-                              'Pressure  Temperature     Height     MMW          H2O       RH          EPV         PT         EqL         O3\n',	]
-
-            fmt = '{lev:9.3e}    {T:7.3f}    {H:7.3f}    {mmw:7.4f}    {H2O_DMF:10.3e} {RH:>6.1f}    {EPV:10.3e}    {PT:8.3f}    {EL:7.3f}    {O3:9.3e}\n' # format for writting the lines
+        # number of header rows, number of data columns
+        mod_content.append('7  {}\n'.format(len(prof_var_order)))
+        # constants
+        mod_content.append(constants_fmt.format(*mod_constants))
+        # surface variables
+        mod_content.append('Pressure  Temperature     Height     MMW        H2O      RH         SLP        TROPPB        TROPPV      TROPPT       TROPT       SZA\n')
+        mod_content.append(surface_fmt.format(*[surf_data[key] for key in surf_var_order]))
+        # version info
+        mod_content.append(version+'\n')
+        # profile data headers
+        mod_content.append(header_units)
+        mod_content.append(header_names)
 
         # not sure if merra needs all the filters/corrections used for ncep data?
 
         # Export the Pressure, Temp and SHum
         prototype_array = np.full((len(data['H2O_DMF'],)), np.nan, dtype=np.float)
-        final_data_keys = {'Pressure': 'lev', 'Temperature': 'T', 'Height': 'H', 'MMW': 'mmw', 'H2O': 'H2O_DMF',
-                           'RH': 'RH', 'EPV': 'EPV', 'PT': 'PT', 'EL': 'EL', 'O3': 'O3'}
+
         output_dict = dict()
         for key in final_data_keys.keys():
             output_dict[key] = prototype_array.copy()
 
-        for k,elem in enumerate(data['H2O_DMF']):
+        for k, elem in enumerate(data['H2O_DMF']):
             # will use to output the final data to the .mod file and the returned dict
             line_dict = dict()
+
+            #############################################
+            # Check for and fix non-physical quantities #
+            #############################################
 
             svp = svp_wv_over_ice(data['T'][k])
             h2o_wmf = compute_h2o_wmf(data['H2O_DMF'][k]) # wet mole fraction of h2o
 
-            if 300<=data['lev'][k]<=1000:
-                # Relace H2O mole fractions that are too small
-                if (data['RH'][k] < 30./data['lev'][k]):
+            if 300 <= data['lev'][k] <= 1000:
+                # Replace H2O mole fractions that are too small
+                if data['RH'][k] < 30./data['lev'][k]:
                     if not muted:
                         print('Replacing too small H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0))
                     data['RH'][k] = 30./data['lev'][k]
@@ -314,16 +367,22 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
                     if not muted:
                         print('svp,h2o_wmf,h2o_dmf',svp,h2o_wmf,data['H2O_DMF'][k],data['RH'][k])
 
-            # Relace H2O mole fractions that are too large (super-saturated)  GCT 2015-08-05
-            if (data['RH'][k] > 1.0):
+            # Replace H2O mole fractions that are too large (super-saturated)  GCT 2015-08-05
+            if data['RH'][k] > 1.0:
                 if not muted:
                     print('Replacing too large H2O at {:.2f} hPa; H2O_WMF={:.3e}; {:.3e}; RH={:.3f}'.format(data['lev'][k],h2o_wmf,svp/data['T'][k],data['RH'][k],1.0))
                 data['RH'][k] = 1.0
                 h2o_wmf = svp*data['RH'][k]/data['T'][k]
                 data['H2O_DMF'][k] = h2o_wmf/(1-h2o_wmf)
 
-            for key in ('lev', 'T', 'H', 'H2O_DMF', 'RH', 'EPV', 'O3'):
-                line_dict[key] = data[key][k]
+            for key in prof_var_order:
+                if key not in computed_keys:
+                    line_dict[key] = data[key][k]
+
+            #################################
+            # Calculated derived quantities #
+            #################################
+
             line_dict['mmw'] = compute_mmw(h2o_wmf)
             # compute potential temperature
             line_dict['PT'] = data['T'][k]*(1000.0/data['lev'][k])**0.286
@@ -334,7 +393,7 @@ def write_mod(mod_path,version,site_lat,data=0,surf_data=0,func=None,muted=False
                 line_dict['EL'] = func(line_dict['EPV']*1e6, line_dict['PT'])[0]
 
             for key in line_dict.keys():
-                scale = output_scaling[key] if key in output_scaling else 1.0
+                scale = mod_var_fmt_info[key]['scale']
                 line_dict[key] *= scale
 
             mod_content += [fmt.format(**line_dict)]
@@ -998,7 +1057,7 @@ def parse_args(parser=None):
         parser.set_defaults(driver_fxn=driver)
 
 
-def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=True):
+def mod_file_name(prefix,date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=True):
 
     YYYYMMDD = date.strftime('%Y%m%d')
     HHMM = date.strftime('%H%M')
@@ -1013,11 +1072,11 @@ def mod_file_name(date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latl
         site_lon = abs(site_lon_180)
         latlon_precision = 2
     if time_step < timedelta(days=1):
-        mod_fmt = '{{ymd}}_{{hm}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
+        mod_fmt = '{{prefix}}_{{ymd}}_{{hm}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
     else:
-        mod_fmt = '{{ymd}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
+        mod_fmt = '{{prefix}}_{{ymd}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
 
-    mod_name = mod_fmt.format(ymd=YYYYMMDD, hm=HHMM, lat=site_lat, ns=ns, lon=site_lon, ew=ew)
+    mod_name = mod_fmt.format(prefix=prefix, ymd=YYYYMMDD, hm=HHMM, lat=site_lat, ns=ns, lon=site_lon, ew=ew)
     return mod_name
 
 def GEOS_files(GEOS_path, start_date, end_date):
@@ -1217,7 +1276,253 @@ def show_interp(data,x,y,interp_data,ilev,pres):
     pl.colorbar()
     pl.show()
 
-def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,locations=site_dict,slant=False,muted=False,lat=None,lon=None,alt=None,site_abbrv=None,save_path=None,keep_latlon_prec=False,save_in_utc=True,**kwargs):
+
+def load_chem_variables(geos_file, geos_vars, target_site_dicts, pres_levels=mod_utils._std_model_pres_levels,
+                        muted=False):
+    if not mod_utils.is_geos_on_native_grid(geos_file):
+        raise NotImplementedError('GEOS chemistry file ({}) does not appear to be on the native eta grid. This case '
+                                  'has not been implemented.')
+    # Load the chemical variables
+    with netCDF4.Dataset(geos_file, 'r') as dataset:
+        box_lat_half_width = 0.5 * float(dataset.LatitudeResolution)
+        box_lon_half_width = 0.5 * float(dataset.LongitudeResolution)
+
+        lat = dataset['lat'][:]
+        lon = dataset['lon'][:]
+
+        geos_data = dict()
+        for var in geos_vars:
+            # The native files are ordered space-to-surface, so normally we'd flip them to be surface-to-space. However,
+            # the numpy interpolation needs the coordinate to be increasing anyway, so we just leave them
+            # space-to-surface and let the interpolation flip them.
+            geos_data[var] = dataset[var][0]
+
+        geos_pres = mod_utils.convert_geos_eta_coord(dataset['DELP'][0].filled(np.nan))
+        geos_data['pres'] = geos_pres
+
+    # Handle the lat/lon interpolation
+    nlevels = np.size(pres_levels)
+    nsites = len(target_site_dicts)
+    site_data = {v: np.full([nlevels, nsites], np.nan) for v in geos_vars}
+
+    for site, subdict in target_site_dicts.items():
+        slat = subdict['lat']
+        slon = subdict['lon_180']
+        target_site_dicts[site]['IDs'] = querry_indices([lat, lon], site_lat=slat, site_lon_180=slon,
+                                                        box_lat_half_width=box_lat_half_width,
+                                                        box_lon_half_width=box_lon_half_width)
+
+    interp_geos_data = interp_geos_data_to_sites(geos_data, lat, lon, target_site_dicts, muted=muted)
+
+    # Interpolate to the standard pressure levels. Do this in log-log space since pressure and concentration typically
+    # vary exponentially with altitude.
+    std_pres_log = np.log(pres_levels)
+    import pdb;
+    pdb.set_trace()
+    for i in range(nsites):
+        pres_log = np.log(interp_geos_data['pres'][:, i])
+        for var in geos_vars:
+            var_log = np.log(interp_geos_data[var][:, i])
+            # Other parts of modmaker use scipy's interp1d without issue; but I'm more comfortable with the
+            # straightforward linear interpolation np.interp does. Sometime scipy's interpolators behave strangely.
+            var_log = np.interp(std_pres_log, pres_log, var_log, left=np.nan, right=np.nan)
+            site_data[var][:, i] = np.exp(var_log)
+
+    site_data = combine_profile_surface_data(site_data, dict(), target_site_dicts)
+
+    return site_data
+
+
+def interp_geos_data_to_sites(DATA, lat, lon, site_dict, varlist=None, muted=False):
+    """
+    Interpolate GEOS data to the lat/lon of the sites where .mod files are needed.
+
+    :param DATA: dictionary of GEOS arrays arranged levels-by-lat-by-lon. The keys must be the GEOS variable names.
+    :type DATA: dict
+
+    :param lat: the latitude vector for the GEOS arrays.
+    :type lat: :class:`numpy.ndarray`
+
+    :param lon: the longitude vector for the GEOS arrays.
+    :type lon: :class:`numpy.ndarray`
+
+    :param site_dict: the dictionary organized by site. Keys will be the site abbreviation, values must themselves
+     be dictionaries which contain the key "IDs" which are the grid cell indices returned by :func:`querry_indices`.
+    :type site_dict: dict
+
+    :param varlist: the list of variables from the GEOS data that should be interpolated to the site lat/lons.
+    :type varlist: list(str)
+
+    :param muted: set to ``True`` to silence progress messages
+    :type muted: bool
+
+    :return: a dictionary of GEOS variables as masked arrays, interpolated to the site lat/lons. The arrays will be
+     nlevels-by-nsites.
+    :rtype: dict
+    """
+    if varlist is None:
+        varlist = list(DATA.keys())
+
+    ids_list = [site_dict[site]['IDs'] for site in site_dict]
+    new_lats = np.array([site_dict[site]['lat'] for site in site_dict])
+    new_lons = np.array([site_dict[site]['lon_180'] for site in site_dict])
+
+    nsite = len(site_dict)
+    default_geos_var = list(DATA.keys())[0]
+    nlev = DATA[default_geos_var].shape[0]
+
+    if not muted:
+        print('\t-Interpolate to (lat,lon) of sites ...')
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        interp_data = dict()
+        for var in varlist:
+            if not muted:
+                sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
+                sys.stdout.flush()
+
+            if DATA[var].ndim == 2:
+                interp_data[var] = lat_lon_interp(DATA[var], lat, lon, new_lats, new_lons, ids_list)
+            else:
+                interp_data[var] = np.zeros([nlev, nsite])
+                for ilev, level_data in enumerate(DATA[var]):
+                    interp_data[var][ilev] = lat_lon_interp(level_data, lat, lon, new_lats, new_lons, ids_list)
+
+    # setup masks
+    for var in varlist:
+        for i in range(nsite):
+            interp_data[var] = ma.masked_where(np.isnan(interp_data[var]), interp_data[var])
+
+    return interp_data
+
+
+def combine_profile_surface_data(interp_profile_data, interp_surf_data, local_site_dict):
+    """
+    Merge profile and surface data into a single dictionary organized by site.
+
+    :param interp_profile_data: a dictionary of profile data, where each key is a variable name and the arrays are
+     nlevels-by-nsites.
+    :type interp_profile_data: dict
+
+    :param interp_surf_data: a dictionary of surface data, where each key is a variable name and the arrays are
+     nlevels-long vectors.
+    :type interp_surf_data: dict
+
+    :param local_site_dict: a dictionary with the abbreviations for the sites in the first two dictionaries as keys.
+    :type local_site_dict: dict
+
+    :return: a dictionary organized by site, then 'prof'/'surf', then variable.
+    :rtype: dict
+    """
+    # restructure the data from two dictionaries organized with variables as keys and the variables as arrays including
+    # all sites to one dictionary organized by site, 'prof'/'surf', and variable.
+    temp_data = dict()
+    for i, site in enumerate(local_site_dict.keys()):
+        temp_data[site] = {}
+        temp_data[site]['prof'] = {}
+        for var in interp_profile_data:
+            if var == 'lev':
+                temp_data[site]['prof'][var] = interp_profile_data[var]
+            elif var == 'PHIS':
+                continue
+            else:
+                temp_data[site]['prof'][var] = interp_profile_data[var][:, i]
+
+        temp_data[site]['surf'] = {}
+        for var in interp_surf_data:
+            if var == 'H':
+                temp_data[site]['surf'][var] = mod_utils.geopotential_height_to_altitude(
+                    interp_surf_data[var][i][0], local_site_dict[site]['lat'], local_site_dict[site]['alt'] / 1000.0
+                )
+            else:
+                temp_data[site]['surf'][var] = interp_surf_data[var][i]
+    return temp_data
+
+
+def extrapolate_to_surface(var_to_interp, INTERP_DATA, SLANT_DATA=None):
+    """
+    Extend GEOS variables to fill out all pressure levels
+
+    :param var_to_interp: a dictionary specifying which variables in INTERP_DATA need to be extended. The keys must be
+     the profile variables to extend and the values the surface variables to use to extrapolate those variables. If
+     there is no surface variable, then use ``None`` as the value. This will cause the extrapolation to just use the
+     bottom value of the profile for all levels below it.
+    :type var_to_interp: dict
+
+    :param INTERP_DATA: a dictionary of vertical profile and surface data. Expected to be a dict of dict of dicts; the
+     top level keys are the site abbreviations, the second level being 'prof' or 'surf' for profile and surface
+     variables, respectively, and the third level being the variable names.
+    :type INTERP_DATA: dict
+
+    :param SLANT_DATA: a dictionary of slant profiles and surface data. Must have same format as ``INTERP_DATA``.
+    :type SLANT_DATA: dict
+
+    :return: None. Modified INTERP_DATA and SLANT_DATA in-place.
+    """
+    def get_and_check_mask(data_dict):
+        chk_var = list(var_to_interp.keys())[0]
+        chk_mask = data_dict[chk_var].mask.copy()  # make a copy to avoid changing this mask as we fill values
+        for v in var_to_interp:
+            # using array_equiv here should directly handle cases where the check mask is a scalar `False`
+            # but the variable's mask is a vector of all `False` values, since the former can be broadcast
+            # to be the same as the latter.
+            if not np.array_equiv(chk_mask, data_dict[v].mask):
+                raise ValueError('All variables to interpolate in input data must have the same mask')
+        return chk_mask
+
+    for site in INTERP_DATA.keys():
+        var_with_surf_data = {prof: surf for prof, surf in var_to_interp.items() if surf is not None}
+        var_without_surf_data = {prof: surf for prof, surf in var_to_interp.items() if surf is None}
+
+        if SLANT_DATA is not None:
+            all_data = [SLANT_DATA[site], INTERP_DATA[site]['prof']]
+        else:
+            all_data = [INTERP_DATA[site]['prof']]
+
+        for elem in all_data:
+            # Assume that the height variable
+            H_mask = get_and_check_mask(elem)
+
+            patch = {'surf': {}, 'first': {}}
+            if np.any(elem['lev'].mask):
+                raise NotImplementedError('The "lev" variable has masked elements, this is not supported')
+            level_pres = elem['lev'].data
+            missing_p = level_pres[H_mask]  # pressure levels with masked data
+            if len(missing_p) != 0:
+                surf_p = INTERP_DATA[site]['surf']['PS']  # surface pressure
+
+                first_p = level_pres[~H_mask][0]  # first valid pressure level
+                first_ID = np.where(level_pres == first_p)[0]
+
+                for prof_var, surf_var in var_with_surf_data.items():
+                    patch['surf'][prof_var] = INTERP_DATA[site]['surf'][surf_var]
+                    patch['first'][prof_var] = elem[prof_var][first_ID].data[0]
+
+                # interpolate/extrapolate using the first valid level and surface data
+                if surf_p > first_p:  # interpolate between the surface pressure and first valid pressure level
+                    patch_p = [surf_p, first_p]
+                    for var in var_with_surf_data:
+                        patch_var = [patch['surf'][var], patch['first'][var]]
+                        f = interp1d(patch_p, patch_var, fill_value='extrapolate')
+                        elem[var][H_mask] = f(missing_p)
+                else:  # use the surface value and the first level above it to extrapolate down to 1000 hPa
+                    valid_p = level_pres[~H_mask]
+                    first_p = valid_p[valid_p < surf_p][0]
+                    patch_p = np.array([surf_p, first_p])  # surface pressure and first level above it
+                    for var in var_with_surf_data:
+                        valid_var = elem[var][~H_mask]
+                        patch_var = np.array([patch['surf'][var], valid_var[valid_p < surf_p][0]])
+                        f = interp1d(patch_p, patch_var, fill_value='extrapolate')
+                        elem[var][:np.where(level_pres == first_p)[0][0]] = f(level_pres[:np.where(level_pres == first_p)[0][0]])
+
+                # for variables with no surface data, just use the value of the first valid level above the surface
+                for var in var_without_surf_data:
+                    elem[var][:np.where(level_pres==first_p)[0][0]] = elem[var][np.where(level_pres==first_p)][0]
+
+
+def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None, locations=site_dict, slant=False,
+                  muted=False, lat=None, lon=None, alt=None, site_abbrv=None, save_path=None, keep_latlon_prec=False,
+                  save_in_utc=True, chem_variables=tuple(), **kwargs):
     """
     This code only works with GEOS-5 FP-IT data.
     It generates MOD files for all sites between start_date and end_date on GEOS-5 times (every 3 hours)
@@ -1241,8 +1546,8 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
 
     When giving dates with _HHMM, dates must correspond exactly to GEOS5 times, so 3 hourly UTC times starting at HHMM=0000
     """
-
-    if lat: # True when lat!=None, a custom location was given
+    
+    if lat is not None: # a custom location was given
         site_abbrv = 'xx' if site_abbrv is None else site_abbrv
         locations = {site_abbrv:{'name':'custom site','loc':'custom loc','lat':lat,'lon':lon,'alt':alt}}
     elif site_abbrv: # if not custom location is given, but a site abbreviation is given, just do that one site
@@ -1263,20 +1568,25 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
             print('Creating',mod_path)
         os.makedirs(mod_path)
 
+    do_load_chem = len(chem_variables) > 0
+    if slant and do_load_chem:
+        raise NotImplementedError('Slant path chemistry variables have not yet been implemented')
+
     varlist = ['T','QV','RH','H','EPV','O3','PHIS']
     surf_varlist = ['T2M','QV2M','PS','SLP','TROPPB','TROPPV','TROPPT','TROPT']
 
     select_files, select_dates = GEOS_files(os.path.join(GEOS_path,'Np'),start_date,end_date)
     select_surf_files, select_surf_dates = GEOS_files(os.path.join(GEOS_path,'Nx'),start_date,end_date)
+    if do_load_chem:
+        # Assumes that chemistry files are the only ones in the Nv directory
+        select_chem_files, select_chem_dates = GEOS_files(os.path.join(GEOS_path, 'Nv'),start_date,end_date)
 
     nsite = len(site_dict.keys())
-
-    rmm = 28.964/18.02	# Ratio of Molecular Masses (Dry_Air/H2O)
 
     start = time.time()
     mod_dicts = dict()
 
-    for date_ID,UTC_date in enumerate(select_dates):
+    for date_ID, UTC_date in enumerate(select_dates):
         mod_dicts[UTC_date] = dict()
 
         start_it = time.time()
@@ -1292,13 +1602,12 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
                 # Taking dataset[var][0] is equivalent to dataset[var][0,:,:,:], which since there's only one time per
                 # file just cuts the data from 4D to 3D
                 DATA[var] = dataset[var][0]
-            DATA['lev'] = dataset['lev'][:]
+            pres_levels = dataset['lev'][:]
+            DATA['lev'] = pres_levels
 
             lat = dataset['lat'][:]
             lon = dataset['lon'][:]
             nlev = dataset.dimensions['lev'].size
-            nlat = dataset.dimensions['lat'].size
-            nlon = dataset.dimensions['lon'].size
             if date_ID == 0:
                 box_lat_half_width = 0.5*float(dataset.LatitudeResolution)
                 box_lon_half_width = 0.5*float(dataset.LongitudeResolution)
@@ -1316,58 +1625,37 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
             else:
                 site_dict[site]['IDs'] = querry_indices([lat,lon],site_dict[site]['lat'],site_dict[site]['lon_180'],box_lat_half_width,box_lon_half_width)
 
-        new_lats = np.array([site_dict[site]['lat'] for site in site_dict])
-        new_lons = np.array([site_dict[site]['lon_180'] for site in site_dict])
-
         SURF_DATA = {}
         with netCDF4.Dataset(select_surf_files[date_ID],'r') as dataset:
             for var in surf_varlist:
                 SURF_DATA[var] = dataset[var][0]
 
-        IDs_list = [site_dict[site]['IDs'] for site in site_dict]
-
         if not muted:
             print('\t-Interpolate to (lat,lon) of sites ...')
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            INTERP_DATA = {}
-            for var in varlist:
-                if not muted:
-                    sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
-                    sys.stdout.flush()
-                if DATA[var].ndim==2:
-                    INTERP_DATA[var] = lat_lon_interp(DATA[var],lat,lon,new_lats,new_lons,IDs_list)
-                    continue
 
-                INTERP_DATA[var] = np.zeros([nlev,nsite])
-                for ilev,level_data in enumerate(DATA[var]):
-                    INTERP_DATA[var][ilev] = lat_lon_interp(level_data,lat,lon,new_lats,new_lons,IDs_list)
+        INTERP_DATA = interp_geos_data_to_sites(DATA, lat=lat, lon=lon, site_dict=site_dict, varlist=varlist,
+                                                muted=muted)
+        INTERP_SURF_DATA = interp_geos_data_to_sites(SURF_DATA, lat=lat, lon=lon, site_dict=site_dict,
+                                                     varlist=surf_varlist, muted=muted)
 
-            INTERP_SURF_DATA = {}
-            for var in surf_varlist:
-                if not muted:
-                    sys.stdout.write('\r\t\tNow doing : {:<10s}'.format(var))
-                    sys.stdout.flush()
-                INTERP_SURF_DATA[var] = lat_lon_interp(SURF_DATA[var],lat,lon,new_lats,new_lons,IDs_list)
-            if not muted:
-                print('\r\t\t{:<40s}'.format('DONE'))
+        ##############################################################################
+        # Handle some variable conversions/custom calculations for the met variables #
+        ##############################################################################
 
-        # setup masks
-        for var in varlist:
-            for i in range(nsite):
-                INTERP_DATA[var] = ma.masked_where(np.isnan(INTERP_DATA[var]),INTERP_DATA[var])
-
+        # Ensure that the surface variables are 1D
         for var in surf_varlist:
-            for i in range(nsite):
-                INTERP_SURF_DATA[var] = ma.masked_where(np.isnan(INTERP_SURF_DATA[var]),INTERP_SURF_DATA[var]).reshape(nsite)
+            INTERP_SURF_DATA[var] = INTERP_SURF_DATA[var].reshape(nsite)
 
+        # Add the level dimension variable to the profile dict
         INTERP_DATA['lev'] = DATA['lev'].copy()
 
+        # Convert pressure fields to hPa
         for varname in ['PS','SLP','TROPPB','TROPPV','TROPPT']:
-            INTERP_SURF_DATA[varname] = INTERP_SURF_DATA[varname] / 100.0 # convert Pa to hPa
+            INTERP_SURF_DATA[varname] = INTERP_SURF_DATA[varname] / 100.0  # convert Pa to hPa
 
-        INTERP_DATA['H2O_DMF'] = rmm*INTERP_DATA['QV']/(1-INTERP_DATA['QV']) # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
-        INTERP_DATA['H'] = INTERP_DATA['H']/1000.0	# Convert m to km
+        # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
+        INTERP_DATA['H2O_DMF'] = rmm*INTERP_DATA['QV']/(1-INTERP_DATA['QV'])
+        INTERP_DATA['H'] = INTERP_DATA['H']/1000.0  # Convert m to km
         INTERP_DATA['PHIS'] = INTERP_DATA['PHIS'] / 1000.0
 
         INTERP_SURF_DATA['H2O_DMF'] = compute_h2o_dmf(INTERP_SURF_DATA['QV2M'],rmm)
@@ -1375,41 +1663,31 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
         # compute surface relative humidity
         svp = svp_wv_over_ice(INTERP_SURF_DATA['T2M'])
         INTERP_SURF_DATA['H2O_WMF'] = compute_h2o_wmf(INTERP_SURF_DATA['H2O_DMF'])  # wet mole fraction of h2o
-        INTERP_SURF_DATA['RH'] = compute_rh(INTERP_SURF_DATA['T2M'],INTERP_SURF_DATA['H2O_WMF'],INTERP_SURF_DATA['PS']) # Fractional relative humidity
+        INTERP_SURF_DATA['RH'] = compute_rh(INTERP_SURF_DATA['T2M'],INTERP_SURF_DATA['H2O_WMF'],INTERP_SURF_DATA['PS'])/100 # Fractional relative humidity
         INTERP_SURF_DATA['MMW'] = compute_mmw(INTERP_SURF_DATA['H2O_WMF'])
         INTERP_SURF_DATA['H'] = INTERP_DATA['PHIS']
 
-        # restructure the data
-        temp_data = {}
-        for i,site in enumerate(site_dict.keys()):
-            temp_data[site] = {}
-            temp_data[site]['prof'] = {}
-            for var in INTERP_DATA:
-                if var == 'lev':
-                    temp_data[site]['prof'][var] = INTERP_DATA[var]
-                elif var == 'PHIS':
-                    continue
-                else:
-                    temp_data[site]['prof'][var] = INTERP_DATA[var][:,i]
+        # Combine the profile and surface data into a new dictionary organized by site/levels/variable.
+        INTERP_DATA = combine_profile_surface_data(INTERP_DATA, INTERP_SURF_DATA, site_dict)
 
-            temp_data[site]['surf'] = {}
-            for var in INTERP_SURF_DATA:
-                if var == 'H':
-                    temp_data[site]['surf'][var] = mod_utils.geopotential_height_to_altitude(INTERP_SURF_DATA[var][i][0], site_dict[site]['lat'], site_dict[site]['alt'] / 1000.0)
-                else:
-                    temp_data[site]['surf'][var] = INTERP_SURF_DATA[var][i]
-        INTERP_DATA = temp_data
+        # If requested, load the chemistry data and incorporate it into the existing dictionaries.
+        if do_load_chem:
+            CHEM_DATA = load_chem_variables(select_chem_files[date_ID], chem_variables, site_dict, pres_levels=pres_levels)
+            for site in INTERP_DATA.keys():
+                INTERP_DATA[site]['prof'].update(CHEM_DATA[site]['prof'])
 
         # add a mask for temperature = 0 K
         for site in site_dict:
             for var in INTERP_DATA[site]['prof']:
                 if var not in ['T','lev']:
                     INTERP_DATA[site]['prof'][var] = ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof'][var])
-            INTERP_DATA[site]['prof']['T'] =  ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof']['T'])
+            INTERP_DATA[site]['prof']['T'] = ma.masked_where(INTERP_DATA[site]['prof']['T']==0,INTERP_DATA[site]['prof']['T'])
 
             INTERP_DATA[site]['surf']['SZA'] = rad2deg(sun_angles(UTC_date,deg2rad(site_dict[site]['lat']),deg2rad(site_dict[site]['lon_180']),site_dict[site]['alt'],INTERP_DATA[site]['surf']['PS'],INTERP_DATA[site]['surf']['T2M'])[0])
 
-        if slant:
+        if not slant:
+            SLANT_DATA = None
+        else:
             # get slant path coordinates corresponding to the altitude levels above each site
             if not muted:
                 print('\t-Slantify:')
@@ -1503,63 +1781,26 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
                         SLANT_DATA[site][var] = ma.masked_where(np.isnan(SLANT_DATA[site][var]),SLANT_DATA[site][var])
         # end of 'if slant'
 
-        # Interpolate T,RH,MMW down to 1000 hPa
-        # Or extrapolate so that when linearly interpolating to the surface level using two levels that bracket the surface pressure, the values match the surface values
-        # if surface pressure is larger than 1000 hPa, interpolate between surface pressure and the first valid level
-        # if surface pressure is smaller than 1000 hPa, extrapolate to 1000 hPa using the surface data and the first valid level above it
         if not muted:
             print('\t-Patch fill values ...')
+        extrap_vars = {'RH': 'RH', 'QV': 'QV2M', 'T': 'T2M', 'H': 'H', 'EPV': None, 'O3': None}
+        extrap_vars.update({k: None for k in chem_variables})
+        extrapolate_to_surface(extrap_vars, INTERP_DATA, SLANT_DATA=SLANT_DATA)
+
         for site in site_dict:
-            try:
+            if slant:
                 all_data = [SLANT_DATA[site],INTERP_DATA[site]['prof']]
-            except:
+            else:
                 all_data = [INTERP_DATA[site]['prof']]
 
+            # Needed this to be a fraction for the extrapolation so that it is in the same units as the profile. Now
+            # convert back to percent. Can't convert the profile RH here, it's used for certain calculations throughout
+            # that assume it is a fraction. It will get scaled in the write_mod function.
+            INTERP_DATA[site]['surf']['RH'] *= 100
+
             for elem in all_data:
-                H = elem['H']
-                patch = {'surf':{},'first':{}}
-                if np.any(elem['lev'].mask):
-                    raise NotImplementedError('The "lev" variable has masked elements, this is not supported')
-                level_pres = elem['lev'].data
-                missing_p = level_pres[H.mask] # pressure levels with masked data
-                if len(missing_p)!=0:
-                    surf_p = INTERP_DATA[site]['surf']['PS'] # surface pressure
-
-                    first_p = level_pres[~H.mask][0] # first valid pressure level
-                    first_ID = np.where(level_pres==first_p)[0]
-
-                    patch['surf']['H'] = INTERP_DATA[site]['surf']['H']
-                    patch['surf']['RH'] = INTERP_DATA[site]['surf']['RH']/100.0
-                    patch['surf']['QV'] = INTERP_DATA[site]['surf']['QV2M']
-                    patch['surf']['T'] = INTERP_DATA[site]['surf']['T2M']
-
-                    patch['first']['H'] =  elem['H'][first_ID].data[0]
-                    patch['first']['RH'] =  elem['RH'][first_ID].data[0]
-                    patch['first']['QV'] =  elem['QV'][first_ID].data[0]
-                    patch['first']['T'] =  elem['T'][first_ID].data[0]
-
-                    # interpolate/extrapolate using the first valid level and surface data
-                    if surf_p>first_p: # interpolate between the surface pressure and first valid pressure level
-                        patch_p = [surf_p,first_p]
-                        for var in ['RH','QV','T','H']: # must do H last since the last line will get rid of its masks
-                            patch_var = [patch['surf'][var],patch['first'][var]]
-                            f = interp1d(patch_p,patch_var,fill_value='extrapolate')
-                            elem[var][H.mask] = f(missing_p)  # cannot interpolate with masked array, the "lev" variable should never
-                    else: # use the surface value and the first level above it to extrapolate down to 1000 hPa
-                        valid_p = level_pres[~H.mask]
-                        first_p = valid_p[valid_p<surf_p][0]
-                        patch_p = np.array([surf_p,first_p]) # surface pressure and first level above it
-                        for var in ['RH','QV','T','H']: # must do H last since the last line will get rid of its masks
-                            valid_var = elem[var][~H.mask]
-                            patch_var = np.array([patch['surf'][var],valid_var[valid_p<surf_p][0]])
-                            f = interp1d(patch_p,patch_var,fill_value='extrapolate')
-                            elem[var][:np.where(level_pres==first_p)[0][0]] = f(level_pres[:np.where(level_pres==first_p)[0][0]])
-
-                    #for variables with no surface data, just use the value of the first valid level above the surface
-                    for var in ['EPV','O3']:
-                        elem[var][:np.where(level_pres==first_p)[0][0]] = elem[var][np.where(level_pres==first_p)][0]
-
-                elem['H2O_DMF'] = compute_h2o_dmf(elem['QV'],rmm) # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
+                # Convert specific humidity, a wet mass mixing ratio, to dry mole fraction
+                elem['H2O_DMF'] = compute_h2o_dmf(elem['QV'], rmm)
 
         if not muted:
             if slant:
@@ -1597,7 +1838,7 @@ def mod_maker_new(start_date=None,end_date=None,func_dict=None,GEOS_path=None,lo
             else:
                 ew = 'W'
 
-            mod_name = 'FPIT_'+mod_file_name(local_date,timedelta(hours=3),site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec,in_utc=save_in_utc)
+            mod_name = mod_file_name('FPIT', local_date, timedelta(hours=3), site_lat, site_lon_180, ew, ns, mod_path, round_latlon=not keep_latlon_prec, in_utc=save_in_utc)
             if not muted:
                 print('\t\t\t{:<20s} : {}'.format(site_dict[site]['name'], mod_name))
 
@@ -1645,11 +1886,11 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
     If any of alt/lat/lon is given, the other two must be given too
     """
     if 'merra' in mode:
-        prefix = 'MERRA2_'
+        prefix = 'MERRA2'
     elif 'ncep' in mode:
-        prefix = 'NCEP_'
+        prefix = 'NCEP'
     else:
-        prefix = 'FPIT_'
+        prefix = 'FPIT'
 
     if 'merradap' in mode: # get the earthdata credentials
         try:
@@ -1824,7 +2065,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
             ew = 'W'
 
         # use the local date for the name of the .mod file
-        mod_name = prefix+mod_file_name(local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec)
+        mod_name = mod_file_name(prefix,local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec)
         mod_file_path = os.path.join(mod_path,mod_name)
         if not muted:
             print('\n',mod_name)
@@ -1843,14 +2084,14 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
 
 
 def driver(date_range, GEOS_path, save_path=None, keep_latlon_prec=False, save_in_utc=True, muted=False,
-           slant=False, alt=None, lon=None, lat=None, site_abbrv=None, **kwargs):
+           slant=False, alt=None, lon=None, lat=None, site_abbrv=None, mode=None, **kwargs):
 
     start_date, end_date = date_range
 
-    if kwargs['mode']:
-        mod_maker(site_abbrv=site_abbrv,start_date=start_date,end_date=end_date,locations=site_dict,
-                    HH=12,MM=0,time_step=24,muted=muted,lat=lat,lon=lon,alt=alt,save_path=save_path,ncdf_path=GEOS_path,
-                    keep_latlon_prec=keep_latlon_prec,mode=kwargs['mode'])
+    if mode is not None:
+        mod_maker(site_abbrv=site_abbrv, start_date=start_date, end_date=end_date, locations=site_dict,
+                  HH=12, MM=0, time_step=24, muted=muted, lat=lat, lon=lon, alt=alt, save_path=save_path,
+                  ncdf_path=GEOS_path, keep_latlon_prec=keep_latlon_prec, mode=mode)
     else:
         func_dict = equivalent_latitude_functions_geos(GEOS_path=GEOS_path, start_date=start_date, end_date=end_date,
                                                        muted=muted)

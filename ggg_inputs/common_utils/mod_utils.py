@@ -147,7 +147,7 @@ def check_depedencies_newer(out_file, *dependency_files):
     return False
 
 
-def _get_num_header_lines(filename):
+def get_num_header_lines(filename):
     """
     Get the number of header lines in a standard GGG file
 
@@ -188,7 +188,7 @@ def read_mod_file(mod_file, as_dataframes=False):
      dictionaries or data frames, depending on ``as_dataframes``.
     :rtype: dict
     """
-    n_header_lines = _get_num_header_lines(mod_file)
+    n_header_lines = get_num_header_lines(mod_file)
     # Read the constants from the second line of the file. There's no header for these, we just have to rely on the
     # same constants being in the same position.
     constant_vars = pd.read_csv(mod_file, sep='\s+', header=None, nrows=1, skiprows=1,
@@ -239,7 +239,7 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
      respectively. The form of these values depends on ``as_dataframes``.
     :rtype: dict
     """
-    n_header_lines = _get_num_header_lines(map_file)
+    n_header_lines = get_num_header_lines(map_file)
     constants = dict()
     if not skip_header:
         with open(map_file, 'r') as mapf:
@@ -288,7 +288,7 @@ def read_isotopes(isotopes_file, gases_only=False):
     :return: tuple of isotope or gas names
     :rtype: tuple(str)
     """
-    nheader = _get_num_header_lines(isotopes_file)
+    nheader = get_num_header_lines(isotopes_file)
     with open(isotopes_file, 'r') as fobj:
         for i in range(nheader):
             fobj.readline()
@@ -503,7 +503,7 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
     # Write the header, which starts with the number of header lines and data columns, then has the tropopause altitude,
     # profile date as a decimal year, and profile latitude. I'm going to skip the secular trends, seasonal cycle, and
     # latitude gradient because those are not necessary.
-    alt_fmt = '   {:.3f} '
+    alt_fmt = '{:9.3f} '
     gas_fmt = '{:.3E}  '
     table_header = ['Altitude'] + ['{:10}'.format(name) for name in gas_name_order]
     header_lines = [' ZTROP_VMR: {:.1f}'.format(tropopause_alt),
@@ -525,7 +525,7 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
 
 
 def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True):
-    nheader = _get_num_header_lines(vmr_file)
+    nheader = get_num_header_lines(vmr_file)
     header_data = dict()
     with open(vmr_file, 'r') as fobj:
         # Skip the line with the number of header lines and columns
@@ -930,7 +930,7 @@ def get_eqlat_profile(interpolator, epv, theta):
     return el
 
 
-def _format_geosfp_name(product, file_type, date_time):
+def _format_geosfp_name(product, file_type, date_time, chem=False):
     """
     Create the file name for a GEOS FP or FP-IT file.
 
@@ -944,9 +944,10 @@ def _format_geosfp_name(product, file_type, date_time):
     :return: the file name
     :rtype: str
     """
-    product_patterns = {'fp': 'GEOS.fp.asm.inst3_{dim}d_asm_{type}.{date_time}.V01.nc4',
-                        'fpit': 'GEOS.fpit.asm.inst3_{dim}d_asm_{type}.GEOS5124.{date_time}.V01.nc4'}
-    file_type_dims = {'Np': 3, 'Nx': 2}
+    product_patterns = {'fp': 'GEOS.fp.asm.inst3_{dim}d_{vars}_{type}.{date_time}.V01.nc4',
+                        'fpit': 'GEOS.fpit.asm.inst3_{dim}d_{vars}_{type}.GEOS5124.{date_time}.V01.nc4'}
+    file_type_dims = {'Np': 3, 'Nx': 2, 'Nv': 3}
+    var_type = 'chm' if chem else 'asm'
     try:
         pattern = product_patterns[product]
     except KeyError:
@@ -960,7 +961,7 @@ def _format_geosfp_name(product, file_type, date_time):
                          .format(file_type, ', '.join(file_type_dims.keys())))
 
     date_time = date_time.strftime('%Y%m%d_%H%M')
-    return pattern.format(dim=file_dims, type=file_type, date_time=date_time)
+    return pattern.format(dim=file_dims, type=file_type, date_time=date_time, vars=var_type)
 
 
 def read_geos_files(start_date, end_date, geos_path, profile_variables, surface_variables, product='fpit',
@@ -1089,7 +1090,7 @@ def read_geos_files(start_date, end_date, geos_path, profile_variables, surface_
     return prof_data, surf_data, file_dates
 
 
-def geosfp_file_names(product, file_type, start_date, end_date=None):
+def geosfp_file_names(product, file_type, start_date, end_date=None, chem=False):
     """
     List all file names for GEOS FP or FP-IT files for the given date(s).
 
@@ -1119,13 +1120,13 @@ def geosfp_file_names(product, file_type, start_date, end_date=None):
     geos_file_dates = pd.date_range(start=start_date, end=end_date - freq, freq=freq)
     geos_file_names = []
     for date in geos_file_dates:
-        this_name = _format_geosfp_name(product, file_type, date)
+        this_name = _format_geosfp_name(product, file_type, date, chem=chem)
         geos_file_names.append(this_name)
 
     return geos_file_names, geos_file_dates
 
 
-def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None):
+def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None, chem=False):
     """
     Create a list of GEOS-FP file names for specified dates
 
@@ -1161,7 +1162,7 @@ def geosfp_file_names_by_day(product, file_type, utc_dates, utc_hours=None):
     for date in utc_dates:
         for hr in geos_utc_hours:
             date_time = dt.datetime(date.year, date.month, date.day, hr)
-            this_name = _format_geosfp_name(product, file_type, date_time)
+            this_name = _format_geosfp_name(product, file_type, date_time, chem=chem)
             geos_file_names.append(this_name)
             geos_file_dates.append(date_time)
 
@@ -1493,6 +1494,10 @@ def is_midlat(lat, doy, ages):
     return ~is_tropics(lat, doy, ages) & ~is_vortex(lat, doy, ages)
 
 
+def is_overworld(potential_temp, pressure, trop_pres):
+    return (potential_temp >= 380) & (pressure <= trop_pres)
+
+
 def date_to_decimal_year(date_in):
     """
     Convert a datetime object to a decimal year.
@@ -1625,7 +1630,7 @@ def decimal_year_to_date(dec_year, date_type=dt.datetime):
 
     try:
         dec_year[0]
-    except TypeError:
+    except (TypeError, IndexError):
         dec_year = [dec_year]
         return_as_scalar = True
     else:

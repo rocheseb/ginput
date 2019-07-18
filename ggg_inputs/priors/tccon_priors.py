@@ -83,7 +83,7 @@ _code_dep_files[os.path.splitext(os.path.basename(__file__))[0]] = os.path.abspa
 
 _data_dir = const.data_dir
 _clams_file = os.path.join(_data_dir, 'clams_age_clim_scaled.nc')
-
+_excess_co_file = os.path.join(_data_dir, 'ace_excess_co_lut.nc')
 
 ###########################################
 # FUNCTIONS SUPPORTING PRIORS CALCUALTION #
@@ -120,6 +120,13 @@ class GasRecordInputVerificationError(GasRecordError):
 class GasRecordExtrapolationError(GasRecordError):
     """
     Error to raise if there's a problem with the extrapolation of the MLO/SMO records.
+    """
+    pass
+
+
+class GasRecordDateError(GasRecordError):
+    """
+    Error to raise for any issues with dates in the gas records
     """
     pass
 
@@ -194,9 +201,9 @@ class TraceGasTropicsRecord(object):
     :type recalculate_strat_lut: bool or None
 
     :param save_strat: optional, set to ``False`` to avoid saving the stratospheric concentration lookup if it is
-     recalculated. Default is ``True``. This option has no effect if the stratospheric lookup table is read from the
-     netCDF file.
-    :type save_strat: bool
+     recalculated. Default is ``None``, which will save the LUT if recalculated unless it was recalculated to cover the
+     time frame requested. This option has no effect if the stratospheric lookup table is read from the netCDF file.
+    :type save_strat: bool or None
     """
 
     # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
@@ -206,6 +213,12 @@ class TraceGasTropicsRecord(object):
     gas_name = ''
     gas_unit = ''
     gas_seas_cyc_coeff = None
+    # The lifetime is used to account for chemical loss between emission and the prior location. Setting to infinity
+    # will effectively disable this correction, since e^(-x/infinity) = 1.0.
+    gas_trop_lifetime_yrs = np.inf
+    # The latitudinal corrections apply to the troposphere only. Give the northern and southern hemisphere correction
+    # as a dictionary with values in ppx/degree, the unit "ppx" will be ppm, ppb, etc., whatever the base record is in.
+    gas_lat_correction = {'nh': 0.0, 'sh': 0.0}
 
     months_avg_for_trend = 12
     age_spec_regions = ('tropics', 'midlat', 'vortex')
@@ -214,13 +227,17 @@ class TraceGasTropicsRecord(object):
     _default_sbc_lag = relativedelta(months=2)
 
     # This sets the maximum degree of the polynomial used to fit and extend the MLO/SMO trends. Set to 1 to use linear,
-    # 2 for quadratic, etc.
+    # 2 for quadratic, etc. One special case: 'exp' will use an exponential, rather than polynomial, fit.
     _max_trend_poly_deg = 2
     _nyears_for_extrap_avg = 10
     _max_safe_extrap_forward = relativedelta(years=5)
 
     # coordinate to use for the stratospheric look up table along the theta dimension when there is no theta dependence
     _no_theta_coord = np.array([0.])
+
+    # Sets an assumption for how long the age spectra go back. Currently (2019-06-27) only used to modify the start date
+    # to ensure that there is strat data over the requested time.
+    _age_spectra_length = relativedelta(years=30)
 
     @classmethod
     def get_strat_lut_file(cls):
@@ -250,7 +267,8 @@ class TraceGasTropicsRecord(object):
         return self._last_record_date(self.conc_seasonal)
 
     def __init__(self, first_date=None, last_date=None, lag=None, mlo_file=None, smo_file=None,
-                 strat_age_scale=1.0, recalculate_strat_lut=None, save_strat=True):
+                 strat_age_scale=1.0, recalculate_strat_lut=None, save_strat=None):
+        has_custom_dates = first_date is not None or last_date is not None
         first_date, last_date, self.sbc_lag, mlo_file, smo_file = self._init_helper(first_date, last_date, lag, mlo_file, smo_file)
         self.mlo_file = mlo_file
         self.smo_file = smo_file
@@ -285,6 +303,28 @@ class TraceGasTropicsRecord(object):
             # the LUT
             logger.important('Using existing strat LUT as requested')
 
+        if not recalculate_strat_lut:
+            # If we're loading the strat lookup table, we need to pass the MLO and SMO files to check their SHA1 hashes
+            # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
+            # generate the strat table stored in the netCDF file.
+            logger.info('Loading {} strat LUT'.format(self.gas_name))
+            self.conc_strat = self._load_strat_arrays()
+            if not self._check_strat_dates(self.conc_strat, first_date, last_date):
+                logger.important('Cached strat LUT does not span enough time to cover the requested dates, must '
+                                 'recalculate.')
+                recalculate_strat_lut = True
+                if has_custom_dates:
+                    # If custom dates were specified, then only save the strat LUT if the user explicitly requested it
+                    save_strat = False if save_strat is None else save_strat
+                else:
+                    # If custom dates were not specified, then resave the LUT because it probably means we had to extend
+                    # into a new month
+                    save_strat = True
+
+        if save_strat is None:
+            save_strat = True
+
+        # May enter this if recalculation required by user, dependencies, or dates.
         if recalculate_strat_lut:
             logger.info('Calculating {} strat LUT'.format(self.gas_name))
             self.conc_strat = self._calc_age_spec_gas(self.conc_seasonal, lag=self.sbc_lag)
@@ -293,34 +333,29 @@ class TraceGasTropicsRecord(object):
                     self._save_strat_arrays()
                 except PermissionError:
                     logger.important('Could not save strat LUT file due to permission error. This just means it will '
-                                      'need recalculated the next time this record is loaded')
+                                     'need recalculated the next time this record is loaded')
                 else:
 
                     logger.important('Saved {} strat LUT file as "{}"'.format(self.gas_name, os.path.abspath(self.get_strat_lut_file())))
-        else:
-            # If we're loading the strat lookup table, we need to pass the MLO and SMO files to check their SHA1 hashes
-            # against those stored in the netCDF file to ensure the MLO/SMO files are the same ones that were used to
-            # generate the strat table stored in the netCDF file.
-            logger.info('Loading {} strat LUT'.format(self.gas_name))
-            self.conc_strat = self._load_strat_arrays()
 
     @classmethod
     def _init_helper(cls, first_date, last_date, lag, mlo_file, smo_file):
         # For the stratosphere data, since the age spectra are defined over a 30 year window, we need to make sure
         # we have values back to slightly more than 30 years before the first TCCON data. Assuming that's around 2004,
         # a default age of 2000 - 30 = 1970 should be good.
-        age_spectra_length = relativedelta(years=30)
 
         if first_date is None:
-            first_date = dt.datetime(2000, 1, 1) - age_spectra_length
+            first_date = dt.datetime(2000, 1, 1) - cls._age_spectra_length
         else:
-            first_date -= age_spectra_length
+            first_date -= cls._age_spectra_length
 
         if last_date is None:
             # By default, we want to extrapolate to 2 years out from today; the max negative age-of-air in the
             # troposphere should be about 6 months at most, but we need to allow some room for the rolling average to
-            # get the trend.
-            last_date = dt.datetime.today() + relativedelta(years=2)
+            # get the trend. We need to make sure that we extend the record by whole months so go two years, one month
+            # into the future. E.g. if in July 2019, then end date will be Aug 2021. This helps with caching the strat
+            # LUT.
+            last_date = mod_utils.start_of_month(dt.datetime.today()) + relativedelta(years=2, months=1)
 
         if lag is None:
             sbc_lag = cls._default_sbc_lag
@@ -335,6 +370,20 @@ class TraceGasTropicsRecord(object):
             raise TypeError('Must give both MLO and SMO files or neither')
 
         return first_date, last_date, sbc_lag, mlo_file, smo_file
+
+    @classmethod
+    def _check_strat_dates(cls, strat_lut, first_date, last_date):
+        strat_first_date = strat_lut['tropics'].coords['date'].min()
+        strat_last_date = strat_lut['tropics'].coords['date'].max()
+
+        for region, lut in strat_lut.items():
+            if lut.coords['date'].min() != strat_first_date or lut.coords['date'].max() != strat_last_date:
+                raise GasRecordDateError('"{}" strat LUT has different start/end dates than "tropics" LUT'.format(region))
+
+        if strat_first_date > np.datetime64(first_date) or strat_last_date < np.datetime64(last_date)   :
+            return False
+        else:
+            return True
 
     @classmethod
     def _get_agespec_files(cls, region):
@@ -1283,7 +1332,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
         #   Saad et al. 2014, AMT, doi: 10.5194/amt-7-2907-2014
         #   Washenfelder et al. 2003, GRL, doi: 10.1029/2003GL017969
         if ch4_record is None:
-            ch4_record = CH4TropicsRecord(first_date=out_dates.min(), last_date=out_dates.max())
+            ch4_record = CH4TropicsRecord(first_date=out_dates.min() + cls._age_spectra_length, last_date=out_dates.max())
 
         bin_names, ch4_hf_slopes, ch4_hf_fit_params = cls._load_ch4_hf_slopes()
 
@@ -1313,12 +1362,17 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
+    # the default of infinity is kept for GGG2019 as the priors code was delivered to JPL before the necessity of this
+    # correction was realized.
+    # gas_trop_lifetime_yrs = 200.0 # estimated from Box 6.1 of Ch 6 of the IPCC AR5 (p. 473).
+    _max_trend_poly_deg = 'exp'
 
 
 class N2OTropicsRecord(TraceGasTropicsRecord):
     gas_name = 'n2o'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.0
+    gas_trop_lifetime_yrs = 121.0  # from table 8.A.1 of IPCC AR5, Ch 8, p. 731
 
     _ace_fn2o_file = os.path.join(_data_dir, 'ace_fn2o_lut.nc')
 
@@ -1362,6 +1416,10 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
     gas_name = 'ch4'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.012
+    gas_trop_lifetime_yrs = 12.4  # from Table 8.A.1 of IPCC AR5, Ch 8, p. 731
+    # Values determined from the binned boundary layer (p > 800 hPa) differences between priors and ATom/HIPPO quantum
+    # cascade laser CH4, filtering out over-land data. The bias increased from ~0 at the equator to ~60 ppb at 80 deg N.
+    gas_lat_correction = {'nh': 0.75, 'sh': 0.0}
 
     _nyears_for_extrap_avg = 5
 
@@ -1422,12 +1480,12 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
 
 class COTropicsRecord(TraceGasTropicsRecord):
     gas_name = 'co'
-    gas_unit = '?'
+    gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.2
 
 
 # Make the list of available gases' records
-gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord]}#,
+gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord]}
                                        #COTropicsRecord]}
 
 
@@ -1683,7 +1741,7 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
 
 
 def adjust_zgrid(z_grid, z_trop, z_obs):
-    
+    z_grid = z_grid.copy()
     idx_min = abs(z_grid - z_obs).argmin()
     z_min = z_grid[idx_min]
     dz = z_obs - z_min
@@ -1797,7 +1855,14 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
     prof_world_flag[xx_trop] = const.trop_flag
 
     gas_df = gas_record.get_gas_by_age(obs_date, air_age, deseasonalize=True, as_dataframe=True)
-    prof_gas[xx_trop] = gas_df['dmf_mean'].values
+
+    # Apply a correction to account for chemical loss between the emission and MLO/SMO measurement or between the
+    # prior location and MLO/SMO. For some gases we also apply a latitudinal correction.
+    lifetime_adj = np.exp(-air_age / gas_record.gas_trop_lifetime_yrs)
+    lat_correction_factor = gas_record.gas_lat_correction['nh'] if obs_lat >= 0 else gas_record.gas_lat_correction['sh']
+    lat_correction = lat_correction_factor * obs_lat
+
+    prof_gas[xx_trop] = gas_df['dmf_mean'].values * lifetime_adj + lat_correction
     # Must reshape the 1D latency vector into an n-by-1 matrix to broadcast successfully
     profs_latency[xx_trop] = gas_df['latency'].values
     # Record the date that the CO2 was taken from
@@ -1814,8 +1879,8 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
                       'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}
 
 
-def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause_theta, gas_record,
-                    profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
+def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres, tropopause_theta, tropopause_pres,
+                    gas_record, profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
     """
     Add the stratospheric trace gas to a TCCON prior profile
 
@@ -1862,7 +1927,7 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
 
     # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
     # restrict to >= 380 K later.
-    xx_overworld = prof_theta >= 380
+    xx_overworld = mod_utils.is_overworld(prof_theta, prof_pres, tropopause_pres)
     prof_world_flag[xx_overworld] = const.overworld_flag
     # Need the +1 because Jan 1 will be frac_year = 0, but CLAMS expects 1 <= doy <= 366
     retrieval_doy = int(mod_utils.clams_day_of_year(retrieval_date))
@@ -1897,6 +1962,76 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, tropopause
 
     return prof_gas, {'latency': profs_latency, 'gas_record_dates': gas_record_dates, 'age_of_air': prof_aoa,
                       'stratum': prof_world_flag}
+
+
+def _load_co_lut(lut_file):
+    with xr.open_dataset(lut_file) as ds:
+        co_lut = ds['co_excess']
+
+    # We'll trick this into doing periodic interpolation in day of year by repeating the first and last slices in that
+    # dimension
+    co_first_slice = co_lut.isel(doy=0)
+    co_first_slice.coords['doy'] = co_first_slice.coords['doy'] + mod_utils.days_per_year
+    co_last_slice = co_lut.isel(doy=-1)
+    co_last_slice.coords['doy'] = co_last_slice.doy - mod_utils.days_per_year
+
+    return xr.concat([co_last_slice, co_lut, co_first_slice], dim='doy')
+
+
+def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_eqlat, prof_date,
+                    excess_co_lut=_excess_co_file):
+    """
+    Takes the baseline GEOS CO profile and adds the mesospheric contribution to the stratosphere.
+
+    The GEOS FP-IT product includes CO profiles, however it does not account for CO drawn down from the mesosphere into
+    the stratosphere. This function adds an estimated contribution of mesospheric CO, derived from ACE-FTS data.
+
+    :param base_co_profile: the baseline CO profile in ppb.
+    :type base_co_profile: array-like
+
+    :param pt_profile: the altitudes that the CO profile is defined on, in kilometers.
+    :type pt_profile: array-like
+
+    :param pres_profile: the pressure levels that the CO profile is defined on.
+    :type pres_profile: array-like
+
+    :param pt_profile: the potential temperature profile on the same levels as the CO profile, in Kelvin.
+    :type pt_profile: array-like
+
+    :param trop_pres: the tropopause pressure, in the same units as the pressure profile.
+    :type trop_pres: float
+
+    :param prof_eqlat: the equivalent latitude profile, in degrees north.
+    :type prof_eqlat: arrary-like
+
+    :param prof_date: the date of the profile
+    :type prof_date: datetime-like
+
+    :param excess_co_lut: the path to the lookup table with the excess mesospheric CO. If not given, the standard table
+     file included in the repo is used. This file is created with
+     :func:`ggg_inputs.priors.backend_analysis.ace_fts_analysis.make_excess_co_lut`.
+    :type excess_co_lut: str
+
+    :return: the CO profile with the CO from mesospheric descent added.
+    :rtype: array-like
+    """
+    prof_doy = mod_utils.day_of_year(prof_date)
+
+    co_lut = _load_co_lut(excess_co_lut)
+
+    # Get the profile for the right equivalent latitude for each altitude
+    xx_overworld = mod_utils.is_overworld(pt_profile, pres_profile, trop_pres)
+
+    level_ind = np.arange(np.size(base_co_profile))[xx_overworld]
+    level_coords = [('idx', level_ind)]
+    prof_eqlat = xr.DataArray(prof_eqlat[xx_overworld], coords=level_coords)
+    pt_profile = xr.DataArray(pt_profile[xx_overworld], coords=level_coords)
+    doy_grid = xr.DataArray(np.full(prof_eqlat.shape, prof_doy), coords=level_coords)
+
+    extra_co_prof = co_lut.interp(theta=pt_profile, lat=prof_eqlat, doy=doy_grid).data
+    base_co_profile[xx_overworld] += extra_co_prof
+
+    return base_co_profile
 
 
 def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentration_record, site_abbrev='xx',
@@ -2030,8 +2165,8 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, theta_trop_met,
-                                         concentration_record, profs_latency=latency_profs,
+    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, p_prof, theta_trop_met,
+                                         p_trop_met, concentration_record, profs_latency=latency_profs,
                                          prof_world_flag=stratum_flag, gas_record_dates=gas_date_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
 

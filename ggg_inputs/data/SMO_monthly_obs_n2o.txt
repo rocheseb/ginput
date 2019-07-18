@@ -15,7 +15,7 @@
 # comment: may be appropriate.  This should be discussed at an early stage in
 # comment: the work.  Manuscripts using the ESRL data should be sent to ESRL
 # comment: for review before they are submitted for publication so we can
-# comment: insure that the quality and limitations of the data are accurately
+# comment: ensure that the quality and limitations of the data are accurately
 # comment: represented.
 # comment:  
 # comment: Every effort is made to produce the most accurate and precise
@@ -60,7 +60,7 @@
 # description_project-abbr: ccg_surface
 # description_strategy-abbr: flask
 # description_analysis-constraints: flag:..%
-# description_creation-time: 2018-08-02 13:12:46
+# description_creation-time: 2019-07-16 13:51:47
 # comment:
 # comment:  ************ DATA DOCUMENTATION ***************
 # comment:
@@ -168,7 +168,7 @@ SMO 2005  5   318.35
 SMO 2005  6   317.96
 SMO 2005  7   318.19
 SMO 2005  8   318.46
-SMO 2005  9   318.56
+SMO 2005  9   318.57
 SMO 2005 10   318.84
 SMO 2005 11   319.24
 SMO 2005 12   319.56
@@ -203,7 +203,7 @@ SMO 2008  4   321.32
 SMO 2008  5   321.57
 SMO 2008  6   321.50
 SMO 2008  7   321.26
-SMO 2008  8   321.12
+SMO 2008  8   321.11
 SMO 2008  9   321.14
 SMO 2008 10   321.29
 SMO 2008 11   321.54
@@ -316,4 +316,15 @@ SMO 2017  9   329.62
 SMO 2017 10   329.78
 SMO 2017 11   329.88
 SMO 2017 12   330.10
-
+SMO 2018  1   330.37
+SMO 2018  2   330.58
+SMO 2018  3   330.79
+SMO 2018  4   330.80
+SMO 2018  5   330.48
+SMO 2018  6   330.25
+SMO 2018  7   330.33
+SMO 2018  8   330.51
+SMO 2018  9   330.75
+SMO 2018 10   331.15
+SMO 2018 11   331.50
+SMO 2018 12   331.62
