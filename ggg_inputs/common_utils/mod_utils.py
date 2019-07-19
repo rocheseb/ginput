@@ -15,6 +15,7 @@ import netCDF4 as ncdf
 import numpy as np
 from numpy import ma
 import os
+from packaging import version
 import pandas as pd
 import re
 
@@ -462,8 +463,33 @@ def write_map_file(map_file, site_lat, trop_eqlat, prof_ref_lat, surface_alt, tr
                 mapf.write('\n')
 
 
-def vmr_file_name(site_abbrev, obs_date):
-    return '{site}_{date}.vmr'.format(site=site_abbrev, date=obs_date.strftime('%Y%m%d_%H%M'))
+def vmr_file_name(obs_date, lon, lat, keep_latlon_prec=False):
+    """
+    Construct the standard filename for a .vmr file produced by this code
+
+    :param obs_date: the datetime of the profiles
+    :type obs_date: datetime-like
+
+    :param lon: the longitude of the profiles.
+    :type lon: float
+
+    :param lat: the latitude of the profiles
+    :type lat: float
+
+    :param keep_latlon_prec: by default, lat and lon are rounded to the nearest whole number. Set this to ``True`` to
+     keep 2 decimal places of precision.
+    :type keep_latlon_prec: bool
+
+    :return: the .vmr file name, with format "JLv_yyyymmddhh_XX[NS]_YYY[EW].vmr" where "v" is the major version,
+     "yyyymmddhh" the date/time, XX[NS] the latitude and YYY[EW] the longitude.
+    :rtype: str
+    """
+    prec = 2 if keep_latlon_prec else 0
+    lat = format_lat(lat, prec=prec)
+    lon = format_lon(lon, prec=prec, zero_pad=True)
+    major_version = version.parse(const.priors_version).release[0]
+    return 'JL{ver}_{date}_{lat}_{lon}.vmr'.format(ver=major_version, date=obs_date.strftime('%Y%m%d%H'),
+                                                   lat=lat, lon=lon)
 
 
 def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_alt, profile_gases, isotope_opts=None):
@@ -550,10 +576,33 @@ def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True):
     return {'scalar': header_data, 'profile': data_table}
 
 
-def format_lon(lon, prec=2):
+def format_lon(lon, prec=2, zero_pad=False):
+    """
+    Convert longitude between string and numeric representations.
+
+    If ``lon`` is a number, then it is converted to a string. The string will be the absolute value with "W" or "E" at
+    the end to indicate west (<= 0) or east (> 0). If given a string in that format, it converts it to a number.
+
+    :param lon: the longitude to convert
+    :type lon: float or str
+
+    :param prec: the precision after the decimal point to use. Only has an effect when converting float to string.
+    :type prec: int
+
+    :param zero_pad: set to ``True`` to zero pad the longitude string so that there are 3 digits before the decimal
+     place. Only has an effect when converting float to string.
+
+    :return: the formatted longitude string or the float representation of the longitude, with west being negative.
+    :rtype: str or float
+    """
     def to_str(lon):
         ew = 'E' if lon > 0 else 'W'
-        fmt_str = '{{:.{}f}}{{}}'.format(prec)
+        # In Python float format specification, "0X.Y" means to zero pad so that there's X total characters and Y after
+        # the decimal point. We want lon zero padded to have three numbers before the decimal point, so the total width
+        # needs to be the precision + 4 if there will be a decimal point otherwise just 3.
+        width = prec + 4 if prec > 0 else prec + 3
+        pad = '0{}'.format(width) if zero_pad else ''
+        fmt_str = '{{:{padding}.{prec}f}}{{}}'.format(padding=pad, prec=prec)
         return fmt_str.format(abs(lon), ew)
 
     def to_float(lon):
@@ -569,13 +618,38 @@ def format_lon(lon, prec=2):
     if isinstance(lon, str):
         return to_float(lon)
     else:
+        if lon > 180:
+            lon -= 360
         return to_str(lon)
 
 
-def format_lat(lat, prec=2):
+def format_lat(lat, prec=2, zero_pad=False):
+    """
+    Convert latitude between string and numeric representations.
+
+    If ``lat`` is a number, then it is converted to a string. The string will be the absolute value with "N" or "S" at
+    the end to indicate south (<= 0) or north (> 0). If given a string in that format, it converts it to a number.
+
+    :param lat: the latitude to convert
+    :type lat: float or str
+
+    :param prec: the precision after the decimal point to use. Only has an effect when converting float to string.
+    :type prec: int
+
+    :param zero_pad: set to ``True`` to zero pad the latitude string so that there are 2 digits before the decimal
+     place. Only has an effect when converting float to string.
+
+    :return: the formatted latitude string or the float representation of the latitude, with south being negative.
+    :rtype: str or float
+    """
     def to_str(lat):
         ns = 'N' if lat > 0 else 'S'
-        fmt_str = '{{:.{}f}}{{}}'.format(prec)
+        # In Python float format specification, "0X.Y" means to zero pad so that there's X total characters and Y after
+        # the decimal point. We want lat zero padded to have two numbers before the decimal point, so the total width
+        # needs to be the precision + 3 if there will be a decimal point otherwise just 2.
+        width = prec + 3 if prec > 0 else prec + 2
+        pad = '0{}'.format(width) if zero_pad else ''
+        fmt_str = '{{:{padding}.{prec}f}}{{}}'.format(padding=pad, prec=prec)
         return fmt_str.format(abs(lat), ns)
 
     def to_float(lat):

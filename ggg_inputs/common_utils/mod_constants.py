@@ -14,3 +14,5 @@ _mydir = os.path.dirname(__file__)
 data_dir = os.path.abspath(os.path.join(_mydir, '..', 'data'))
 
 days_per_year = 365.25
+
+priors_version = '1.0.0'
