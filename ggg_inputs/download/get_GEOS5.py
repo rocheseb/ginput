@@ -5,6 +5,7 @@ import argparse
 import os
 from datetime import datetime, timedelta
 from subprocess import Popen, PIPE, CalledProcessError
+import sys
 
 from . import download_utils as dlutils
 from ..common_utils.ggg_logging import logger
@@ -146,11 +147,13 @@ def parse_args(parser=None):
     parser.add_argument('--path', default='.', help='Where to download the GEOS data to. Default is %(default)s. Data '
                                                     'will be placed in Np, Nv, and Nx subdirectories automatically '
                                                     'created in this directory.')
-    parser.add_argument('-t', '--filetypes', default='met', choices=_file_types,
+    parser.add_argument('-t', '--filetypes', default=None, choices=_file_types,
                         help='Which file types to download. Default is to download met files')
-    parser.add_argument('-l', '--levels', default='p', choices=_level_types,
+    parser.add_argument('-l', '--levels', default=None, choices=_level_types,
                         help='Which level type to download. Note that only "eta" levels are available for the "chm" '
                              'file type.')
+    parser.epilog = 'If both --filetypes and --levels are omitted, then the legacy behavior is to download met data ' \
+                    'for the surface and on fixed pressure levels. However, if one is given, then both must be given.'
 
     if am_i_main:
         args = vars(parser.parse_args())
@@ -163,16 +166,48 @@ def parse_args(parser=None):
         parser.set_defaults(driver_fxn=driver)
 
 
-def driver(date_range, mode='FP', path='.', filetypes=_default_file_type, levels=_default_level_type, **kwargs):
-    start, end = date_range
-    outpath = os.path.join(path, _std_out_paths[levels])
-    if not os.path.exists(outpath):
-        logger.info('Creating {}'.format(outpath))
-        os.makedirs(outpath)
+def check_types_levels(filetypes, levels):
+    if filetypes is None and levels is None:
+        filetypes = ('met', 'met')
+        levels = ('surf', 'p')
+    elif (filetypes is None) != (levels is None):
+        raise TypeError('Both or neither of filetypes and levels must be given (not None)')
 
-    _func_dict[mode](start, end, filetype=filetypes, levels=levels, outpath=os.path.join(outpath, 'getGEOS.dat'))
-    for line in execute('wget -N -i getGEOS.dat'.split(), cwd=outpath):
-        print(line, end="")
+    if isinstance(filetypes, str):
+        filetypes = (filetypes,)
+
+    if isinstance(levels, str):
+        levels = (levels,)
+
+    if len(filetypes) != len(levels):
+        raise ValueError('filetypes and levels must be the same length, if multiple options are given as lists/tuples')
+
+    return filetypes, levels
+
+
+def driver(date_range, mode='FP', path='.', filetypes=_default_file_type, levels=_default_level_type, **kwargs):
+    """
+    
+    :param date_range:
+    :param mode:
+    :param path:
+    :param filetypes:
+    :param levels:
+    :param kwargs:
+    :return:
+    """
+    filetypes, levels = check_types_levels(filetypes, levels)
+
+    start, end = date_range
+    for ftype, ltype in zip(filetypes, levels):
+        outpath = os.path.join(path, _std_out_paths[ltype])
+        if not os.path.exists(outpath):
+            logger.info('Creating {}'.format(outpath))
+            os.makedirs(outpath)
+
+        _func_dict[mode](start, end, filetype=ftype, levels=ltype, outpath=os.path.join(outpath, 'getGEOS.dat'))
+        for line in execute('wget -N -i getGEOS.dat'.split(), cwd=outpath):
+            print(line, end="")
 
 
 ########
