@@ -1034,8 +1034,8 @@ def parse_args(parser=None):
                         help='The range of dates to generate .mod files for. May be given as YYYYMMDD-YYYYMMDD, or '
                              'YYYYMMDD_HH-YYYYMMDD_HH, where the ending date is exclusive. A single date may be given, '
                              'in which case the ending date is assumed to be one day later.')
-    parser.add_argument('GEOS_path', help='Path to the GEOS FP(-IT) netCDF files. Must be directory with subdirectories '
-                                          'Nx and Np, containing surface and profile paths respectively.')
+    parser.add_argument('met_path', help='Path to the meteorology FP(-IT) netCDF files. Must be directory with subdirectories '
+                                          'Nx and Np or Nv, containing surface and profile paths respectively.')
     parser.add_argument('-s', '--save-path', help='Location to save .mod files to. Subdirectories organized by met type, '
                                                   'site, and vertical/slant .mod files will be created. If not given, '
                                                   'will attempt to save files under $GGGPATH/models/gnd')

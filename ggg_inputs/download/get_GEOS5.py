@@ -83,7 +83,7 @@ def URLlist_FPIT(start, end, timestep=timedelta(hours=3), outpath='', filetype=_
     filetype = filetype.lower()
     levels = levels.lower()
 
-    if filetype == '3dmet':
+    if filetype == 'met':
         if levels == 'p':
             fmt = "http://goldsfs1.gesdisc.eosdis.nasa.gov/data/GEOS5/DFPITI3NPASM.5.12.4/{yr}/{doy:0>3}/.hidden/GEOS.fpit.asm.inst3_3d_asm_Np.GEOS5124.{ymd}_{hr:0>2}00.V01.nc4\n"
         elif levels == 'eta':
@@ -144,8 +144,8 @@ def parse_args(parser=None):
                         help='Which GEOS product to get. The default is %(default)s. Note that to retrieve FP-IT data '
                              'requires a subscription with NASA (https://gmao.gsfc.nasa.gov/GMAO_products/)')
     parser.add_argument('--path', default='.', help='Where to download the GEOS data to. Default is %(default)s. Data '
-                                                    'will be placed in Np and Nx subdirectories automatically created '
-                                                    'in this directory.')
+                                                    'will be placed in Np, Nv, and Nx subdirectories automatically '
+                                                    'created in this directory.')
     parser.add_argument('-t', '--filetypes', default='met', choices=_file_types,
                         help='Which file types to download. Default is to download met files')
     parser.add_argument('-l', '--levels', default='p', choices=_level_types,
@@ -165,15 +165,14 @@ def parse_args(parser=None):
 
 def driver(date_range, mode='FP', path='.', filetypes=_default_file_type, levels=_default_level_type, **kwargs):
     start, end = date_range
-    for ftype in filetypes:
-        outpath = os.path.join(path, _std_out_paths[ftype])
-        if not os.path.exists(outpath):
-            logger.info('Creating {}'.format(outpath))
-            os.makedirs(outpath)
+    outpath = os.path.join(path, _std_out_paths[levels])
+    if not os.path.exists(outpath):
+        logger.info('Creating {}'.format(outpath))
+        os.makedirs(outpath)
 
-        _func_dict[mode](start, end, filetype=ftype, levels=levels, outpath=os.path.join(outpath, 'getGEOS.dat'))
-        for line in execute('wget -N -i getGEOS.dat'.split(), cwd=outpath):
-            print(line, end="")
+    _func_dict[mode](start, end, filetype=filetypes, levels=levels, outpath=os.path.join(outpath, 'getGEOS.dat'))
+    for line in execute('wget -N -i getGEOS.dat'.split(), cwd=outpath):
+        print(line, end="")
 
 
 ########
