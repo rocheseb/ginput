@@ -175,9 +175,13 @@ def check_types_levels(filetypes, levels):
 
     if isinstance(filetypes, str):
         filetypes = (filetypes,)
+    if any(f not in _file_types for f in filetypes):
+        raise ValueError('filetypes must be one of: {}'.format(', '.join(_file_types)))
 
     if isinstance(levels, str):
         levels = (levels,)
+    if any(l not in _level_types for l in levels):
+        raise ValueError('levels must be one of: {}'.format(', '.join(_level_types)))
 
     if len(filetypes) != len(levels):
         raise ValueError('filetypes and levels must be the same length, if multiple options are given as lists/tuples')
@@ -187,14 +191,37 @@ def check_types_levels(filetypes, levels):
 
 def driver(date_range, mode='FP', path='.', filetypes=_default_file_type, levels=_default_level_type, **kwargs):
     """
-    
-    :param date_range:
-    :param mode:
-    :param path:
-    :param filetypes:
-    :param levels:
-    :param kwargs:
-    :return:
+    Run get_GEOS5 as if called from the command line.
+
+    A note on the ``filetypes`` and ``levels`` parameters. If both are ``None``, then this will automatically download
+    met data for the surface and fixed pressure levels. Otherwise they can be strings or collections (lists, tuples)
+    of strings. Both must be the same length if given as collections (a string counts as a 1-element collection).
+    Specifying collections allows you to download multiple sets of files with a single call. For example, the ``None``
+    behavior of downloading surface and fixed-pressure level met files is equivalent to setting
+    ``filetypes=['met', 'met']`` and ``levels=['surf', 'p']``.
+
+    :param date_range: the range of dates to retrieve as a two-element collection. The second date is exclusive.
+    :type date_range: list(datetime-like)
+
+    :param mode: one of the strings "FP" or "FPIT", determines which GEOS product to download.
+    :type mode: str
+
+    :param path: the path to download GEOS files to. Files will be automatically sorted into subdirectories "Nx", "Np",
+     and "Nv" for surface, pressure-level, and native-level files, respectively. This directories are created if needed.
+    :type path: str
+
+    :param filetypes: a string or collection of strings specifying which types of file (meteorology: "met", chemistry:
+     "chm") to download.  See the note above about the relationship between ``filetypes`` and ``levels``.
+    :type filetypes: str, list(str), or None
+
+    :param levels: a string of collection of strings specifying which level type to download. Options are "surf" for
+     2D fields, "p" for fixed pressure level files, and "eta" for the native terrain following levels. See the note
+     above about the relationship between ``filetypes`` and ``levels``.
+    :type levels: str, list(str), or None
+
+    :param kwargs: unused, swallows extra keyword arguments.
+
+    :return: none, downloads GEOS files to ``path``.
     """
     filetypes, levels = check_types_levels(filetypes, levels)
 
