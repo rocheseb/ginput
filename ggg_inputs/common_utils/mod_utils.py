@@ -303,6 +303,27 @@ def read_map_file(map_file, as_dataframes=False, skip_header=False):
     return out_dict
 
 
+def read_integral_file(integral_file, as_dataframes=False):
+    """
+    Read an integral file that defines an altitude grid for GGG
+
+    :param integral_file: the path to the integral file
+    :type integral_file: str
+
+    :param as_dataframes: if ``True``, the information in the file is returned as a single dataframe. If ``False``, it
+     is returned as a dict of numpy arrays.
+    :type as_dataframes: bool
+
+    :return: the table of altitudes and mean molecular weights.
+    :rtype: :class:`pandas.DataFrame` or dict
+    """
+    df = pd.read_csv(integral_file, sep=r'\s+', header=None, names=['Height', 'mmw'])
+    if as_dataframes:
+        return df
+    else:
+        return {k: v.to_numpy() for k, v in df.items()}
+
+
 def read_isotopes(isotopes_file, gases_only=False):
     """
     Read the isotopes defined in an isotopologs.dat file

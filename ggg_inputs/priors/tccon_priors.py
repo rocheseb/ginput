@@ -2035,7 +2035,7 @@ def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_e
 
 
 def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentration_record, site_abbrev='xx',
-                                use_geos_grid=True, use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
+                                use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
 
@@ -2057,10 +2057,6 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
     :param site_abbrev: the two-letter site abbreviation. Currently only used in naming the output file.
     :type site_abbrev: str
-
-    :param use_geos_grid: when ``True``, the native 42-level GEOS-FP pressure grid is used as the vertical grid for the
-     CO2 profiles. Set to ``False`` to use a grid with 1 km altitude spacing
-    :type use_geos_grid: bool
 
     :param use_eqlat_trop: when ``True``, the latitude used for age-of-air and seasonal cycle calculations is calculate
      based on the climatology of latitude vs. mid-tropospheric potential temperature. When ``False``, the geographic
@@ -2130,35 +2126,18 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     # average of the Mauna Loa and Samoa CO2 concentration using the existing GGG age-of-air parameterization assuming
     # a reference latitude of 0 deg. That will be used to set the base CO2 profile, which will then have a parameterized
     # seasonal cycle added on top of it.
+    t_met = mod_file_data['profile']['Temperature']
+    p_met = mod_file_data['profile']['Pressure']
 
-    if use_geos_grid:
-        z_prof = z_met
-        theta_prof = theta_met
-        eq_lat_prof = eq_lat_met
-        t_prof = mod_file_data['profile']['Temperature']
-        p_prof = mod_file_data['profile']['Pressure']
-    else:
-        # z_prof = np.arange(0., 71.)  # altitude levels 0 to 70 kilometers
-        z_prof = np.arange(0., 65.)
-        theta_prof = mod_utils.mod_interpolation_new(z_prof, z_met, theta_met, interp_mode='linear')
-        # Not sure what the theoretical relationship between equivalent latitude and altitude is, and plotting it is too
-        # bouncy to tell, so just going to assume linear for now.
-        eq_lat_prof = mod_utils.mod_interpolation_new(z_prof, z_met, eq_lat_met, interp_mode='linear')
-        # For the map file we'll also want regular temperature and pressure on the grid
-        t_prof = mod_utils.mod_interpolation_new(z_prof, z_met, mod_file_data['profile']['Temperature'],
-                                                 interp_mode='linear')
-        p_prof = mod_utils.mod_interpolation_new(z_prof, z_met, mod_file_data['profile']['Pressure'],
-                                                 interp_mode='lin-log')
-
-    n_lev = np.size(z_prof)
-    gas_prof = np.full_like(z_prof, np.nan)
+    n_lev = np.size(z_met)
+    gas_prof = np.full_like(z_met, np.nan)
     gas_date_prof = np.full((n_lev,), None)
     latency_profs = np.full((n_lev,), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
     # gas_prof is modified in-place
-    _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, z_prof, z_surf, z_trop_met, concentration_record,
-                                       pres_grid=p_prof, theta_grid=theta_prof, use_theta_eqlat=use_eqlat_trop,
+    _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, z_met, z_surf, z_trop_met, concentration_record,
+                                       pres_grid=p_met, theta_grid=theta_met, use_theta_eqlat=use_eqlat_trop,
                                        profs_latency=latency_profs, prof_world_flag=stratum_flag,
                                        prof_gas_date=gas_date_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
@@ -2167,7 +2146,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_prof, eq_lat_prof, p_prof, theta_trop_met,
+    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_met, eq_lat_met, p_met, theta_trop_met,
                                          p_trop_met, concentration_record, profs_latency=latency_profs,
                                          prof_world_flag=stratum_flag, gas_record_dates=gas_date_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
@@ -2175,7 +2154,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     # Finally prepare the output, writing a .map file if needed.
     gas_name = concentration_record.gas_name
     gas_unit = concentration_record.gas_unit
-    map_dict = {'Height': z_prof, 'Temp': t_prof, 'Pressure': p_prof, 'PT': theta_prof, 'EqL': eq_lat_prof,
+    map_dict = {'Height': z_met, 'Temp': t_met, 'Pressure': p_met, 'PT': theta_met, 'EqL': eq_lat_met,
                 gas_name: gas_prof, 'mean_latency': latency_profs, 'trop_age_of_air': aoa_prof_trop,
                 'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'gas_date': gas_date_prof,
                 'gas_record_dates': gas_date_prof}
