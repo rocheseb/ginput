@@ -2034,7 +2034,7 @@ def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_e
     return base_co_profile
 
 
-def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentration_record, site_abbrev='xx',
+def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record, site_abbrev='xx',
                                 use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
@@ -2043,11 +2043,8 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
      dictionary from :func:`~mod_utils.read_mod_file`.
     :type mod_file_data: str or dict
 
-    :param obs_date: the date of the observation
-    :type obs_date: datetime-like object
-
-    :param utc_offset: a timedelta giving the difference between the ``obs_date`` and UTC time. For example, if the
-     ``obs_date`` was given in US Pacific Standard Time, this should be ``timedelta(hours=-8). This is used to correct
+    :param utc_offset: a timedelta giving the difference between the ``file_date`` and UTC time. For example, if the
+     ``file_date`` was given in US Pacific Standard Time, this should be ``timedelta(hours=-8). This is used to correct
      the date to UTC to ensure the CO2 from the right time is used.
 
     :param concentration_record: which species to generate the prior profile for. Must be the proper subclass of
@@ -2087,10 +2084,11 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
         raise TypeError('If write_map is truthy, then it must be a string')
 
     obs_lat = mod_file_data['constants']['obs_lat']
+    file_date = mod_file_data['file']['datetime']
     file_lat = mod_file_data['file']['lat']
     file_lon = mod_file_data['file']['lon']
     # Make the UTC date a datetime object that is rounded to a date (hour/minute/etc = 0)
-    obs_utc_date = dt.datetime.combine((obs_date - utc_offset).date(), dt.time())
+    obs_utc_date = dt.datetime.combine((file_date - utc_offset).date(), dt.time())
 
     z_surf = mod_file_data['scalar']['Height']
     z_met = mod_file_data['profile']['Height']
@@ -2163,12 +2161,13 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
                   'gas_date': 'yr', 'gas_date_width': 'yr', 'gas_record_dates': 'UTC date'}
     var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EqL', gas_name, 'mean_latency', 'trop_age_of_air',
                  'strat_age_of_air', 'atm_stratum', 'gas_date')
-    map_constants = {'site_lon': file_lon, 'site_lat': file_lat, 'trop_eqlat': trop_eqlat, 'prof_ref_lat': trop_ref_lat,
-                     'surface_alt': z_surf, 'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
+    map_constants = {'site_lon': file_lon, 'site_lat': file_lat, 'datetime': file_date, 'trop_eqlat': trop_eqlat,
+                     'prof_ref_lat': trop_ref_lat, 'surface_alt': z_surf, 'tropopause_alt': z_trop_met,
+                     'strat_used_eqlat': use_eqlat_strat}
     converters = {'gas_date': mod_utils.date_to_decimal_year}
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
-        map_name = os.path.join(map_dir, mod_utils.map_file_name(site_abbrev, obs_lat, obs_date))
+        map_name = os.path.join(map_dir, mod_utils.map_file_name(site_abbrev, obs_lat, file_date))
         mod_utils.write_map_file(map_file=map_name, site_lat=obs_lat, trop_eqlat=trop_eqlat, prof_ref_lat=trop_ref_lat,
                                  surface_alt=z_surf, tropopause_alt=z_trop_met, strat_used_eqlat=use_eqlat_strat,
                                  variables=map_dict, units=units_dict, var_order=var_order, converters=converters)
@@ -2176,7 +2175,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
     return map_dict, units_dict, map_constants
 
 
-def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site_abbrevs='xx', write_maps=False,
+def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='xx', write_maps=False,
                                  write_vmrs=False, isotope_file_opts=None, keep_latlon_prec=False, **prior_kwargs):
     """
     Generate multiple TCCON priors or a file containing multiple gas concentrations
@@ -2219,7 +2218,7 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
     :param prior_kwargs:
     :return:
     """
-    num_profiles = max(np.size(inpt) for inpt in [mod_data, obs_dates, utc_offsets, site_abbrevs])
+    num_profiles = max(np.size(inpt) for inpt in [mod_data, utc_offsets, site_abbrevs])
 
     def check_input(inpt, name, allowed_types):
         type_err_msg = '{} must be either a collection or single instance of one of the types: {}'.format(
@@ -2258,7 +2257,6 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
     # Input checking. Make sure these are the right type and either the same size as each other or a single value. In
     # the latter case, replicate it. These will have one
     mod_data = check_input(mod_data, 'mod_data', (str, dict))
-    obs_dates = check_input(obs_dates, 'obs_dates', (dt.datetime, pd.Timestamp))
     utc_offsets = check_input(utc_offsets, 'utc_offsets', (dt.timedelta, pd.Timedelta))
     site_abbrevs = check_input(site_abbrevs, 'site_abbrevs', (str,))
 
@@ -2283,7 +2281,7 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
             gas_name = specie_record.gas_name
             var_order.append(specie_record.gas_name)
             specie_profile, specie_units, specie_constants = \
-                generate_single_tccon_prior(mod_data[iprofile], obs_dates[iprofile], utc_offsets[iprofile],
+                generate_single_tccon_prior(mod_data[iprofile], utc_offsets[iprofile],
                                             specie_record, site_abbrev=site_abbrevs[iprofile], write_map=False,
                                             **prior_kwargs)
 
@@ -2306,16 +2304,17 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
         # Write the combined .map file for all the requested species
         site_lat = specie_constants['site_lat']
         site_lon = specie_constants['site_lon']
+        site_date = specie_constants['datetime']
         if write_maps:
-            map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], site_lat, obs_dates[iprofile]))
+            map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], site_lat, site_date))
             mod_utils.write_map_file(map_name, variables=profile_dict, units=units_dict, var_order=var_order,
                                      **map_constants)
         if write_vmrs:
-            vmr_name = mod_utils.vmr_file_name(obs_date=obs_dates[iprofile], lon=site_lon, lat=site_lat,
+            vmr_name = mod_utils.vmr_file_name(obs_date=site_date, lon=site_lon, lat=site_lat,
                                                keep_latlon_prec=keep_latlon_prec)
             vmr_name = os.path.join(vmrs_dir, vmr_name)
             mod_utils.write_vmr_file(vmr_name, tropopause_alt=specie_constants['tropopause_alt'],
-                                     profile_date=obs_dates[iprofile], profile_lat=site_lat,
+                                     profile_date=site_date, profile_lat=site_lat,
                                      profile_alt=specie_profile['Height'], profile_gases=vmr_gases,
                                      isotope_opts=isotope_file_opts)
 
@@ -2357,8 +2356,9 @@ def prior_wrapper(i, my_co2, ntimes, nlat, nlon, geos_prof_data, geos_surf_data,
             mod_dict['scalar'][mod_name] = var_arr[itime, ilat, ilon]
 
     mod_dict['constants'] = {'obs_lat': geos_prof_data['lat'][ilat]}
+    mod_dict['file'] = {'datetime': geos_dates[itime], 'lat': geos_prof_data['lat'][ilat], 'lon': geos_prof_data['lon'][ilon]}
 
-    map_dict, _ = generate_single_tccon_prior(mod_dict, geos_dates[itime], dt.timedelta(hours=0), **prior_kwargs)
+    map_dict, _ = generate_single_tccon_prior(mod_dict, dt.timedelta(hours=0), **prior_kwargs)
     my_co2[itime, :, ilat, ilon] = map_dict['co2']
 
 

@@ -148,7 +148,7 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
     write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
 
 
-def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var_mapping, var_type_info):
+def _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record, var_mapping, var_type_info):
     """
     Underlying function that generates individual prior profiles in serial and parallel mode
 
@@ -164,9 +164,6 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
     :param mod_data: the dictionary representing the profile's met data, structure as a model data dictionary for the
      TCCON code.
     :type mod_data: dict
-
-    :param obs_date: the date and time of the observation corresponding to this profile
-    :type obs_date: datetime-like
 
     :param co2_record: the MLO/SMO CO2 record class instance
     :type co2_record: :class:`ggg_inputs.priors.tccon_priors.CO2TropicsRecord`
@@ -184,6 +181,8 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
      have the same keys as ``var_mapping``
     :rtype: dict, dict
     """
+    obs_date = mod_data['file']['datetime']
+
     if i_foot == 0:
         logger.info('Processing set of soundings {}'.format(i_sounding + 1))
 
@@ -211,7 +210,7 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
 
     try:
         priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
-            mod_data, obs_date, dt.timedelta(hours=0), co2_record,
+            mod_data, dt.timedelta(hours=0), co2_record,
         )
     except Exception as err:
         raise err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
@@ -871,24 +870,27 @@ def _construct_mod_dict(acos_data_dict, i_sounding, i_foot):
     :rtype: dict
     """
 
-    # This dictionary maps the variables names in the acos_data_dict (the keys) to the keys in the mod-like dict. The
-    # latter must be a 2-element collection, since that dictionary is a dict-of-dicts. The first level of keys defines
-    # whether the variable is 3D ("profile"), 2D ("scalar") or fixed ("constant") and the second is the actual variable
-    # name. Note that these must match the expected structure of a .mod file EXACTLY.
-    var_mapping = {'el': ['profile', 'EL'],
-                   'temperature': ['profile', 'Temperature'],
-                   'pressure': ['profile', 'Pressure'],
-                   'theta': ['profile', 'PT'],
-                   'altitude': ['profile', 'Height'],
-                   'surf_alt': ['scalar', 'Height'],  # need to read in
-                   'latitude': ['constants', 'obs_lat'],
-                   'trop_temperature': ['scalar', 'TROPT'],  # need to read in
-                   'trop_pressure': ['scalar', 'TROPPB']}  # need to read in
+    # This list maps the variables names in the acos_data_dict (the keys) to the keys in the mod-like dict. The list
+    # must be a list of tuples. In each tuple, the first element defines the key in acos_data_dict. The second element
+    # is itself a list where the first element is the group in the mod_dict ("file", "constants", "scalar", or
+    # "profile") and the second the actual variable name.
+    var_mapping = [('el', ['profile', 'EqL']),
+                   ('temperature', ['profile', 'Temperature']),
+                   ('pressure', ['profile', 'Pressure']),
+                   ('theta', ['profile', 'PT']),
+                   ('altitude', ['profile', 'Height']),
+                   ('surf_alt', ['scalar', 'Height']),  # need to read in
+                   ('latitude', ['constants', 'obs_lat']),
+                   ('latitude', ['file', 'lat']),
+                   ('longitude', ['file', 'lon']),
+                   ('dates', ['file', 'datetime']),
+                   ('trop_temperature', ['scalar', 'TROPT']),  # need to read in
+                   ('trop_pressure', ['scalar', 'TROPPB'])]  # need to read in
 
-    subgroups = set([l[0] for l in var_mapping.values()])
+    subgroups = set([l[1][0] for l in var_mapping])
     mod_dict = {k: dict() for k in subgroups}
 
-    for acos_var, (mod_group, mod_var) in var_mapping.items():
+    for acos_var, (mod_group, mod_var) in var_mapping:
         # For 3D vars this slicing will create a vector. For 2D vars, it will create a scalar
         tmp_val = acos_data_dict[acos_var][i_sounding, i_foot]
         # The profile variables need flipped b/c for ACOS they are arranged space-to-surface,

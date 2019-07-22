@@ -237,11 +237,7 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
     for k, files in grouped_mod_files.items():
         this_out_dir = os.path.join(prior_dir, k)
         for f in files:
-            fbase = os.path.basename(f)
-            datestr = re.search(r'^\d{8}_\d{4}Z', fbase).group()
-            obs_date = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
-
-            these_args = (f, obs_date, this_out_dir, gas_rec)
+            these_args = (f, this_out_dir, gas_rec)
             prior_args.append(these_args)
 
     if nprocs == 0:
@@ -252,10 +248,10 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
             pool.starmap(_prior_helper, prior_args)
 
 
-def _prior_helper(ph_f, ph_obs_date, ph_out_dir, gas_rec):
+def _prior_helper(ph_f, ph_out_dir, gas_rec):
     _fbase = os.path.basename(ph_f)
-    print('Processing {} ({}), saving to {}'.format(_fbase, ph_obs_date.strftime('%Y-%m-%d'), ph_out_dir))
-    tccon_priors.generate_single_tccon_prior(ph_f, ph_obs_date, tdel(hours=0), gas_rec, write_map=ph_out_dir,
+    print('Processing {}, saving to {}'.format(_fbase, ph_out_dir))
+    tccon_priors.generate_single_tccon_prior(ph_f, tdel(hours=0), gas_rec, write_map=ph_out_dir,
                                              use_eqlat_strat=True)
 
 

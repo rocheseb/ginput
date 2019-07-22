@@ -31,8 +31,7 @@ class TestModMaker(unittest.TestCase):
         # Eventually we will probably need two testing modes - one that uses the precalculated strat LUTs and one that
         # recalculates them and either verifies them against the saved LUTs or runs the priors with them.
         mod_files = [f for f in test_utils.iter_mod_file_pairs(test_utils.mod_input_dir, None)]
-        mod_dates = [mod_utils.datetime_from_geos_filename(f) for f in mod_files]
-        tccon_priors.generate_tccon_priors_driver(mod_files, mod_dates, dt.timedelta(hours=0), records_list,
+        tccon_priors.generate_tccon_priors_driver(mod_files, dt.timedelta(hours=0), records_list,
                                                   site_abbrevs=test_utils.test_site,
                                                   write_vmrs=test_utils.vmr_output_dir)
 
