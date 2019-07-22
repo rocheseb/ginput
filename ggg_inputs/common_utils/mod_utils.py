@@ -1506,6 +1506,34 @@ def mod_interpolation_new(z_grid, z_met, vals_met, interp_mode='linear'):
     return vals_grid
 
 
+def interp_tropopause_height_from_pressure(p_trop_met, p_met, z_met):
+    """
+    Calculate the tropopause height by interpolating to the tropopause pressure
+
+    :param p_trop_met: the blended tropopause pressure from GEOS Nx files.
+    :type p_trop_met: float
+
+    :param p_met: the vector of pressure for this profile. Must be in the same units as ``p_trop_met``.
+    :type p_met: array-like
+
+    :param z_met: the vector of altitude levels for this profile.
+    :type z_met: array-like
+
+    :return: the tropopause altitude, in the same units as ``z_met``.
+    :rtype: float
+    """
+    # The age-of-air calculation used for the tropospheric trace gas profile calculation needs the tropopause altitude.
+    # Previously we'd tried finding this by interpolating to the tropopause potential temperature, in order to be
+    # consistent about defining the strat/trop separation by potential temperature. However, potential temperature
+    # does not always behave in a manner that makes interpolating to it straightforward (e.g. it crosses the tropopause
+    # theta 0 or >1 times) so we just use pressure now.
+    z_trop_met = mod_interpolation_new(p_trop_met, p_met, z_met, 'log-lin')
+    if z_trop_met < np.nanmin(z_met):
+        raise RuntimeError('Tropopause altitude calculated to be below the bottom of the profile. Something has '
+                           'gone horribly wrong.')
+    return z_trop_met
+
+
 def calc_wmo_tropopause(temperature, altitude, limit_to=(5., 18.), raise_error=True):
     """
     Find the tropopause altitude using the WMO definition

@@ -1766,9 +1766,8 @@ def adjust_zgrid(z_grid, z_trop, z_obs):
 # MAIN PRIORS FUNCTIONS #
 #########################
 
-def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_record, theta_grid=None, pres_grid=None,
-                   ref_lat=45.0, use_theta_eqlat=True, profs_latency=None, prof_aoa=None, prof_world_flag=None,
-                   prof_gas_date=None):
+def add_trop_prior(prof_gas, obs_date, obs_lat, gas_record, mod_data, ref_lat=45.0, use_theta_eqlat=True,
+                   profs_latency=None, prof_aoa=None, prof_world_flag=None, prof_gas_date=None):
     """
     Add troposphere CO2 to the prior profile.
 
@@ -1782,22 +1781,10 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
     :param obs_lat: the latitude of the retrieval (degrees, south is negative)
     :type obs_lat: float
 
-    :param z_grid: the grid of altitudes (in kilometers) that the CO2 profile is on.
-    :type z_grid: :class:`numpy.ndarray`
-
-    :param z_trop: the altitude of the tropopause (in kilometers)
-    :type z_trop: float
-
     :param gas_record: the Mauna Loa-Samoa record for the desired gas.
     :type gas_record: :class:`TraceGasTropicsRecord`
 
-    :param theta_grid: potential temperature on the same levels as ``z_grid``. Only needed is ``use_theta_eqlat`` is set
-     to ``True``.
-    :type theta_grid: :class:`numpy.ndarray`
-
-    :param pres_grid: pressure levels for the same levels as ``z_grid``. Only needed is ``use_theta_eqlat`` is set
-     to ``True``.
-    :type theta_grid: :class:`numpy.ndarray`
+    :param mod_data: the dictionary of .mod file data. Must have the tropo
 
     :param ref_lat: the reference latitude for age of air. Effectively sets where the age begins, i.e where the
      emissions are.
@@ -1827,6 +1814,12 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
 
     :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
+    # Extract the necessary data from the .mod dict
+    z_grid = mod_data['profile']['Height']
+    z_obs = mod_data['scalar']['Height']
+    theta_grid = mod_data['profile']['PT']
+    pres_grid = mod_data['profile']['Pressure']
+    z_trop = mod_utils.interp_tropopause_height_from_pressure(mod_data['scalar']['TROPPB'], pres_grid, z_grid)
 
     z_grid = adjust_zgrid(z_grid, z_trop, z_obs)
     n_lev = np.size(z_grid)
@@ -1876,11 +1869,11 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, z_grid, z_obs, z_trop, gas_recor
                                                          species=gas_record, ref_lat=ref_lat)
 
     return prof_gas, {'co2_latency': profs_latency, 'co2_date': prof_gas_date, 'age_of_air': prof_aoa,
-                      'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat}
+                      'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat, 'tropopause_alt': z_trop}
 
 
-def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres, tropopause_theta, tropopause_pres,
-                    gas_record, profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
+def add_strat_prior(prof_gas, retrieval_date, gas_record, mod_data,
+                    profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
     """
     Add the stratospheric trace gas to a TCCON prior profile
 
@@ -1891,20 +1884,8 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres,
     :param retrieval_date: the UTC date of the retrieval.
     :type retrieval_date: :class:`datetime.datetime`
 
-    :param prof_theta: the theta (potential temperature) coordinates for the TCCON profile.
-    :type prof_theta: :class:`numpy.ndarray` (in K)
-
-    :param prof_eqlat: the equivalent latitude coordinates for the TCCON profile.
-    :type prof_eqlat: :class:`numpy.ndarray` (in degrees)
-
-    :param tropopause_theta: the potential temperature at the tropopause, according to the input meteorology.
-    :type tropopause_theta: float (in K)
-
     :param gas_record: the Mauna Loa-Samoa CO2 record.
     :type gas_record: :class:`TraceGasTropicsRecord`
-
-    :param lag: the lag between the MLO/SAM record and the CO2 concentration at the tropopause.
-    :type lag: :class:`~dateutil.relativedelta.relativedelta` or :class:`datetime.timedelta`
 
     The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
     stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
@@ -1918,6 +1899,12 @@ def add_strat_prior(prof_gas, retrieval_date, prof_theta, prof_eqlat, prof_pres,
 
     :return: the updated CO2 profile and a dictionary of the ancillary profiles.
     """
+    prof_theta = mod_data['profile']['PT']
+    prof_eqlat = mod_data['profile']['EqL']
+    prof_pres = mod_data['profile']['Pressure']
+    tropopause_t = mod_data['scalar']['TROPT']  # use the blended tropopause. TODO: reference why this is best?
+    tropopause_pres = mod_data['scalar']['TROPPB']
+    tropopause_theta = mod_utils.calculate_potential_temperature(tropopause_pres, tropopause_t)
 
     n_lev = np.size(prof_gas)
     profs_latency = _init_prof(profs_latency, n_lev)
@@ -2090,28 +2077,7 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     # Make the UTC date a datetime object that is rounded to a date (hour/minute/etc = 0)
     obs_utc_date = dt.datetime.combine((file_date - utc_offset).date(), dt.time())
 
-    z_surf = mod_file_data['scalar']['Height']
-    z_met = mod_file_data['profile']['Height']
-    p_met = mod_file_data['profile']['Pressure']
-    theta_met = mod_file_data['profile']['PT']
-    eq_lat_met = mod_file_data['profile']['EqL'] if use_eqlat_strat else np.full_like(z_met, obs_lat)
-
-    # We need the tropopause potential temperature. The GEOS FP-IT files give the temperature itself, and the pressure,
-    # so we can calculate the potential temperature. Pressure needs to be in hPa, which it is by default.
-
-    t_trop_met = mod_file_data['scalar']['TROPT']  # use the blended tropopause. TODO: reference why this is best?
-    p_trop_met = mod_file_data['scalar']['TROPPB']
-    theta_trop_met = mod_utils.calculate_potential_temperature(p_trop_met, t_trop_met)
-
-    # The age-of-air calculation used for the tropospheric trace gas profile calculation needs the tropopause altitude.
-    # Previously we'd tried finding this by interpolating to the tropopause potential temperature, in order to be
-    # consistent about defining the strat/trop separation by potential temperature. However, potential temperature
-    # does not always behave in a manner that makes interpolating to it straightforward (e.g. it crosses the tropopause
-    # theta 0 or >1 times) so we just use pressure now.
-    z_trop_met = mod_utils.mod_interpolation_new(p_trop_met, p_met, z_met, 'log-lin')
-    if z_trop_met < np.nanmin(z_met):
-        raise RuntimeError('Tropopause altitude calculated to be below the bottom of the profile. Something has '
-                           'gone horribly wrong.')
+    n_lev = np.size(mod_file_data['profile']['Height'])
 
     if not isinstance(concentration_record, TraceGasTropicsRecord):
         raise TypeError('concentration_record must be a subclass instance of TraceGasTropicsRecord')
@@ -2124,53 +2090,52 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     # average of the Mauna Loa and Samoa CO2 concentration using the existing GGG age-of-air parameterization assuming
     # a reference latitude of 0 deg. That will be used to set the base CO2 profile, which will then have a parameterized
     # seasonal cycle added on top of it.
-    t_met = mod_file_data['profile']['Temperature']
-    p_met = mod_file_data['profile']['Pressure']
 
-    n_lev = np.size(z_met)
-    gas_prof = np.full_like(z_met, np.nan)
+    gas_prof = np.full((n_lev,), np.nan)
     gas_date_prof = np.full((n_lev,), None)
     latency_profs = np.full((n_lev,), np.nan)
     stratum_flag = np.full((n_lev,), -1)
 
     # gas_prof is modified in-place
-    _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, z_met, z_surf, z_trop_met, concentration_record,
-                                       pres_grid=p_met, theta_grid=theta_met, use_theta_eqlat=use_eqlat_trop,
-                                       profs_latency=latency_profs, prof_world_flag=stratum_flag,
-                                       prof_gas_date=gas_date_prof)
+    _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, concentration_record, mod_file_data,
+                                       use_theta_eqlat=use_eqlat_trop, profs_latency=latency_profs,
+                                       prof_world_flag=stratum_flag, prof_gas_date=gas_date_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
     trop_ref_lat = ancillary_trop['ref_lat']
     trop_eqlat = ancillary_trop['trop_lat']
+    z_trop_met = ancillary_trop['tropopause_alt']
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, theta_met, eq_lat_met, p_met, theta_trop_met,
-                                         p_trop_met, concentration_record, profs_latency=latency_profs,
-                                         prof_world_flag=stratum_flag, gas_record_dates=gas_date_prof)
+    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, concentration_record, mod_file_data,
+                                         profs_latency=latency_profs, prof_world_flag=stratum_flag,
+                                         gas_record_dates=gas_date_prof)
     aoa_prof_strat = ancillary_strat['age_of_air']
 
     # Finally prepare the output, writing a .map file if needed.
     gas_name = concentration_record.gas_name
     gas_unit = concentration_record.gas_unit
-    map_dict = {'Height': z_met, 'Temp': t_met, 'Pressure': p_met, 'PT': theta_met, 'EqL': eq_lat_met,
-                gas_name: gas_prof, 'mean_latency': latency_profs, 'trop_age_of_air': aoa_prof_trop,
-                'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag, 'gas_date': gas_date_prof,
-                'gas_record_dates': gas_date_prof}
+    map_dict = {'Height': mod_file_data['profile']['Height'], 'Temp': mod_file_data['profile']['Temperature'],
+                'Pressure': mod_file_data['profile']['Pressure'], 'PT': mod_file_data['profile']['PT'],
+                'EqL': mod_file_data['profile']['EqL'], gas_name: gas_prof, 'mean_latency': latency_profs,
+                'trop_age_of_air': aoa_prof_trop, 'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag,
+                'gas_date': gas_date_prof, 'gas_record_dates': gas_date_prof}
     units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EqL': 'degrees', gas_name: gas_unit,
                   'mean_latency': 'yr', 'trop_age_of_air': 'yr', 'strat_age_of_air': 'yr', 'atm_stratum': 'flag',
                   'gas_date': 'yr', 'gas_date_width': 'yr', 'gas_record_dates': 'UTC date'}
     var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EqL', gas_name, 'mean_latency', 'trop_age_of_air',
                  'strat_age_of_air', 'atm_stratum', 'gas_date')
     map_constants = {'site_lon': file_lon, 'site_lat': file_lat, 'datetime': file_date, 'trop_eqlat': trop_eqlat,
-                     'prof_ref_lat': trop_ref_lat, 'surface_alt': z_surf, 'tropopause_alt': z_trop_met,
-                     'strat_used_eqlat': use_eqlat_strat}
+                     'prof_ref_lat': trop_ref_lat, 'surface_alt': mod_file_data['scalar']['Height'],
+                     'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
     converters = {'gas_date': mod_utils.date_to_decimal_year}
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
         map_name = os.path.join(map_dir, mod_utils.map_file_name(site_abbrev, obs_lat, file_date))
         mod_utils.write_map_file(map_file=map_name, site_lat=obs_lat, trop_eqlat=trop_eqlat, prof_ref_lat=trop_ref_lat,
-                                 surface_alt=z_surf, tropopause_alt=z_trop_met, strat_used_eqlat=use_eqlat_strat,
-                                 variables=map_dict, units=units_dict, var_order=var_order, converters=converters)
+                                 surface_alt=mod_file_data['scalar']['Height'], tropopause_alt=z_trop_met,
+                                 strat_used_eqlat=use_eqlat_strat, variables=map_dict, units=units_dict,
+                                 var_order=var_order, converters=converters)
 
     return map_dict, units_dict, map_constants
 
