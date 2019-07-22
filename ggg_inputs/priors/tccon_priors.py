@@ -2091,6 +2091,8 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
         raise TypeError('If write_map is truthy, then it must be a string')
 
     obs_lat = mod_file_data['constants']['obs_lat']
+    file_lat = mod_file_data['file']['lat']
+    file_lon = mod_file_data['file']['lon']
     # Make the UTC date a datetime object that is rounded to a date (hour/minute/etc = 0)
     obs_utc_date = dt.datetime.combine((obs_date - utc_offset).date(), dt.time())
 
@@ -2182,8 +2184,8 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
                   'gas_date': 'yr', 'gas_date_width': 'yr', 'gas_record_dates': 'UTC date'}
     var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EqL', gas_name, 'mean_latency', 'trop_age_of_air',
                  'strat_age_of_air', 'atm_stratum', 'gas_date')
-    map_constants = {'site_lat': obs_lat, 'trop_eqlat': trop_eqlat, 'prof_ref_lat': trop_ref_lat, 'surface_alt': z_surf,
-                     'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
+    map_constants = {'site_lon': file_lon, 'site_lat': file_lat, 'trop_eqlat': trop_eqlat, 'prof_ref_lat': trop_ref_lat,
+                     'surface_alt': z_surf, 'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
     converters = {'gas_date': mod_utils.date_to_decimal_year}
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
@@ -2196,7 +2198,7 @@ def generate_single_tccon_prior(mod_file_data, obs_date, utc_offset, concentrati
 
 
 def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site_abbrevs='xx', write_maps=False,
-                                 write_vmrs=False, isotope_file_opts=None, **prior_kwargs):
+                                 write_vmrs=False, isotope_file_opts=None, keep_latlon_prec=False, **prior_kwargs):
     """
     Generate multiple TCCON priors or a file containing multiple gas concentrations
 
@@ -2230,6 +2232,10 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
 
     :param write_vmrs: if ``False``, then .map files are not written. If truthy, then it must be a path to the directory
      where the .map files are to be written.
+
+    :param keep_latlon_prec: if ``False``, then .vmr files written are named with lat/lon rounded to integers. If
+     ``True``, then 2 decimal places are retained.
+    :type keep_latlon_prec: bool
 
     :param prior_kwargs:
     :return:
@@ -2320,12 +2326,15 @@ def generate_tccon_priors_driver(mod_data, obs_dates, utc_offsets, species, site
 
         # Write the combined .map file for all the requested species
         site_lat = specie_constants['site_lat']
+        site_lon = specie_constants['site_lon']
         if write_maps:
             map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], site_lat, obs_dates[iprofile]))
             mod_utils.write_map_file(map_name, variables=profile_dict, units=units_dict, var_order=var_order,
                                      **map_constants)
         if write_vmrs:
-            vmr_name = os.path.join(vmrs_dir, mod_utils.vmr_file_name(site_abbrevs[iprofile], obs_dates[iprofile]))
+            vmr_name = mod_utils.vmr_file_name(obs_date=obs_dates[iprofile], lon=site_lon, lat=site_lat,
+                                               keep_latlon_prec=keep_latlon_prec)
+            vmr_name = os.path.join(vmrs_dir, vmr_name)
             mod_utils.write_vmr_file(vmr_name, tropopause_alt=specie_constants['tropopause_alt'],
                                      profile_date=obs_dates[iprofile], profile_lat=site_lat,
                                      profile_alt=specie_profile['Height'], profile_gases=vmr_gases,

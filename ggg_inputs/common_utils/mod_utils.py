@@ -48,6 +48,13 @@ class TropopauseError(Exception):
     pass
 
 
+class ModelError(Exception):
+    """
+    Error if a model file is nonsensical.
+    """
+    pass
+
+
 class ProgressBar(object):
     """
     Create a text-based progress bar
@@ -181,12 +188,14 @@ def read_mod_file(mod_file, as_dataframes=False):
     :param mod_file: the path to the mod file.
     :type mod_file: str
 
-    :param as_dataframes: if ``True``, then the scalar and profile variables will be kept as dataframes. If ``False``
-     (default), they are converted to dictionaries of floats and numpy arrays, respectively.
+    :param as_dataframes: if ``True``, then the collection of variables will be kept as dataframes. If ``False``
+     (default), they are converted to dictionaries of floats or numpy arrays.
     :type as_dataframes: bool
 
-    :return: a dictionary with keys 'scalar' and 'profile' containing the respective variables. These values will be
-     dictionaries or data frames, depending on ``as_dataframes``.
+    :return: a dictionary with keys 'file' (values derived from file name), 'constants' (constant values stored in the
+     .mod file header), 'scalar' (values like surface height and tropopause pressure that are only defined once per
+     profile) and 'profile' (profile variables) containing the respective variables. These values will be dictionaries
+     or data frames, depending on ``as_dataframes``.
     :rtype: dict
     """
     n_header_lines = get_num_header_lines(mod_file)
@@ -203,12 +212,31 @@ def read_mod_file(mod_file, as_dataframes=False):
     # Now read the profile vars.
     profile_vars = pd.read_csv(mod_file, sep='\s+', header=n_header_lines-1)
 
+    # Also get the information that's only in the file name (namely date and longitude, we'll also read the latitude
+    # because it's there).
+    file_vars = dict()
+    base_name = os.path.basename(mod_file)
+    file_vars['datetime'] = find_datetime_substring(base_name, out_type=dt.datetime)
+    file_vars['lon'] = find_lon_substring(base_name, to_float=True)
+    file_vars['lat'] = find_lat_substring(base_name, to_float=True)
+
+    # Check that the header latitude and the file name latitude don't differ by more than 0.5 degree. Even if rounded
+    # to an integer for the file name, the difference should not exceed 0.5 degree.
+    lat_diff_threshold = 0.5
+    if np.abs(file_vars['lat'] - constant_vars['obs_lat'].item()) > lat_diff_threshold:
+        raise ModelError('The latitude in the file name and .mod file header differ by more than {lim} deg ({name} vs. '
+                         '{head}). This indicates a possibly malformed .mod file.'
+                         .format(lim=lat_diff_threshold, name=file_vars['lat'], head=constant_vars['obs_lat'].item())
+                         )
+
     out_dict = dict()
     if as_dataframes:
+        out_dict['file'] = pd.DataFrame(file_vars)
         out_dict['constants'] = constant_vars
         out_dict['scalar'] = scalar_vars
         out_dict['profile'] = profile_vars
     else:
+        out_dict['file'] = file_vars
         out_dict['constants'] = {k: v.item() for k, v in constant_vars.items()}
         out_dict['scalar'] = {k: v.item() for k, v in scalar_vars.items()}
         out_dict['profile'] = {k: v.values for k, v in profile_vars.items()}
@@ -623,6 +651,31 @@ def format_lon(lon, prec=2, zero_pad=False):
         return to_str(lon)
 
 
+def find_lon_substring(string, to_float=False):
+    """
+    Find a longitude substring in a string.
+
+    A longitude substring will match \d+[EW] or \d+\.\d+[EW].
+
+    :param string: the string to search for the longitude substring
+    :type string: str
+
+    :param to_float: when ``True``, converts the longitude to a float value using :func:`format_lon`, else returns the
+     string itself.
+    :type to_float: bool
+
+    :return: the longitude substring or float value
+    :rtype: str or float
+    """
+    # search for one or more numbers, which may include a decimal point followed by at least one number then E or W.
+    lon_re = r'\d+(\.\d+)?[EW]'
+    lon_str = re.search(lon_re, string).group()
+    if to_float:
+        return format_lon(lon_str)
+    else:
+        return lon_str
+
+
 def format_lat(lat, prec=2, zero_pad=False):
     """
     Convert latitude between string and numeric representations.
@@ -666,6 +719,56 @@ def format_lat(lat, prec=2, zero_pad=False):
         return to_float(lat)
     else:
         return to_str(lat)
+
+
+def find_lat_substring(string, to_float=False):
+    """
+    Find a latitude substring in a string.
+
+    A latitude substring will match \d+[NS] or \d+\.\d+[NS].
+
+    :param string: the string to search for the latitude substring
+    :type string: str
+
+    :param to_float: when ``True``, converts the latitude to a float value using :func:`format_lat`, else returns the
+     string itself.
+    :type to_float: bool
+
+    :return: the latitude substring or float value
+    :rtype: str or float
+    """
+    # search for one or more numbers, which may include a decimal point followed by at least one number then N or S.
+    lat_re = r'\d+(\.\d+)?[NS]'
+    lat_str = re.search(lat_re, string).group()
+    if to_float:
+        return format_lat(lat_str)
+    else:
+        return lat_str
+
+
+def find_datetime_substring(string, out_type=str):
+    """
+    Extract a date/time substring from a string.
+
+    This assumes that the date/time is formatted as %Y%m%d (YYYYMMDD) or %Y%m%d_%H%M (YYYYMMDD_hhmm).
+
+    :param string: the string to search for the date/time substring.
+    :type string: str
+
+    :param out_type: what type to return the date/time as. Default is to return the string. If another type is passed,
+     then it must have a ``strptime`` class method that accepts the string to parse and the format string as arguments,
+     i.e. it must behave like :func:`datetime.datetime.strptime`.
+    :type out_type: type
+
+    :return: the string or parsed datetime value
+    """
+    date_re = r'\d{8}(_\d{4})?'
+    date_str = re.search(date_re, string).group()
+    if out_type is str:
+        return date_str
+    else:
+        date_fmt = '%Y%m%d' if len(date_str) == 8 else '%Y%m%d_%H%M'
+        return out_type.strptime(date_str, date_fmt)
 
 
 def _hg_dir_helper(hg_dir):
