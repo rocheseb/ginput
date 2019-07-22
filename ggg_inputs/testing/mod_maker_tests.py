@@ -54,10 +54,15 @@ class TestModMaker(unittest.TestCase):
                     this_new_data = new_data[category_name][variable_name]
 
                     # Restore subtests in Python 3
-                    #with self.subTest(check_file=check_file, new_file=new_file, category=category_name, variable=variable_name):
-                    test_result = np.isclose(variable_data, this_new_data).all()
-                    self.assertTrue(test_result, msg='"{variable}" in {filename} does not match the check data'
-                                    .format(variable=variable_name, filename=new_file))
+                    with self.subTest(check_file=check_file, new_file=new_file, category=category_name, variable=variable_name):
+                        try:
+                            test_result = np.isclose(variable_data, this_new_data).all()
+                        except TypeError:
+                            # Not all variables with be float arrays. If np.isclose() can't coerce the data to a numeric
+                            # type, it'll raise a TypeError and we fall back on the equality test
+                            test_result = np.all(variable_data == this_new_data)
+                        self.assertTrue(test_result, msg='"{variable}" in {filename} does not match the check data'
+                                        .format(variable=variable_name, filename=new_file))
 
                     #print('"{}" in "{}" OK'.format(variable_name, new_file))
 
