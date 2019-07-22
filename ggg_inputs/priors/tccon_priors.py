@@ -570,6 +570,31 @@ class TraceGasTropicsRecord(object):
 
         return df_combined
 
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, ref_lat=45.0, use_theta_eqlat=True,
+                       profs_latency=None, prof_aoa=None, prof_world_flag=None, prof_gas_date=None):
+        """
+        Add the tropospheric component of the prior.
+
+        See the help for :func:`add_trop_prior_standard` in this module. All the inputs and outputs are the same except
+        that ``gas_record`` will be given this instance.
+        """
+        return add_trop_prior_standard(gas_record=self, prof_gas=prof_gas, obs_date=obs_date, obs_lat=obs_lat,
+                                       mod_data=mod_data, ref_lat=ref_lat, use_theta_eqlat=use_theta_eqlat,
+                                       profs_latency=profs_latency, prof_aoa=prof_aoa, prof_world_flag=prof_world_flag,
+                                       prof_gas_date=prof_gas_date)
+
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, profs_latency=None, prof_aoa=None,
+                        prof_world_flag=None, gas_record_dates=None):
+        """
+        Add the tropospheric component of the prior.
+
+        See the help for :func:`add_strat_prior_standard` in this module. All the inputs and outputs are the same except
+        that ``gas_record`` will be given this instance.
+        """
+        return add_strat_prior_standard(gas_record=self, prof_gas=prof_gas, retrieval_date=retrieval_date,
+                                        mod_data=mod_data, profs_latency=profs_latency, prof_aoa=prof_aoa,
+                                        prof_world_flag=prof_world_flag, gas_record_dates=gas_record_dates)
+
     @classmethod
     def _extrap_post_proc_hook(cls, gas_df):
         """
@@ -1766,10 +1791,10 @@ def adjust_zgrid(z_grid, z_trop, z_obs):
 # MAIN PRIORS FUNCTIONS #
 #########################
 
-def add_trop_prior(prof_gas, obs_date, obs_lat, gas_record, mod_data, ref_lat=45.0, use_theta_eqlat=True,
-                   profs_latency=None, prof_aoa=None, prof_world_flag=None, prof_gas_date=None):
+def add_trop_prior_standard(prof_gas, obs_date, obs_lat, gas_record, mod_data, ref_lat=45.0, use_theta_eqlat=True,
+                            profs_latency=None, prof_aoa=None, prof_world_flag=None, prof_gas_date=None):
     """
-    Add troposphere CO2 to the prior profile.
+    Add troposphere concentration to the prior profile using the standard approach.
 
     :param prof_gas: the profile trace gas mixing ratios. Will be modified in-place to add the stratospheric
      component.
@@ -1872,10 +1897,10 @@ def add_trop_prior(prof_gas, obs_date, obs_lat, gas_record, mod_data, ref_lat=45
                       'stratum': prof_world_flag, 'ref_lat': ref_lat, 'trop_lat': obs_lat, 'tropopause_alt': z_trop}
 
 
-def add_strat_prior(prof_gas, retrieval_date, gas_record, mod_data,
-                    profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
+def add_strat_prior_standard(prof_gas, retrieval_date, gas_record, mod_data,
+                             profs_latency=None, prof_aoa=None, prof_world_flag=None, gas_record_dates=None):
     """
-    Add the stratospheric trace gas to a TCCON prior profile
+    Add the stratospheric trace gas to a TCCON prior profile using the standard approach.
 
     :param prof_gas: the profile trace gase mixing ratios. Will be modified in-place to add the stratospheric
      component.
@@ -2097,9 +2122,9 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     stratum_flag = np.full((n_lev,), -1)
 
     # gas_prof is modified in-place
-    _, ancillary_trop = add_trop_prior(gas_prof, obs_utc_date, obs_lat, concentration_record, mod_file_data,
-                                       use_theta_eqlat=use_eqlat_trop, profs_latency=latency_profs,
-                                       prof_world_flag=stratum_flag, prof_gas_date=gas_date_prof)
+    _, ancillary_trop = concentration_record.add_trop_prior(gas_prof, obs_utc_date, obs_lat, mod_file_data,
+                                                            use_theta_eqlat=use_eqlat_trop, profs_latency=latency_profs,
+                                                            prof_world_flag=stratum_flag, prof_gas_date=gas_date_prof)
     aoa_prof_trop = ancillary_trop['age_of_air']
     trop_ref_lat = ancillary_trop['ref_lat']
     trop_eqlat = ancillary_trop['trop_lat']
@@ -2107,9 +2132,10 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
-    _, ancillary_strat = add_strat_prior(gas_prof, obs_utc_date, concentration_record, mod_file_data,
-                                         profs_latency=latency_profs, prof_world_flag=stratum_flag,
-                                         gas_record_dates=gas_date_prof)
+    _, ancillary_strat = concentration_record.add_strat_prior(
+        gas_prof, obs_utc_date, mod_file_data, profs_latency=latency_profs, prof_world_flag=stratum_flag,
+        gas_record_dates=gas_date_prof
+    )
     aoa_prof_strat = ancillary_strat['age_of_air']
 
     # Finally prepare the output, writing a .map file if needed.
