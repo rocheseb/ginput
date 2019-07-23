@@ -784,6 +784,9 @@ def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
 
 def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_type='eq', min_req_pts=10):
     R = 8.314 * 100 ** 3 / 100 / 6.626e23
+    flag_bits = {'clip': 2 ** 0, 'toofew': 2 ** 1, 'filled': 2 ** 2, 'ussa_any': 2**3, 'ussa_half': 2**4}
+    flag_units = 'Bit meanings (least significant first): 1 = value <0 clipped, 2 = fewer than {} points, ' \
+                 '3 = NaN filled, 4 = At least one point used USSA P/T, 5 = >50% points used USSA P/T'.format(min_req_pts)
 
     def ndens_air(T, P):
         return P / (R * T)
@@ -801,16 +804,20 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
         bc = co_0 * np.exp(-kCO_OH(ndens) * oh * age)
         return ss + bc
 
-    def fill_nans(ds):
+    def fill_nans(ds, flags, primary_keys, vertical_dim):
         # We want to interpolate/extrapolate along theta first. I tried originally doing periodic interpolation along
         # the day-of-year axis, but there's not enough data in the northen hemisphere polar summer to get the decrease
         # right. However, there are some columns that have 0 or 1 non-NaN values which the interpolator then chokes
         # on, so we need to find those columns and replace the NaNs with a fill value temporarily to avoid trying
         # to handle them here.
+        was_nans = np.zeros(ds[primary_keys[0]].shape, dtype=np.bool_)
+        for k in primary_keys:
+            was_nans |= np.isnan(ds[k].data)
+
         all_nans = dict()
         for key, variable in ds.items():
             var_not_nans = ~np.isnan(variable)
-            this_most_nans = var_not_nans.sum(dim='theta') < 2
+            this_most_nans = var_not_nans.sum(dim=vertical_dim) < 2
             this_most_nans = np.broadcast_to(this_most_nans.data.reshape(this_most_nans.shape + (1,)), variable.shape)
             # only replace NaNs in columns with 0 or 1 non-NaN values. Leave non-NaN values in those columns alone,
             # and leave NaNs elsewhere alone.
@@ -818,7 +825,7 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
             variable.data[this_most_nans] = -999
             all_nans[key] = this_most_nans
 
-        ds = ds.interpolate_na(dim='theta', method='linear', fill_value='extrapolate')
+        ds = ds.interpolate_na(dim=vertical_dim, method='linear', fill_value='extrapolate')
 
         for key, this_most_nans in all_nans.items():
             ds[key].data[this_most_nans] = np.nan
@@ -828,8 +835,56 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
         # extrapolation would generally stay with reasonable upper strat values.
         ds = ds.interpolate_na(dim='lat', method='linear', fill_value='extrapolate').interpolate_na(dim='doy', method='linear')
 
-        return ds
+        nans_filled = np.zeros_like(was_nans)
+        for k in primary_keys:
+            nans_filled |= (was_nans & ~np.isnan(ds[k].data))
 
+        flags[nans_filled] = np.bitwise_or(flags[nans_filled], flag_bits['filled'])
+
+        return ds, flags
+
+    def bin_co(df_dict, all_bins, all_coords, bin_names, primary_key):
+        bin_cols = tuple(df_dict.keys())
+        coord_cols = []
+        for i, (coord, bin) in enumerate(zip(all_coords, all_bins)):
+            inds = np.digitize(coord.flatten(), bin) - 1
+            colname = 'ind{}'.format(i)
+            df_dict[colname] = inds
+            coord_cols.append(colname)
+
+        df = pd.DataFrame(df_dict)
+        all_bin_centers = [0.5 * (b[:-1] + b[1:]) for b in all_bins]
+
+        proto_array = np.full([np.size(b) - 1 for b in all_bins],
+                              np.nan if np.issubdtype(excess_co.dtype, np.floating) else 0)
+        proto_array = xr.DataArray(proto_array, coords=all_bin_centers, dims=bin_names)
+        means = xr.Dataset({k: proto_array.copy() for k in bin_cols})
+        stds = xr.Dataset({k: proto_array.copy() for k in bin_cols})
+
+        flags = np.zeros(proto_array.shape, dtype=np.int)
+
+        for inds, grp in df.groupby(coord_cols):
+            if any(i < 0 for i in inds):
+                # negative index indicates that the value is below the minimum bin so we skip it
+                continue
+            try:
+                subdata = grp[primary_key]
+                if subdata.size < min_req_pts:
+                    flags[inds] = np.bitwise_or(flags[inds], flag_bits['toofew'])
+                    continue
+
+                for k in bin_cols:
+                    subdata = grp[k]
+                    means[k][inds] = np.nanmean(subdata)
+                    stds[k][inds] = np.nanstd(subdata)
+
+            except IndexError:
+                # inds will be too large if any of the values is outside the right edge of the last bin, so just skip
+                # those since we don't want to bin them. We caught any outside the left edge of the bin checking if any
+                # are < 0
+                continue
+
+        return means, stds, flags, all_bin_centers
 
     #################
     # Load ACE data #
@@ -837,6 +892,7 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
 
     with ncdf.Dataset(ace_age_file) as ds:
         ace_dates = read_ace_date(ds)
+        ace_alt = read_ace_var(ds, 'altitude', None)
         qflags = read_ace_var(ds, 'quality_flag', None)
 
         if lat_type == 'geog':
@@ -844,6 +900,12 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
             ace_lat = np.broadcast_to(ace_lat.reshape(-1, 1), qflags.shape)
         elif lat_type == 'eq':
             ace_lat = read_ace_var(ds, 'eqlat', None)
+            # Equivalent latitude may not be defined on all levels. Fill in any internal levels with linear
+            # interpolation then extends the profile assuming that the equivalent latitude is constant above the top
+            # level.
+            ace_lat = xr.DataArray(ace_lat, coords=[np.arange(ace_lat.shape[0]), ace_alt], dims=['index', 'alt'])
+            ace_lat = ace_lat.interpolate_na(dim='alt', method='linear').interpolate_na(dim='alt', method='nearest', fill_value='extrapolate')
+            ace_lat = ace_lat.data
         else:
             raise ValueError('lat must be "geog" or "eq"')
 
@@ -863,93 +925,148 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
     ace_doys = np.array([mod_utils.day_of_year(d) for d in ace_dates])
     ace_doys = np.broadcast_to(ace_doys.reshape(-1, 1), all_ace_co.shape)
 
+    # Create versions of T and P filled in by the US standard atmosphere for the mesospheric CO profile table.
+    xx_ussa = np.isnan(ace_t) | np.isnan(ace_p)
+    ace_alt_full = np.broadcast_to(ace_alt.reshape(1, -1), ace_t.shape)
+    ace_t_ussa = ace_t.copy()
+    ace_p_ussa = ace_p.copy()
+    ace_t_ussa[xx_ussa], ace_p_ussa[xx_ussa] = mod_utils.get_ussa_for_alts(ace_alt_full[xx_ussa])
+
     co_calc = strat_co(ace_ch4, ace_t, ace_p, ace_age, 50.0e-9)
     excess_co = (all_ace_co - co_calc)*1e9  # calculate excess and convert to ppb
-    notnans = ~np.isnan(excess_co)
-    excess_co = excess_co[notnans]
+    excess_notnans = ~np.isnan(excess_co)
+    excess_co = excess_co[excess_notnans]
+
+    air_nd = mod_utils.number_density_air(ace_p_ussa, ace_t_ussa)
+    ace_co_nd = all_ace_co * air_nd
+    meso_notnans = ~np.isnan(ace_co_nd)
+    ace_co_nd = ace_co_nd[meso_notnans]
+    ace_p_ussa = ace_p_ussa[meso_notnans]
+    ace_t_ussa = ace_t_ussa[meso_notnans]
+    air_nd = air_nd[meso_notnans]
+    xx_ussa = xx_ussa[meso_notnans]
 
     lat_bins = np.arange(-90, 91, 10)
     doy_bins = np.arange(0, 370, 5)
     doy_bins[-1] = 366  # account for leap years
     theta_bins = np.arange(350, 4150, 100)
-    all_bins = [lat_bins, doy_bins, theta_bins]
-    all_coords = [ace_lat[notnans], ace_doys[notnans], ace_pt[notnans]]
+    alt_bins = np.concatenate((ace_alt - 0.5, [ace_alt[-1] + 0.5]))
+
+    excess_bins = [lat_bins, doy_bins, theta_bins]
+    excess_coords = [ace_lat[excess_notnans], ace_doys[excess_notnans], ace_pt[excess_notnans]]
+    excess_bin_names = ['lat', 'doy', 'theta']
+    excess_bin_units = ['degrees_north', 'day of year (0-based)', 'K']
+
+    meso_bins = [lat_bins, doy_bins, alt_bins]
+    meso_coords = [ace_lat[meso_notnans], ace_doys[meso_notnans], ace_alt_full[meso_notnans]]
+    meso_bin_names = ['lat', 'doy', 'altitude']
+    meso_bin_units = ['degrees_north', 'doy of year (0-based)', 'km']
 
     ####################################################
     # Use pandas groupby() to bin the data efficiently #
     ####################################################
 
-    df_dict = {'data': excess_co}
-    coord_cols = []
-    for i, (coord, bin) in enumerate(zip(all_coords, all_bins)):
-        inds = np.digitize(coord.flatten(), bin) - 1
-        colname = 'ind{}'.format(i)
-        df_dict[colname] = inds
-        coord_cols.append(colname)
+    excess_means, excess_stds, excess_flags, excess_bin_centers = bin_co(
+        {'excess_co': excess_co}, all_bins=excess_bins, all_coords=excess_coords, bin_names=excess_bin_names,
+        primary_key='excess_co'
+    )
+    excess_means['excess_co'].attrs['unit'] = 'ppb'
+    excess_means['excess_co'].attrs['description'] = 'Excess CO in ACE-FTS data beyond that predicted by a kinetic ' \
+                                                     'model of the CO chemistry in the stratosphere.'
+    excess_stds['excess_co'].attrs['unit'] = 'ppb'
+    excess_stds['excess_co'].attrs['description'] = 'Standard deviation of the excess CO in this bin.'
 
-    df = pd.DataFrame(df_dict)
-    all_bin_centers = [0.5 * (b[:-1] + b[1:]) for b in all_bins]
-    bin_names = ['lat', 'doy', 'theta']
-    bin_units = ['degrees_north', 'day of year (0-based)', 'K']
+    meso_means, meso_stds, meso_flags, meso_bin_centers = bin_co(
+        {'co_nd': ace_co_nd, 'air_nd': air_nd, 'pressure': ace_p_ussa, 'temperature': ace_t_ussa, 'is_ussa': xx_ussa},
+        all_bins=meso_bins, all_coords=meso_coords, bin_names=meso_bin_names, primary_key='co_nd'
+    )
 
-    means = np.full([np.size(b) - 1 for b in all_bins], np.nan if np.issubdtype(excess_co.dtype, np.floating) else 0)
-    means = xr.DataArray(means, coords=all_bin_centers, dims=bin_names)
-    stds = means.copy()
+    inds = meso_means['is_ussa'].data > 0
+    meso_flags[inds] = np.bitwise_or(meso_flags[inds], flag_bits['ussa_any'])
+    inds = meso_means['is_ussa'].data > 0.5
+    meso_flags[inds] = np.bitwise_or(meso_flags[inds], flag_bits['ussa_half'])
 
-    flags = np.zeros(means.shape, dtype=np.int)
-    flag_bits = {'clip': 2**0, 'toofew': 2**1, 'filled': 2**2}
-    flag_units = 'Bit meanings (least significant first): 1 = value <0 clipped, 2 = fewer than {} points, 3 = NaN filled'.format(min_req_pts)
+    meso_means = meso_means.drop('is_ussa')
+    meso_stds = meso_stds.drop('is_ussa')
 
-    for inds, grp in df.groupby(coord_cols):
-        subdata = grp['data']
-        if subdata.size < min_req_pts:
-            flags[inds] = np.bitwise_or(flags[inds], flag_bits['toofew'])
-            continue
+    meso_means['co_nd'].attrs['unit'] = 'molec cm^{-3}'
+    meso_means['co_nd'].attrs['description'] = 'ACE CO in number density. ACE T and P extended using the US standard ' \
+                                               'atmosphere as needed.'
+    meso_means['air_nd'].attrs['unit'] = 'molec cm^{-3}'
+    meso_means['air_nd'].attrs['description'] = 'Number density of air calculated using the ideal gas law with ACE T ' \
+                                                'and P extended using the US standard atmosphere as needed'
+    meso_means['pressure'].attrs['unit'] = 'hPa'
+    meso_means['pressure'].attrs['description'] = 'ACE pressure extended using the US standard atmosphere as needed'
+    meso_means['temperature'].attrs['unit'] = 'K'
+    meso_means['temperature'].attrs['description'] = 'ACE temperatures extended using the US standard atmosphere as needed'
 
-        if any(i < 0 for i in inds):
-            # negative index indicates that the value is below the minimum bin so we skip it
-            continue
-        try:
-            means[inds] = np.nanmean(subdata)
-            stds[inds] = np.nanstd(subdata)
-        except IndexError:
-            # inds will be too large if any of the values is outside the right edge of the last bin, so just skip those
-            # since we don't want to bin them. We caught any outside the left edge of the bin checking if any are < 0
-            continue
+    meso_stds['co_nd'].attrs['unit'] = 'molec cm^{-3}'
+    meso_stds['co_nd'].attrs['description'] = 'Standard deviation of ACE CO in number density in the bins.'
+    meso_stds['air_nd'].attrs['unit'] = 'molec cm^{-3}'
+    meso_stds['air_nd'].attrs['description'] = 'Standard deviation of number density of air in the bins'
+    meso_stds['pressure'].attrs['unit'] = 'hPa'
+    meso_stds['pressure'].attrs['description'] = 'Standard deviation of ACE pressure in the bins.'
+    meso_stds['temperature'].attrs['unit'] = 'K'
+    meso_stds['temperature'].attrs['description'] = 'Standard deviation of ACE temperatures in the bins'
 
-    ########################################################################################
-    # Fill in NaNs and clip to positive values. Track these actions in the flags variables #
-    ########################################################################################
-    flags[means.data < 0] = np.bitwise_or(flags[means.data < 0], flag_bits['clip'])
-    means = means.clip(0)
-    was_nans = np.isnan(means.data)
-    dataset = xr.Dataset({'means': means, 'stds': stds})
-    dataset = fill_nans(dataset)
-    nans_filled = was_nans & ~np.isnan(dataset['means'].data)
-    flags[nans_filled] = np.bitwise_or(flags[nans_filled], flag_bits['filled'])
+    all_bin_edges = excess_bins + meso_bins[-1:]
+    all_bin_centers = excess_bin_centers + meso_bin_centers[-1:]
+    all_bin_names = excess_bin_names + meso_bin_names[-1:]
+    all_bin_units = excess_bin_units + meso_bin_units[-1:]
 
-    _save_excess_co_lut(save_file=save_file, co_excess=dataset['means'].data, co_excess_std=dataset['stds'].data,
-                        flags=flags, bin_edges=all_bins, bin_centers=all_bin_centers, bin_names=bin_names,
-                        bin_units=bin_units, flag_description=flag_units, lat_type=lat_type,
+    #######################################################################################
+    # Fill in NaNs and clip to positive values. Track these actions in the flags variable #
+    #######################################################################################
+    inds = excess_means['excess_co'].data < 0
+    excess_flags[inds] = np.bitwise_or(excess_flags[inds], flag_bits['clip'])
+    excess_means['excess_co'] = excess_means['excess_co'].clip(0)
+
+    import pdb; pdb.set_trace()
+    excess_means, excess_flags = fill_nans(excess_means, excess_flags, ['excess_co'], vertical_dim='theta')
+    meso_means, meso_flags = fill_nans(meso_means, meso_flags, ['co_nd', 'air_nd', 'pressure', 'temperature'],
+                                       vertical_dim='altitude')
+
+    _save_excess_co_lut(save_file=save_file,
+                        theta_binned_means=excess_means, theta_binned_stds=excess_stds, theta_binned_flags=excess_flags,
+                        alt_binned_means=meso_means, alt_binned_stds=meso_stds, alt_binned_flags=meso_flags,
+                        bin_edges=all_bin_edges, bin_centers=all_bin_centers, bin_names=all_bin_names,
+                        bin_units=all_bin_units, theta_binned_dims=excess_bin_names, alt_binned_dims=meso_bin_names,
+                        flag_description=flag_units, lat_type=lat_type,
                         ace_co_file=ace_co_file, ace_ch4_file=ace_ch4_file, ace_age_file=ace_age_file)
 
 
-def _save_excess_co_lut(save_file, co_excess, co_excess_std, flags, bin_edges, bin_centers, bin_names, bin_units,
-                        flag_description, lat_type, ace_co_file, ace_ch4_file, ace_age_file):
+def _save_excess_co_lut(save_file, theta_binned_means, theta_binned_stds, theta_binned_flags,
+                        alt_binned_means, alt_binned_stds, alt_binned_flags,
+                        bin_edges, bin_centers, bin_names, bin_units,
+                        flag_description, theta_binned_dims, alt_binned_dims, lat_type,
+                        ace_co_file, ace_ch4_file, ace_age_file):
 
     with ncdf.Dataset(save_file, 'w') as nh:
+
         dims = []
         for name, centers, edges, units in zip(bin_names, bin_centers, bin_edges, bin_units):
             this_dim = ioutils.make_ncdim_helper(nh, name, centers, unit=units)
             dims.append(this_dim)
             ioutils.make_ncdim_helper(nh, name + '_bin_edges', edges, unit=units)
 
-        ioutils.make_ncvar_helper(nh, 'co_excess', co_excess, dims=dims,
-                                  unit='ppb', description='Excess CO in ACE-FTS data beyond that predicted by a '
-                                                          'kinetic model of the CO chemistry in the stratosphere.')
-        ioutils.make_ncvar_helper(nh, 'co_excess_std', co_excess_std, dims=dims,
-                                  unit='hPa', description='Standard deviation of the excess CO in this bin.')
-        ioutils.make_ncvar_helper(nh, 'co_excess_flags', flags, dims=dims,
+        for k in theta_binned_means.keys():
+            data = theta_binned_means[k]
+            std = theta_binned_stds[k]
+            ioutils.make_ncvar_helper(nh, k, data.data, dims=theta_binned_dims,
+                                      flag_field='theta_binned_flags', **data.attrs)
+            ioutils.make_ncvar_helper(nh, k+'_std', std.data, dims=theta_binned_dims,
+                                      flag_field='theta_binned_flags', **std.attrs)
+        ioutils.make_ncvar_helper(nh, 'theta_binned_flags', theta_binned_flags, dims=theta_binned_dims,
+                                  unit='Bit array flag', description=flag_description)
+
+        for k in alt_binned_means.keys():
+            data = alt_binned_means[k]
+            std = alt_binned_stds[k]
+            ioutils.make_ncvar_helper(nh, k, data.data, dims=alt_binned_dims,
+                                      flag_field='alt_binned_flags', **data.attrs)
+            ioutils.make_ncvar_helper(nh, k+'_std', std.data, dims=alt_binned_dims,
+                                      flag_field='alt_binned_flags', **std.attrs)
+        ioutils.make_ncvar_helper(nh, 'alt_binned_flags', alt_binned_flags, dims=alt_binned_dims,
                                   unit='Bit array flag', description=flag_description)
 
         ioutils.add_dependent_file_hash(nh, 'ace_co_file', ace_co_file)
