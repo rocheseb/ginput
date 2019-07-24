@@ -782,7 +782,7 @@ def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
     return ss + bc
 
 
-def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_type='eq', min_req_pts=10):
+def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_type='eq', min_req_pts=10, smoothing_window_width=5):
     R = 8.314 * 100 ** 3 / 100 / 6.626e23
     flag_bits = {'clip': 2 ** 0, 'toofew': 2 ** 1, 'filled': 2 ** 2, 'ussa_any': 2**3, 'ussa_half': 2**4,
                  'lowval': 2**5}
@@ -903,17 +903,36 @@ def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_t
 
         return means, stds, flags, counts, all_bin_centers
 
-    def replace_low_values(darray, dim, flags, remove_neg=True):
+    def replace_low_values(darray, dim, flags, remove_neg=True, extra_mask=None):
         darray = darray.copy()
+        periodic = dim == 'doy'
+        # Concatenate extra slices to allow periodic interpolation if operating along DOY
+        if periodic:
+            ex_width = int(np.ceil(smoothing_window_width/2))
+            dim_max = darray.coords[dim].max()
+            darray_start = darray.isel(**{dim: slice(None, ex_width)})
+            darray_start.coords[dim] = darray_start.coords[dim] + dim_max
+            darray_end = darray.isel(**{dim: slice(-ex_width, None)})
+            darray_end.coords[dim] = darray_end.coords[dim] - dim_max
+            darray = xr.concat([darray_end, darray, darray_start], dim=dim)
+
         if remove_neg:
             darray.data[darray.data < 0] = np.nan
-        kwargs = {dim: 5, 'center': True}
+        kwargs = {dim: smoothing_window_width, 'center': True}
         mean = darray.rolling(**kwargs).mean()
         std = darray.rolling(**kwargs).std()
         xx = darray < (mean - std)
+        if extra_mask is not None:
+            xx = xx | extra_mask
         darray.data[xx.data] = np.nan
+
+        darray = darray.interpolate_na(dim=dim)
+        if periodic:
+            s = slice(ex_width, -ex_width)
+            darray = darray.isel(**{dim: s})
+            xx = xx.isel(**{dim: s})
         flags[xx.data] = np.bitwise_or(flags[xx.data], flag_bits['lowval'])
-        return darray.interpolate_na(dim=dim), flags
+        return darray, flags
 
     #################
     # Load ACE data #
