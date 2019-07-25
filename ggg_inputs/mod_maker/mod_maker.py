@@ -103,7 +103,7 @@ import warnings
 
 from ..common_utils import mod_utils
 from ..common_utils.mod_utils import gravity
-from ..common_utils.mod_constants import ratio_molec_mass as rmm
+from ..common_utils.mod_constants import ratio_molec_mass as rmm, p_ussa, t_ussa, z_ussa, mass_dry_air
 from ..common_utils.ggg_logging import logger
 from .slantify import * # code to make slant paths
 from .tccon_sites import site_dict,tccon_site_info # dictionary to store lat/lon/alt of tccon sites
@@ -148,7 +148,8 @@ def compute_mmw(h2o_wmf):
     """
     compute mean molecular weight of air from h2o wet mole fraction
     """
-    return 28.964*(1-h2o_wmf)+18.02*h2o_wmf
+    # mass_dry_air in kg/mol, want g/mol
+    return 1e3*mass_dry_air*(1-h2o_wmf)+18.02*h2o_wmf
 
 def svp_wv_over_ice(temp):
     """
@@ -226,10 +227,7 @@ def write_mod(mod_path, version, site_lat, data=0, surf_data=0, func=None, muted
     # here, 1.0 is assumed. Only used for GEOS-type mod files currently.
     output_scaling = {'RH': 100.0}
 
-    # Define US Standard Atmosphere (USSA) for use above 10 mbar
-    p_ussa=[10.0,  5.0,   2.0,   1.0,   0.5,    0.2,   0.1,   0.01,  0.001, 0.0001]
-    t_ussa=[227.7, 239.2, 257.9, 270.6, 264.3, 245.2, 231.6, 198.0, 189.8, 235.0]
-    z_ussa=[31.1,  36.8,  42.4,  47.8,  53.3,  60.1,  64.9,  79.3,  92.0,  106.3]
+    # Define US Standard Atmosphere (USSA) for use above 10 mbar (imported from mod_constants)
 
     # Define constants common to both NCEP and GEOS files: earth's radius, ecc2 (?), site latitude, surface gravity,
     # profile bottom altitude, and base pressure. Tropopause pressure will be added under the NCEP/GEOS part of the code

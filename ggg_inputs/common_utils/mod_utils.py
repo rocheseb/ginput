@@ -1591,6 +1591,118 @@ def calc_wmo_tropopause(temperature, altitude, limit_to=(5., 18.), raise_error=T
         return np.nan
 
 
+def number_density_air(p, t):
+    """
+    Calculate the ideal dry number density of air in molec. cm^-3
+
+    :param p: pressure in hPa
+    :type p: float or :class:`numpy.ndarray`
+
+    :param t: temperature in K
+    :type t: float or :class:`numpy.ndarray`
+
+    :return: ideal dry number density in molec. cm^-3
+    :rtype: float or :class:`numpy.ndarray`
+    """
+    R = 8.314e4 # gas constant in cm^3 * hPa / (mol * K)
+    return p / (R*t) * 6.022e23
+
+
+def effective_vertical_path(z, p, t):
+    """
+    Calculate the effective vertical path used by GFIT for a given z/P/T grid.
+
+    :param z: altitudes of the vertical levels. May be any unit, but note that the effective paths will be returned in
+     the same unit.
+    :type z: array-like
+
+    :param p: pressures of the vertical levels. Must be in hPa.
+    :type p: array-like
+
+    :param t: temperatures of the vertical levels. Must be in K.
+    :type t: array-like
+
+    :return: effective vertical paths in the same units as ``z``
+    :rtype: array-like
+    """
+    def integral(dz_in, lrp_in, sign):
+        return dz_in * 0.5 * (1.0 + sign * lrp_in / 3 + lrp_in**2/12 + sign*lrp_in**3/60)
+
+    d = number_density_air(p, t)
+    dz = np.vstack([0.0, np.diff(z), 0.0])
+    log_rp = np.log(d[:-1] / d[1:])
+    log_rp = np.vstack([0.0, log_rp, 0.0])
+
+    # from gfit/compute_vertical_paths.f, the calculation for level i is
+    #   v_i = 0.5 * dz_{i+1} * (1 - l_{i+1}/3 + l_{i+1}**2/12 - l_{i+1}**3/60)
+    #       + 0.5 * dz_i * (1 + l_i/3 + l_i**2/12 + l_i**3/60)
+    # where
+    #   dz_i = z_i - z_{i-1}
+    #   l_i  = ln(d_{i-1}/d_i)
+    # The top level has no i+1 term. This vector addition duplicates that calculation. The zeros padded to the beginning
+    # and end of the difference vectors ensure that when there's no i+1 or i-1 term, it is given a value of 0.
+    vpath = integral(dz[1:], log_rp[1:], sign=-1) + integral(dz[:-1], log_rp[:-1], sign=1)
+    # TODO: handle the levels around the surface
+    return vpath
+
+
+def get_ussa_for_alts(alts):
+    """
+    Get temperature and pressure from the US standard atmosphere (USSA) for given altitudes.
+
+    Temperature is interpolated to the requested altitudes linearly, assuming that the lapse rate is constant between
+    the levels defined by the USSA. Pressure is interpolated exponentially, i.e. ln(p) is interpolated linearly.
+
+    :param alts: altitudes, in kilometers, to calculate T and P for.
+    :type alts: float or :class:`numpy.ndarray`
+
+    :return: temperatures (in K) and pressures (in hPa). Arrays will be the same shape as the input altitudes.
+    :rtype: float or :class:`numpy.ndarray`, float or :class:`numpy.ndarray`
+    """
+    # Need to interpolate pressure and temperature to the given altitudes. Will assume that temperature varies linearly
+    # with altitude and pressure varies exponentially. Since p = p0 * exp(-z/H) then ln(p) = ln(p0) - z/H, therefore
+    # we will linearly interpolate ln(p) w.r.t. altitude.
+    z_coord = const.z_ussa
+    t_coord = const.t_ussa
+    p_coord = np.log(const.p_ussa)
+
+    interp_args = {'left': np.nan, 'right': np.nan}
+    t = np.interp(alts, z_coord, t_coord, **interp_args)
+    p = np.exp(np.interp(alts, z_coord, p_coord, **interp_args))
+
+    return t, p
+
+
+def get_ussa_for_pres(pres):
+    """
+    Get altitude and temperature from the US standard atmosphere (USSA) for given pressures.
+
+    Temperature is interpolated to the requested altitudes linearly, assuming that the lapse rate is constant between
+    the levels defined by the USSA. Pressure is interpolated exponentially, i.e. ln(p) is interpolated linearly.
+
+    :param pres: pressures, in hPa, to calculate z and T for.
+    :type pres: float or :class:`numpy.ndarray`
+
+    :return: temperatures (in K) and altitudes (in km). Arrays will be the same shape as the input altitudes.
+    :rtype: float or :class:`numpy.ndarray`, float or :class:`numpy.ndarray`
+    """
+
+    # Since temperature varies linearly with altitude and altitude varies linearly vs. ln(p), interpolate both by the
+    # log of pressure
+    z_coord = np.flipud(const.z_ussa)
+    t_coord = np.flipud(const.t_ussa)
+    # must flip - np.interp expects its x-coordinates to be increasing.
+    p_coord = np.flipud(np.log(const.p_ussa))
+
+    pres = np.log(pres)
+
+    interp_args = {'left': np.nan, 'right': np.nan}
+    t = np.interp(pres, p_coord, t_coord, **interp_args)
+    z = np.interp(pres, p_coord, z_coord, **interp_args)
+
+    return t, z
+
+
 def age_of_air(lat, z, ztrop, ref_lat=45.0):
     """
     Calculate age of air using a function form from GGG 2014.
