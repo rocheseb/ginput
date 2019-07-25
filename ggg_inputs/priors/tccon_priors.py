@@ -2148,8 +2148,8 @@ def _load_co_lut(lut_file):
     return xr.concat([co_last_slice, co_lut, co_first_slice], dim='doy')
 
 
-def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_eqlat, prof_date,
-                    excess_co_lut=_excess_co_file):
+def modify_strat_co(base_co_profile, pres_profile, eqlat_profile, pt_profile, trop_pres, prof_date,
+                    model_transition_pressures=(30.0, 10.0), excess_co_lut=_excess_co_file, keep_orig_nans=False):
     """
     Takes the baseline GEOS CO profile and adds the mesospheric contribution to the stratosphere.
 
@@ -2159,20 +2159,17 @@ def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_e
     :param base_co_profile: the baseline CO profile in ppb.
     :type base_co_profile: array-like
 
-    :param pt_profile: the altitudes that the CO profile is defined on, in kilometers.
-    :type pt_profile: array-like
-
     :param pres_profile: the pressure levels that the CO profile is defined on.
     :type pres_profile: array-like
+
+    :param eqlat_profile: the equivalent latitude profile, in degrees north.
+    :type eqlat_profile: arrary-like
 
     :param pt_profile: the potential temperature profile on the same levels as the CO profile, in Kelvin.
     :type pt_profile: array-like
 
     :param trop_pres: the tropopause pressure, in the same units as the pressure profile.
     :type trop_pres: float
-
-    :param prof_eqlat: the equivalent latitude profile, in degrees north.
-    :type prof_eqlat: arrary-like
 
     :param prof_date: the date of the profile
     :type prof_date: datetime-like
@@ -2185,21 +2182,46 @@ def modify_strat_co(base_co_profile, pres_profile, pt_profile, trop_pres, prof_e
     :return: the CO profile with the CO from mesospheric descent added.
     :rtype: array-like
     """
-    prof_doy = mod_utils.day_of_year(prof_date)
+    if len(model_transition_pressures) != 2 or model_transition_pressures[0] < model_transition_pressures[1]:
+        raise ValueError('model_transition_pressures must be a two element tuple with the second element less than '
+                         'the first.')
 
-    co_lut = _load_co_lut(excess_co_lut)
+    with xr.open_dataset(excess_co_lut) as ds:
+        co_lut = ds['co'][:]
 
-    # Get the profile for the right equivalent latitude for each altitude
+    # Let's first get the CMAM CO profile for the right day of year and latitude
     xx_overworld = mod_utils.is_overworld(pt_profile, pres_profile, trop_pres)
-
+    base_overworld_co = base_co_profile[xx_overworld]
     level_ind = np.arange(np.size(base_co_profile))[xx_overworld]
     level_coords = [('idx', level_ind)]
-    prof_eqlat = xr.DataArray(prof_eqlat[xx_overworld], coords=level_coords)
-    pt_profile = xr.DataArray(pt_profile[xx_overworld], coords=level_coords)
-    doy_grid = xr.DataArray(np.full(prof_eqlat.shape, prof_doy), coords=level_coords)
 
-    extra_co_prof = co_lut.interp(theta=pt_profile, lat=prof_eqlat, doy=doy_grid).data
-    base_co_profile[xx_overworld] += extra_co_prof
+    prof_doy = mod_utils.day_of_year(prof_date)
+
+    pres_profile = xr.DataArray(pres_profile[xx_overworld], coords=level_coords)
+    eqlat_profile = xr.DataArray(eqlat_profile[xx_overworld], coords=level_coords)
+    doy_grid = xr.DataArray(np.full(eqlat_profile.shape, prof_doy), coords=level_coords)
+
+    cmam_co_prof = co_lut.interp(doy=doy_grid, lat=eqlat_profile, plev=pres_profile).data
+
+    # Rather than mess with calculating "excess" CO concentrations for the lookup table, we just averaged the CMAM model
+    # and will transition between the GEOS CO and CMAM CO between the transition range pressures. I chose the default
+    # of 30 and 10 hPa based on looking at comparisions of GEOS and ACE CO, generally it seems like 30 hPa is the
+    # pressure where we first start seeing excess CO that GEOS doesn't capture.
+    xx_trans = (pres_profile <= model_transition_pressures[0]) & (pres_profile >= model_transition_pressures[1])
+    xx_trans = xx_trans.data
+    prior_plog = np.log(pres_profile[xx_trans])
+    trans_plog = [np.log(p) for p in model_transition_pressures]
+    cmam_weights = (prior_plog - trans_plog[0])/(trans_plog[1] - trans_plog[0])
+    base_overworld_co[xx_trans] = base_overworld_co[xx_trans] * (1 - cmam_weights) + cmam_co_prof[xx_trans] * cmam_weights
+
+    # Above the transition regime, just replace GEOS with the CMAM model
+    xx_cmam = pres_profile < model_transition_pressures[1]
+    xx_cmam = xx_cmam.data
+    base_overworld_co[xx_cmam] = cmam_co_prof[xx_cmam]
+    orig_nans = np.isnan(base_co_profile)
+    base_co_profile[xx_overworld] = base_overworld_co
+    if keep_orig_nans:
+        base_co_profile[orig_nans] = np.nan
 
     return base_co_profile
 

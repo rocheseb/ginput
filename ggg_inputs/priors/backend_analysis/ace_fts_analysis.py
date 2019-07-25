@@ -788,13 +788,23 @@ def make_cmam_excess_co_lut(save_file, cmam_file):
     with xr.open_dataset(cmam_file) as ds:
         month_slices = [ds['vmrco'][i::12] for i in range(12)]
         for i, month in enumerate(month_slices):
-            mdim = OrderedDict([('month', [i + 1])])
+            doy = mod_utils.day_of_year(pd.Timestamp(2005, i+1, 15))
+            mdim = OrderedDict([('doy', [doy])])
             month = month.expand_dims(mdim, axis=1)
             month.coords['time'] = [t.item().year for t in month.coords['time']]
             month_slices[i] = month
-        co_monthly = xr.concat(month_slices, dim='month')
 
-    import pdb; pdb.set_trace()
+        # Duplicate the first and last months on the opposite ends to make periodic interpolation possible
+        first_month = month_slices[0].copy()
+        first_month.coords['doy'] = first_month.coords['doy'] + mod_utils.days_per_year
+
+        last_month = month_slices[-1].copy()
+        last_month.coords['doy'] = last_month.coords['doy'] - mod_utils.days_per_year
+
+        month_slices.append(first_month)
+        month_slices.insert(0, last_month)
+
+        co_monthly = xr.concat(month_slices, dim='doy')
 
     # Limit it to after 2000 - there is a trend in CO but it looks like it more or less levels off after 2000.
     co_attrs = co_monthly.attrs
