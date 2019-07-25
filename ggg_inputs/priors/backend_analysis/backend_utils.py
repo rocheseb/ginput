@@ -33,7 +33,7 @@ def find_ace_file(ace_dir, ace_specie):
 def read_ace_var(nc_handle, varname, qflags):
     data = nc_handle.variables[varname][:].filled(np.nan)
     if qflags is not None:
-        data[qflags != 0] = np.nan
+        data[qflags > 1] = np.nan
     # replace fill values
     data[data < -900] = np.nan
     return data
