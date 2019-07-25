@@ -53,6 +53,7 @@ pp. 32295-32314). For gases other than CO2, chemical loss or production in the s
 
 from __future__ import print_function, division
 
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from contextlib import closing
 from copy import deepcopy
@@ -165,7 +166,50 @@ def _init_prof(profs, n_lev, n_profs=0, fill_val=np.nan):
         return profs
 
 
-class TraceGasTropicsRecord(object):
+class TraceGasRecord(object):
+    # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
+    # seasonal cycle function to determine if it uses the CO2 parameterization or the default one, and the seasonal
+    # cycle coefficient scales the seasonal cycle. If the coefficient is None, the seasonal cycle function will raise
+    # an error.
+    gas_name = ''
+    gas_unit = ''
+    gas_seas_cyc_coeff = None
+
+    @abstractmethod
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
+        pass
+
+    @abstractmethod
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        pass
+
+    @abstractmethod
+    def add_extra_column(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        """
+        Add a representation of out-of-range column density to the prior
+
+        This method is intended for use to handle cases like CO, which has a fairly large mesospheric column that can't
+        be directly represented in the prior. It will add extra concentration to one or more levels in the prior such
+        that, when integrated, the extra column density is accounted for. Ideally, this should be called after
+        interpolating to the final levels that the priors will be used on in GGG so that the column can be reproduced
+        exactly by the integration.
+
+        :param prof_gas: the profile to modify. Modified in-place
+        :type prof_gas: :class:`numpy.ndarray`
+
+        :param retrieval_date: the date/time of the prior profile (unused, present for consistency)
+
+        :param mod_data: the dictionary of model data read in from the .mod file.
+        :type mod_data: dict
+
+        :param kwargs: unused, swallows extra keyword arguments.
+
+        :return: the modified gas profile and a dictionary on ancillary information (currently empty).
+        """
+        pass
+
+
+class MloSmoTraceGasRecord(TraceGasRecord):
     """
     This class stores the Mauna Loa/Samoa average CO2 record and provides methods to sample it.
 
@@ -206,13 +250,6 @@ class TraceGasTropicsRecord(object):
     :type save_strat: bool or None
     """
 
-    # these should be overridden in subclasses to specify the name and unit of the gas. The name will be used by the
-    # seasonal cycle function to determine if it uses the CO2 parameterization or the default one, and the seasonal
-    # cycle coefficient scales the seasonal cycle. If the coefficient is None, the seasonal cycle function will raise
-    # an error.
-    gas_name = ''
-    gas_unit = ''
-    gas_seas_cyc_coeff = None
     # The lifetime is used to account for chemical loss between emission and the prior location. Setting to infinity
     # will effectively disable this correction, since e^(-x/infinity) = 1.0.
     gas_trop_lifetime_yrs = np.inf
@@ -570,8 +607,7 @@ class TraceGasTropicsRecord(object):
 
         return df_combined
 
-    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, ref_lat=45.0, use_theta_eqlat=True,
-                       profs_latency=None, prof_aoa=None, prof_world_flag=None, prof_gas_date=None):
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
         """
         Add the tropospheric component of the prior.
 
@@ -579,12 +615,9 @@ class TraceGasTropicsRecord(object):
         that ``gas_record`` will be given this instance.
         """
         return add_trop_prior_standard(gas_record=self, prof_gas=prof_gas, obs_date=obs_date, obs_lat=obs_lat,
-                                       mod_data=mod_data, ref_lat=ref_lat, use_theta_eqlat=use_theta_eqlat,
-                                       profs_latency=profs_latency, prof_aoa=prof_aoa, prof_world_flag=prof_world_flag,
-                                       prof_gas_date=prof_gas_date)
+                                       mod_data=mod_data, **kwargs)
 
-    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, profs_latency=None, prof_aoa=None,
-                        prof_world_flag=None, gas_record_dates=None):
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, **kwargs):
         """
         Add the tropospheric component of the prior.
 
@@ -592,8 +625,11 @@ class TraceGasTropicsRecord(object):
         that ``gas_record`` will be given this instance.
         """
         return add_strat_prior_standard(gas_record=self, prof_gas=prof_gas, retrieval_date=retrieval_date,
-                                        mod_data=mod_data, profs_latency=profs_latency, prof_aoa=prof_aoa,
-                                        prof_world_flag=prof_world_flag, gas_record_dates=gas_record_dates)
+                                        mod_data=mod_data, **kwargs)
+
+    def add_extra_column(self, prof_gas, retrieval_date, mod_data, **kwargs):
+
+        return prof_gas, dict()
 
     @classmethod
     def _extrap_post_proc_hook(cls, gas_df):
@@ -1221,7 +1257,7 @@ class TraceGasTropicsRecord(object):
         return df.dmf_mean[ts], info_dict
 
 
-class HFTropicsRecord(TraceGasTropicsRecord):
+class HFTropicsRecord(MloSmoTraceGasRecord):
     gas_name = 'hf'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.0
@@ -1383,7 +1419,7 @@ class HFTropicsRecord(TraceGasTropicsRecord):
         return gas_conc
 
 
-class CO2TropicsRecord(TraceGasTropicsRecord):
+class CO2TropicsRecord(MloSmoTraceGasRecord):
     gas_name = 'co2'
     gas_unit = 'ppm'
     gas_seas_cyc_coeff = 0.007
@@ -1393,7 +1429,7 @@ class CO2TropicsRecord(TraceGasTropicsRecord):
     _max_trend_poly_deg = 'exp'
 
 
-class N2OTropicsRecord(TraceGasTropicsRecord):
+class N2OTropicsRecord(MloSmoTraceGasRecord):
     gas_name = 'n2o'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.0
@@ -1437,7 +1473,7 @@ class N2OTropicsRecord(TraceGasTropicsRecord):
         return dep_dict
 
     
-class CH4TropicsRecord(TraceGasTropicsRecord):
+class CH4TropicsRecord(MloSmoTraceGasRecord):
     gas_name = 'ch4'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.012
@@ -1503,10 +1539,132 @@ class CH4TropicsRecord(TraceGasTropicsRecord):
         return fch4_lut_final
 
 
-class COTropicsRecord(TraceGasTropicsRecord):
+class COTropicsRecord(TraceGasRecord):
     gas_name = 'co'
     gas_unit = 'ppb'
     gas_seas_cyc_coeff = 0.2
+
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
+        """
+        Add tropospheric CO prior.
+
+        This copies the CO profile from the model data into the gas profile. It handles all levels, including the
+        stratosphere. The result is scaled from dry mole fraction to ppb.
+
+        :param prof_gas: the CO profile array. Modified in place to include the GEOS CO.
+        :type prof_gas: :class:`numpy.ndarray`
+
+        :param obs_date: the date/time of the prior profile (unused, present for consistency)
+
+        :param obs_lat: the latitude of the prior profile (unused, present for consistency)
+
+        :param mod_data: the dictionary of model data read in from the .mod file.
+        :type mod_data: dict
+
+        :param kwargs: unused, swallows extra keyword arguments.
+
+        :return: the modified gas profile and a dictionary on ancillary information (currently empty).
+        """
+        prof_gas[:] = mod_data['profile']['CO'] * 1e9
+        return prof_gas, dict()
+
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        """
+        Add the stratospheric CO prior.
+
+        This assumes that the GEOS CO was already added by ``add_trop_prior`` and this method handles adding in the
+        extra CO resulting from mesospheric descent.
+
+        :param prof_gas: the CO profile array. Modified in place to include the GEOS CO.
+        :type prof_gas: :class:`numpy.ndarray`
+
+        :param retrieval_date: the date/time of the prior profile (unused, present for consistency)
+
+        :param mod_data: the dictionary of model data read in from the .mod file.
+        :type mod_data: dict
+
+        :param kwargs: unused, swallows extra keyword arguments.
+
+        :return: the modified gas profile and a dictionary on ancillary information (currently empty).
+        """
+        if np.any(np.isnan(prof_gas)):
+            raise GasRecordError('Expected the CO profile to be all non-NaN values before adding the stratospheric '
+                                 'modifications.')
+
+
+        pres = mod_data['profile']['Pressure']
+        theta = mod_data['profile']['PT']
+        eqlat = mod_data['profile']['EqL']
+        trop_pres = mod_data['scalar']['TROPPB']
+
+        co_file = kwargs.pop('excess_co_lut', _excess_co_file)
+
+        # prof_gas modified in-place
+        modify_strat_co(base_co_profile=prof_gas, pres_profile=pres, pt_profile=theta, trop_pres=trop_pres,
+                        prof_eqlat=eqlat, prof_date=retrieval_date, excess_co_lut=co_file)
+
+        return prof_gas, dict()
+
+    def add_extra_column(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        """
+
+        :param prof_gas:
+        :param retrieval_date:
+        :param mod_data:
+        :param kwargs:
+        :return:
+        """
+        height = mod_data['profile']['Height']
+        pres = mod_data['profile']['Pressure']
+        temperature = mod_data['profile']['Temperature']
+
+        meso_receiver_level = -1
+        meso_column_dmf = self._calc_meso_co_dmf(height, pres, temperature, level_ind_to_add=meso_receiver_level)
+        prof_gas[meso_receiver_level] += meso_column_dmf
+
+        return prof_gas, dict()
+
+    @staticmethod
+    def _calc_meso_co_dmf(z_grid, p_grid, t_grid, level_ind_to_add):
+
+        meso_co_column = 0.0
+
+        p_level = p_grid[level_ind_to_add]
+        t_level = t_grid[level_ind_to_add]
+        nair_level = mod_utils.number_density_air(p_level, t_level)
+        vpath_level = mod_utils.effective_vertical_path(z_grid, p_grid, t_grid)[level_ind_to_add]
+        vpath_level *= 1e5  # kilometers -> cm
+
+        # The concentration at the level we need to add will be the CO column divided by the level depth, which is
+        # given by the effective path length defined for that level by gfit. We then convert to the appropriate dry
+        # mole fraction by dividing by the number density at that level.
+        extra_co_dmf = meso_co_column / vpath_level / nair_level * 1e9
+        return extra_co_dmf, level_ind_to_add
+
+
+class O3TropicsRecord(TraceGasRecord):
+    gas_name = 'o3'
+    gas_unit = 'ppb'
+    gas_seas_cyc_coeff = None
+
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
+        o3 = mod_data['profile']['O3']
+        # in kg/kg, need to convert using the mean molecular weight of air. We are NOT using the MMW from the .mod files
+        # because that is wet and we want the .vmr files to be dry.
+
+        # ratio molar masses. O3 = 3*O (16e-3 kg/mol)
+        rmm = (3 * 16.0e-3) / const.mass_dry_air
+        # convert to mol/mol
+        o3 /= rmm
+        # convert to ppb
+        prof_gas[:] = o3 * 1e9
+        return prof_gas, dict()
+
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        return prof_gas, dict()
+
+    def add_extra_column(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        return prof_gas, dict()
 
 
 # Make the list of available gases' records
@@ -1807,7 +1965,7 @@ def add_trop_prior_standard(prof_gas, obs_date, obs_lat, gas_record, mod_data, r
     :type obs_lat: float
 
     :param gas_record: the Mauna Loa-Samoa record for the desired gas.
-    :type gas_record: :class:`TraceGasTropicsRecord`
+    :type gas_record: :class:`MloSmoTraceGasRecord`
 
     :param mod_data: the dictionary of .mod file data. Must have the tropo
 
@@ -1910,7 +2068,7 @@ def add_strat_prior_standard(prof_gas, retrieval_date, gas_record, mod_data,
     :type retrieval_date: :class:`datetime.datetime`
 
     :param gas_record: the Mauna Loa-Samoa CO2 record.
-    :type gas_record: :class:`TraceGasTropicsRecord`
+    :type gas_record: :class:`MloSmoTraceGasRecord`
 
     The following parameters are all optional; they are vectors that will be filled with the appropriate values in the
     stratosphere. The are also returned in the ancillary dictionary; if not given as inputs, they are initialized with
@@ -2062,7 +2220,7 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     :param concentration_record: which species to generate the prior profile for. Must be the proper subclass of
      TraceGasTropicsRecord for the given species. The latter is useful if you are making multiple calls to this
      function, as it removes the need to instantiate the record during each call
-    :type concentration_record: str or :class:`TraceGasTropicsRecord`
+    :type concentration_record: str or :class:`MloSmoTraceGasRecord`
 
     :param site_abbrev: the two-letter site abbreviation. Currently only used in naming the output file.
     :type site_abbrev: str
@@ -2087,6 +2245,7 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
      units of the values in each profile.
     :rtype: dict, dict
     """
+
     if isinstance(mod_file_data, str):
         mod_file_data = mod_utils.read_mod_file(mod_file_data)
     elif not isinstance(mod_file_data, dict):
@@ -2104,7 +2263,7 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
 
     n_lev = np.size(mod_file_data['profile']['Height'])
 
-    if not isinstance(concentration_record, TraceGasTropicsRecord):
+    if not isinstance(concentration_record, MloSmoTraceGasRecord):
         raise TypeError('concentration_record must be a subclass instance of TraceGasTropicsRecord')
     elif concentration_record.gas_name == '':
         raise TypeError('concentration_record must be a specific subclass instance of TraceGasTropicsRecord that '
@@ -2125,10 +2284,10 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     _, ancillary_trop = concentration_record.add_trop_prior(gas_prof, obs_utc_date, obs_lat, mod_file_data,
                                                             use_theta_eqlat=use_eqlat_trop, profs_latency=latency_profs,
                                                             prof_world_flag=stratum_flag, prof_gas_date=gas_date_prof)
-    aoa_prof_trop = ancillary_trop['age_of_air']
-    trop_ref_lat = ancillary_trop['ref_lat']
-    trop_eqlat = ancillary_trop['trop_lat']
-    z_trop_met = ancillary_trop['tropopause_alt']
+    aoa_prof_trop = ancillary_trop['age_of_air'] if 'age_of_air' in ancillary_trop else np.full_like(gas_prof, np.nan)
+    trop_ref_lat = ancillary_trop['ref_lat'] if 'ref_lat' in ancillary_trop else np.nan
+    trop_eqlat = ancillary_trop['trop_lat'] if 'trop_lat' in ancillary_trop else np.nan
+    z_trop_met = ancillary_trop['tropopause_alt'] if 'tropopause_alt' in ancillary_trop else np.nan
 
     # Next we add the stratospheric profile, including interpolation between the tropopause and 380 K potential
     # temperature (the "middleworld").
@@ -2136,24 +2295,51 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
         gas_prof, obs_utc_date, mod_file_data, profs_latency=latency_profs, prof_world_flag=stratum_flag,
         gas_record_dates=gas_date_prof
     )
-    aoa_prof_strat = ancillary_strat['age_of_air']
+    aoa_prof_strat = ancillary_strat['age_of_air'] if 'age_of_air' in ancillary_trop else np.full_like(gas_prof, np.nan)
 
     # Finally prepare the output, writing a .map file if needed.
     gas_name = concentration_record.gas_name
     gas_unit = concentration_record.gas_unit
-    map_dict = {'Height': mod_file_data['profile']['Height'], 'Temp': mod_file_data['profile']['Temperature'],
-                'Pressure': mod_file_data['profile']['Pressure'], 'PT': mod_file_data['profile']['PT'],
-                'EqL': mod_file_data['profile']['EqL'], gas_name: gas_prof, 'mean_latency': latency_profs,
-                'trop_age_of_air': aoa_prof_trop, 'strat_age_of_air': aoa_prof_strat, 'atm_stratum': stratum_flag,
-                'gas_date': gas_date_prof, 'gas_record_dates': gas_date_prof}
-    units_dict = {'Height': 'km', 'Temp': 'K', 'Pressure': 'hPa', 'PT': 'K', 'EqL': 'degrees', gas_name: gas_unit,
-                  'mean_latency': 'yr', 'trop_age_of_air': 'yr', 'strat_age_of_air': 'yr', 'atm_stratum': 'flag',
-                  'gas_date': 'yr', 'gas_date_width': 'yr', 'gas_record_dates': 'UTC date'}
+
+    map_dict = {'Height': mod_file_data['profile']['Height'],
+                'Temp': mod_file_data['profile']['Temperature'],
+                'Pressure': mod_file_data['profile']['Pressure'],
+                'PT': mod_file_data['profile']['PT'],
+                'EqL': mod_file_data['profile']['EqL'],
+                gas_name: gas_prof,
+                'mean_latency': latency_profs,
+                'trop_age_of_air': aoa_prof_trop,
+                'strat_age_of_air': aoa_prof_strat,
+                'atm_stratum': stratum_flag,
+                'gas_date': gas_date_prof,
+                'gas_record_dates': gas_date_prof}
+
+    units_dict = {'Height': 'km',
+                  'Temp': 'K',
+                  'Pressure': 'hPa',
+                  'PT': 'K',
+                  'EqL': 'degrees',
+                  gas_name: gas_unit,
+                  'mean_latency': 'yr',
+                  'trop_age_of_air': 'yr',
+                  'strat_age_of_air': 'yr',
+                  'atm_stratum': 'flag',
+                  'gas_date': 'yr',
+                  'gas_date_width': 'yr',
+                  'gas_record_dates': 'UTC date'}
+
+    map_constants = {'site_lon': file_lon,
+                     'site_lat': file_lat,
+                     'datetime': file_date,
+                     'trop_eqlat': trop_eqlat,
+                     'prof_ref_lat': trop_ref_lat,
+                     'surface_alt': mod_file_data['scalar']['Height'],
+                     'tropopause_alt': z_trop_met,
+                     'strat_used_eqlat': use_eqlat_strat}
+
     var_order = ('Height', 'Temp', 'Pressure', 'PT', 'EqL', gas_name, 'mean_latency', 'trop_age_of_air',
                  'strat_age_of_air', 'atm_stratum', 'gas_date')
-    map_constants = {'site_lon': file_lon, 'site_lat': file_lat, 'datetime': file_date, 'trop_eqlat': trop_eqlat,
-                     'prof_ref_lat': trop_ref_lat, 'surface_alt': mod_file_data['scalar']['Height'],
-                     'tropopause_alt': z_trop_met, 'strat_used_eqlat': use_eqlat_strat}
+
     converters = {'gas_date': mod_utils.date_to_decimal_year}
     if write_map:
         map_dir = write_map if isinstance(write_map, str) else '.'
@@ -2252,7 +2438,7 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
     site_abbrevs = check_input(site_abbrevs, 'site_abbrevs', (str,))
 
     # species will each be generated for every site.
-    if isinstance(species, (str, TraceGasTropicsRecord)):
+    if isinstance(species, (str, MloSmoTraceGasRecord)):
         species = [species]
 
     # if given species names, convert to the actual records.
