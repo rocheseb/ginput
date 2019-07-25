@@ -782,6 +782,68 @@ def strat_co(ch4, T, P, age, co_0, oh=2.5e5, gamma=3):
     return ss + bc
 
 
+def make_cmam_excess_co_lut(save_file, cmam_file):
+
+    # First we need to rearrange the CMAM data so that year and month are organized separately.
+    with xr.open_dataset(cmam_file) as ds:
+        month_slices = [ds['vmrco'][i::12] for i in range(12)]
+        for i, month in enumerate(month_slices):
+            mdim = OrderedDict([('month', [i + 1])])
+            month = month.expand_dims(mdim, axis=1)
+            month.coords['time'] = [t.item().year for t in month.coords['time']]
+            month_slices[i] = month
+        co_monthly = xr.concat(month_slices, dim='month')
+
+    import pdb; pdb.set_trace()
+
+    # Limit it to after 2000 - there is a trend in CO but it looks like it more or less levels off after 2000.
+    co_attrs = co_monthly.attrs
+    co_monthly = co_monthly.sel(time=slice(2000, None))
+
+    # Then we just need to average in time and longitude to get monthly pressure-latitude slices.
+    co_monthly = co_monthly.mean(dim='time').mean(dim='lon')
+    co_monthly.attrs = co_attrs.copy()
+    # will convert to ppb later, more convenient to leave in mole fraction for now because we need to calculate number
+    # density too.
+
+    # Next we need to calculate the number density. Since we only have pressure from the model, we'll get temperature
+    # from the US standard atmosphere.
+    co_monthly.coords['plev'] /= 100  # convert Pa to hPa
+    co_monthly.coords['plev'].attrs['units'] = 'hPa'
+
+    p = co_monthly.coords['plev']
+    t, z = mod_utils.get_ussa_for_pres(p)
+    t = xr.DataArray(t, coords=p.coords)
+    z = xr.DataArray(z, coords=p.coords)
+
+    t.attrs['units'] = 'K'
+    t.attrs['standard_name'] = 'absolute_temperature'
+    t.attrs['long_name'] = 'temperature'
+
+    z.attrs['units'] = 'km'
+    z.attrs['standard_name'] = 'altitude_above_sea_level'
+    z.attrs['long_name'] = 'altitude'
+
+    nair = mod_utils.number_density_air(p, t)
+    nair.attrs['units'] = 'molec. cm^{-3}'
+    nair.attrs['standard_name'] = 'dry_number_density'
+    nair.attrs['long_name'] = 'number density of air'
+
+    co_monthly_nd = co_monthly * nair
+    co_monthly_nd.attrs['units'] = 'molec. cm^{-3}'
+    co_monthly_nd.attrs['standard_name'] = 'co_number_density'
+    co_monthly_nd.attrs['long_name'] = 'CO number density'
+
+    co_monthly *= 1e9
+    co_monthly.attrs['units'] = 'ppb'
+
+    full_ds = xr.Dataset({'co': co_monthly, 'co_nd': co_monthly_nd, 'temperature': t, 'altitude': z, 'nair': nair})
+    full_ds.attrs['cmam_file'] = cmam_file if not os.path.islink(cmam_file) else os.readlink(cmam_file)
+    full_ds.attrs['cmam_sha1'] = ioutils.make_dependent_file_hash(cmam_file)
+    full_ds.attrs['history'] = ioutils.make_creation_info('ace_fts_analysis.make_cmam_excess_co_lut')
+    full_ds.to_netcdf(save_file)
+
+
 def make_excess_co_lut(save_file, ace_co_file, ace_ch4_file, ace_age_file, lat_type='eq', min_req_pts=10, smoothing_window_width=5):
     R = 8.314 * 100 ** 3 / 100 / 6.626e23
     flag_bits = {'clip': 2 ** 0, 'toofew': 2 ** 1, 'filled': 2 ** 2, 'ussa_any': 2**3, 'ussa_half': 2**4,
