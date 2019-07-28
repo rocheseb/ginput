@@ -2080,3 +2080,34 @@ def geopotential_height_to_altitude(gph, lat, alt):
     """
     gravity_at_site, _ = gravity(lat, alt)
     return gph / gravity_at_site
+
+
+def to_unix_time(datetime):
+    """
+    Convert a datetime-like object into Unix time (seconds since midnight, 1 Jan 1970)
+
+    :param datetime: the datetime to convert. May be any type that can have a :class:`datetime.datetime` object
+     subtracted from it, and for which the subtraction has a method `total_seconds` that returns the time delta as
+     a number of seconds. Both :class:`datetime.datetime` and :class:`pandas.Timestamp` are examples.
+
+    :return: unix time
+    :rtype: float
+    """
+    return (datetime - dt.datetime(1970, 1, 1)).total_seconds()
+
+
+def from_unix_time(utime, out_type=dt.datetime):
+    """
+    Convert a unix time into a datetime object.
+
+    :param utime: the unix time (seconds since midnight, 1 Jan 1970)
+    :type utime: float
+
+    :param out_type: optional, a type that represents a datetime which has an init method such that
+     ``out_type(year, month, day)`` returns a object representing that time and can be added with a
+     :class:`datetime.timedelta``.
+    :type out_type: type
+
+    :return: a datetime object of the type specified by ``out_type``.
+    """
+    return out_type(1970, 1, 1) + dt.timedelta(seconds=utime)

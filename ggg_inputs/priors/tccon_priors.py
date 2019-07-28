@@ -2226,7 +2226,78 @@ def modify_strat_co(base_co_profile, pres_profile, eqlat_profile, pt_profile, tr
     return base_co_profile
 
 
-def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record, site_abbrev='xx',
+def _setup_zgrid(zgrid):
+    """
+    Setup a fixed altitude grid
+    :param zgrid:
+    :return:
+    """
+    if isinstance(zgrid, str):
+        int_info = mod_utils.read_integral_file(zgrid)
+        return int_info['Height']
+    elif not isinstance(zgrid, (None, np.ndarray, xr.DataArray)):
+        raise TypeError('zgrid must be a string, None, numpy array, or xarray DataArray')
+    else:
+        return zgrid
+
+
+def _datetime2float(dtarray):
+    return np.array([np.nan if d is None else mod_utils.to_unix_time(d) for d in dtarray])
+
+
+def _float2datetime(dtarray):
+    return np.array([None if np.isnan(d) else mod_utils.from_unix_time(d, pd.Timestamp) for d in dtarray])
+
+
+def interp_to_zgrid(profile_dict, zgrid):
+    """
+    Interpolate the output profile variables to a desired altitude grid.
+
+    This mimics the behavior in `read_refvmrs` of the Fortran gsetup code. It interpolates the output variables linearly
+    with respect to altitude. It will extrapolate linearly towards the surface, but will raise an error if the profile
+    does not go high enough.
+
+    :param profile_dict: a dictionary of profile variables. Must include the altitude levels as the key "Height". The
+     keys "gas_record_dates" and "gas_date" are treated as dates for interpolation.
+    :type profile_dict: dict
+
+    :param zgrid: any specification of a fixed altitude grid accepted by :func:`_setup_zgrid`, i.e. ``None`` to do no
+     interpolation, a path to an integral file, or an array directly specifying the altitude grid.
+    :type zgrid: None, str, or :class:`numpy.ndarray`.
+
+    :return: the profile dictionary with its variables interpolated/extrapolated to the new altitude grid. It will
+     also have been modified in-place.
+    :rtype: dict
+    """
+    # Specify pairs of functions to convert and unconvert the values of the input arrays. Each key must match a key in
+    # the profile_dict, and the values must be two element tuples, where the first element is the function to use to
+    # convert the values in the dict to ones that can be interpolated and the second does the reverse process.
+    dt_converters = (_datetime2float, _float2datetime)
+    converters = {'gas_record_dates': dt_converters,
+                  'gas_date': dt_converters}
+
+    zgrid = _setup_zgrid(zgrid)
+    if zgrid is None:
+        return profile_dict
+
+    profile_z = profile_dict['Height'].copy()
+    for k, v in profile_dict.items():
+        if k in converters:
+            v = converters[k][0](v)
+
+        v = xr.DataArray(v, coords=[profile_z], dims=['z'])
+        v = v.interp(z=zgrid, method='linear', kwargs={'fill_value': 'extrapolate'})
+
+        if k in converters:
+            v = converters[k][1](v.data)
+        else:
+            v = v.data
+        profile_dict[k] = v
+
+    return profile_dict
+
+
+def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record, site_abbrev='xx', zgrid=None,
                                 use_eqlat_trop=True, use_eqlat_strat=True, write_map=False):
     """
     Driver function to generate the TCCON prior profiles for a single observation.
@@ -2319,10 +2390,10 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     )
     aoa_prof_strat = ancillary_strat['age_of_air'] if 'age_of_air' in ancillary_trop else np.full_like(gas_prof, np.nan)
 
-    # Finally prepare the output, writing a .map file if needed.
+    # Combine the profile variables into a temporary dict, which we'll use to do the interpolation/extrapolation to the
+    # fixed altitude levels if needed.
     gas_name = concentration_record.gas_name
     gas_unit = concentration_record.gas_unit
-
     map_dict = {'Height': mod_file_data['profile']['Height'],
                 'Temp': mod_file_data['profile']['Temperature'],
                 'Pressure': mod_file_data['profile']['Pressure'],
@@ -2333,9 +2404,13 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
                 'trop_age_of_air': aoa_prof_trop,
                 'strat_age_of_air': aoa_prof_strat,
                 'atm_stratum': stratum_flag,
-                'gas_date': gas_date_prof,
+                'gas_date': gas_date_prof,  # TODO: eliminate duplicate
                 'gas_record_dates': gas_date_prof}
 
+    import pdb; pdb.set_trace()
+    map_dict = interp_to_zgrid(map_dict, zgrid)
+
+    # Finally prepare the output, writing a .map file if needed.
     units_dict = {'Height': 'km',
                   'Temp': 'K',
                   'Pressure': 'hPa',
