@@ -84,7 +84,7 @@ _code_dep_files[os.path.splitext(os.path.basename(__file__))[0]] = os.path.abspa
 
 _data_dir = const.data_dir
 _clams_file = os.path.join(_data_dir, 'clams_age_clim_scaled.nc')
-_excess_co_file = os.path.join(_data_dir, 'ace_excess_co_lut.nc')
+_excess_co_file = os.path.join(_data_dir, 'meso_co_lut.nc')
 
 ###########################################
 # FUNCTIONS SUPPORTING PRIORS CALCUALTION #
@@ -1601,7 +1601,7 @@ class COTropicsRecord(TraceGasRecord):
 
         # prof_gas modified in-place
         modify_strat_co(base_co_profile=prof_gas, pres_profile=pres, pt_profile=theta, trop_pres=trop_pres,
-                        prof_eqlat=eqlat, prof_date=retrieval_date, excess_co_lut=co_file)
+                        eqlat_profile=eqlat, prof_date=retrieval_date, excess_co_lut=co_file)
 
         return prof_gas, dict()
 
@@ -2285,7 +2285,7 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
 
     n_lev = np.size(mod_file_data['profile']['Height'])
 
-    if not isinstance(concentration_record, MloSmoTraceGasRecord):
+    if not isinstance(concentration_record, TraceGasRecord):
         raise TypeError('concentration_record must be a subclass instance of TraceGasTropicsRecord')
     elif concentration_record.gas_name == '':
         raise TypeError('concentration_record must be a specific subclass instance of TraceGasTropicsRecord that '

@@ -1629,9 +1629,9 @@ def effective_vertical_path(z, p, t):
         return dz_in * 0.5 * (1.0 + sign * lrp_in / 3 + lrp_in**2/12 + sign*lrp_in**3/60)
 
     d = number_density_air(p, t)
-    dz = np.vstack([0.0, np.diff(z), 0.0])
+    dz = np.concatenate([[0.0], np.diff(z), [0.0]])
     log_rp = np.log(d[:-1] / d[1:])
-    log_rp = np.vstack([0.0, log_rp, 0.0])
+    log_rp = np.concatenate([[0.0], log_rp, [0.0]])
 
     # from gfit/compute_vertical_paths.f, the calculation for level i is
     #   v_i = 0.5 * dz_{i+1} * (1 - l_{i+1}/3 + l_{i+1}**2/12 - l_{i+1}**3/60)
