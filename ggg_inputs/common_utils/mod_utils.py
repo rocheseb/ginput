@@ -1608,7 +1608,7 @@ def number_density_air(p, t):
     return p / (R*t) * 6.022e23
 
 
-def effective_vertical_path(z, p, t):
+def effective_vertical_path(z, p=None, t=None, nair=None):
     """
     Calculate the effective vertical path used by GFIT for a given z/P/T grid.
 
@@ -1628,7 +1628,12 @@ def effective_vertical_path(z, p, t):
     def integral(dz_in, lrp_in, sign):
         return dz_in * 0.5 * (1.0 + sign * lrp_in / 3 + lrp_in**2/12 + sign*lrp_in**3/60)
 
-    d = number_density_air(p, t)
+    if nair is not None:
+        d = nair
+    elif p is not None and t is not None:
+        d = number_density_air(p, t)
+    else:
+        raise TypeError('Either nair or p & t must be given')
     dz = np.concatenate([[0.0], np.diff(z), [0.0]])
     log_rp = np.log(d[:-1] / d[1:])
     log_rp = np.concatenate([[0.0], log_rp, [0.0]])

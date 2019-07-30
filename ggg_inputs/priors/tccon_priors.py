@@ -1617,11 +1617,11 @@ class COTropicsRecord(TraceGasRecord):
         height = mod_data['profile']['Height']
         pres = mod_data['profile']['Pressure']
         temperature = mod_data['profile']['Temperature']
+        eqlat = mod_data['profile']['EqL']
 
-        meso_receiver_level = -1
-        meso_column_dmf = self._calc_meso_co_dmf(height, pres, temperature, level_ind_to_add=meso_receiver_level)
-        prof_gas[meso_receiver_level] += meso_column_dmf
-
+        extra_co_ppb = calculate_meso_co(alt_profile=height, eqlat_profile=eqlat, pres_profile=pres, temp_profile=temperature,
+                                         prof_date=retrieval_date)
+        prof_gas[-1] += extra_co_ppb
         return prof_gas, dict()
 
     @staticmethod
@@ -2226,6 +2226,45 @@ def modify_strat_co(base_co_profile, pres_profile, eqlat_profile, pt_profile, tr
     return base_co_profile
 
 
+def calculate_meso_co(alt_profile, eqlat_profile, pres_profile, temp_profile, prof_date, excess_co_lut=_excess_co_file):
+    top_alt = alt_profile[-1]
+    top_eqlat = eqlat_profile[-1]
+    top_pres = pres_profile[-1]
+    top_temp = temp_profile[-1]
+
+    with xr.open_dataset(excess_co_lut) as ds:
+        co_nd = ds['co_nd'][:]
+        co_nair = ds['nair'][:]
+        co_alts = ds['altitude'][:]
+
+    # In the LUT, nair is assumed to be the same for every profile (because pressure is) so we don't need to interpolate
+    # anything before we calculate the effective vertical path we'll use to integrate the CO profiles
+    vpath = mod_utils.effective_vertical_path(co_alts.data, nair=co_nair.data)
+    plev = co_nd.plev
+    prof_doy = mod_utils.day_of_year(prof_date)
+    # Unlike the extra strat CO, we don't need the CO on the same levels as any existing profile, we want it on its
+    # original levels, so we need to make the interpolation coordinates have the same vertical coordinates as the
+    # CO table.
+    eqlat_profile = xr.DataArray(np.full(plev.shape, top_eqlat), coords=[plev], dims=['plev'])
+    doy_profile = xr.DataArray(np.full(plev.shape, prof_doy), coords=[plev], dims=['plev'])
+    cmam_co_prof = co_nd.interp(lat=eqlat_profile, doy=doy_profile, plev=plev)
+
+    xx_meso = co_alts > top_alt
+    # vpath will be in kilometers, since co_alts is in kilometers. This will be a column density (molec. cm^-2) of the
+    # total CO column above the top level of the profile.
+    meso_co_col = np.sum(vpath[xx_meso] * 1e5 * cmam_co_prof[xx_meso])
+
+    # Now we need the effective vertical path for the top level of the actual CO profile.
+    top_prior_vpath = mod_utils.effective_vertical_path(z=alt_profile, p=pres_profile, t=temp_profile)[-1]
+
+    # So we can calculate the number density and then the mixing ratio (convert to ppb) that would result from putting
+    # the CO column above the top level into the top level with the effective path length that we calculated and an
+    # ideal number density.
+    meso_co_nd = meso_co_col / (top_prior_vpath * 1e5)
+    meso_co_mix = meso_co_nd / mod_utils.number_density_air(p=top_pres, t=top_temp) * 1e9
+    return meso_co_mix
+
+
 def _setup_zgrid(zgrid):
     """
     Setup a fixed altitude grid
@@ -2407,8 +2446,8 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
                 'gas_date': gas_date_prof,  # TODO: eliminate duplicate
                 'gas_record_dates': gas_date_prof}
 
-    import pdb; pdb.set_trace()
     map_dict = interp_to_zgrid(map_dict, zgrid)
+    concentration_record.add_extra_column(map_dict[gas_name], retrieval_date=obs_utc_date, mod_data=mod_file_data)
 
     # Finally prepare the output, writing a .map file if needed.
     units_dict = {'Height': 'km',
