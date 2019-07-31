@@ -599,18 +599,38 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
             fobj.write('\n')
 
 
-def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True):
+def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True, style='new'):
     nheader = get_num_header_lines(vmr_file)
+
+    if style == 'new':
+        last_const_line = nheader - 1
+        old_style = False
+    elif style == 'old':
+        last_const_line = 4
+        old_style = True
+    else:
+        raise ValueError('style must be one of "new" or "old"')
+
     header_data = dict()
     with open(vmr_file, 'r') as fobj:
         # Skip the line with the number of header lines and columns
         fobj.readline()
-        for i in range(1, nheader-1):
+        for i in range(1, last_const_line):
             line = fobj.readline()
             const_name, const_val = [v.strip() for v in line.split(':')]
             if lowercase_names:
                 const_name = const_name.lower()
             header_data[const_name] = float(const_val)
+
+        prior_info = dict()
+        if old_style:
+            for i in range(last_const_line, nheader-1, 2):
+                category_line = fobj.readline()
+                category = re.split(r'[:\.]', category_line)[0].strip()
+                data_line = fobj.readline()
+                data_line = data_line.split(':')[1].strip()
+                split_data_line = re.split(r'\s+', data_line)
+                prior_info[category] = np.array([float(x) for x in split_data_line])
 
     data_table = pd.read_csv(vmr_file, sep='\s+', header=nheader-1)
 
@@ -619,10 +639,17 @@ def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True):
 
     if as_dataframs:
         header_data = pd.DataFrame(header_data, index=[0])
+        # Rearrange the prior info dict so that the data frame has the categories as the index and the species as the
+        # columns.
+        categories = list(prior_info.keys())
+        tmp_prior_info = dict()
+        for i, k in enumerate(data_table.columns.drop('altitude')):
+            tmp_prior_info[k] = np.array([prior_info[cat][i] for cat in categories])
+        prior_info = pd.DataFrame(tmp_prior_info, index=categories)
     else:
         data_table = {k: v.to_numpy() for k, v in data_table.items()}
 
-    return {'scalar': header_data, 'profile': data_table}
+    return {'scalar': header_data, 'profile': data_table, 'prior_info': prior_info}
 
 
 def format_lon(lon, prec=2, zero_pad=False):

@@ -171,9 +171,30 @@ class TraceGasRecord(object):
     # seasonal cycle function to determine if it uses the CO2 parameterization or the default one, and the seasonal
     # cycle coefficient scales the seasonal cycle. If the coefficient is None, the seasonal cycle function will raise
     # an error.
-    gas_name = ''
-    gas_unit = ''
-    gas_seas_cyc_coeff = None
+    _gas_name = ''
+    _gas_unit = ''
+    _gas_seas_cyc_coeff = None
+    _gas_sec_trend = None
+    _gas_lat_grad = None
+
+    @property
+    def gas_name(self):
+        return self._gas_name
+
+    @property
+    def gas_unit(self):
+        return self._gas_unit
+    @property
+    def gas_seas_cyc_coeff(self):
+        return self._gas_seas_cyc_coeff
+
+    @property
+    def gas_sec_trend(self):
+        return self._gas_sec_trend
+
+    @property
+    def gas_lat_grad(self):
+        return self._gas_lat_grad
 
     @abstractmethod
     def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
@@ -280,7 +301,7 @@ class MloSmoTraceGasRecord(TraceGasRecord):
     def get_strat_lut_file(cls):
         # This needed to be a class method so that the _load_strat_arrays() could be a classmethod. Unfortunately,
         # classproperties aren't a thing yet, so this remains a regular function.
-        return os.path.join(_data_dir, '{}_strat_lut.nc'.format(cls.gas_name))
+        return os.path.join(_data_dir, '{}_strat_lut.nc'.format(cls._gas_name))
 
     @property
     def strat_has_theta_dep(self):
@@ -401,8 +422,8 @@ class MloSmoTraceGasRecord(TraceGasRecord):
 
         files_none = [mlo_file is None, smo_file is None]
         if all(files_none):
-            mlo_file = os.path.join(_data_dir, 'ML_monthly_obs_{}.txt'.format(cls.gas_name))
-            smo_file = os.path.join(_data_dir, 'SMO_monthly_obs_{}.txt'.format(cls.gas_name))
+            mlo_file = os.path.join(_data_dir, 'ML_monthly_obs_{}.txt'.format(cls._gas_name))
+            smo_file = os.path.join(_data_dir, 'SMO_monthly_obs_{}.txt'.format(cls._gas_name))
         elif any(files_none):
             raise TypeError('Must give both MLO and SMO files or neither')
 
@@ -526,7 +547,7 @@ class MloSmoTraceGasRecord(TraceGasRecord):
             hlines = f.readline().rstrip().split(': ')[1]
 
         df = pd.read_csv(full_file_path, skiprows=int(hlines), skipinitialspace=True,
-                         delimiter=' ', header=None, names=['site', 'year', 'month', cls.gas_name])
+                         delimiter=' ', header=None, names=['site', 'year', 'month', cls._gas_name])
 
         # set datetime index in df (requires 'day' column)
         df['day'] = 1
@@ -570,7 +591,7 @@ class MloSmoTraceGasRecord(TraceGasRecord):
         df_mlo = cls.read_insitu_gas(mlo_file)
         df_smo = cls.read_insitu_gas(smo_file)
         df_combined = pd.concat([df_mlo, df_smo], axis=1).dropna()
-        df_combined = pd.DataFrame(df_combined[cls.gas_name].mean(axis=1), columns=['dmf_mean'])
+        df_combined = pd.DataFrame(df_combined[cls._gas_name].mean(axis=1), columns=['dmf_mean'])
 
         # Fill in any missing months. Add a flag so we can keep track of whether they've had to be interpolated or
         # not. Having a consistent monthly frequency makes the rest of the code easier - we can just always assume that
@@ -733,12 +754,12 @@ class MloSmoTraceGasRecord(TraceGasRecord):
         """
         fit_type = cls._max_trend_poly_deg if fit_type is None else fit_type
         if fit_type == 'exp':
-            logger.debug('Using exponential fit to extrapolate {}'.format(cls.gas_name))
+            logger.debug('Using exponential fit to extrapolate {}'.format(cls._gas_name))
             fit = np.polynomial.polynomial.Polynomial.fit(x, np.log(y), 1, w=np.sqrt(y))
             return lambda t: np.exp(fit(t))
 
         else:
-            logger.debug('Using order {} polynomial to extrapolate {}'.format(fit_type, cls.gas_name))
+            logger.debug('Using order {} polynomial to extrapolate {}'.format(fit_type, cls._gas_name))
             fit = np.polynomial.polynomial.Polynomial.fit(x, y, deg=fit_type)
             return fit
 
@@ -769,7 +790,7 @@ class MloSmoTraceGasRecord(TraceGasRecord):
         """
 
         if np.any(fit(extrap_julian_dates) < 0):
-            raise GasRecordExtrapolationError('Extrapolation for {} would result in negative concentrations'.format(cls.gas_name))
+            raise GasRecordExtrapolationError('Extrapolation for {} would result in negative concentrations'.format(cls._gas_name))
 
         xx = df.interp_flag < 2
         last_date = df.index[xx].max()
@@ -778,12 +799,12 @@ class MloSmoTraceGasRecord(TraceGasRecord):
             logger.warning('Trying to extrapolate to a date more than {time} after the end of the MLO/SMO record '
                            '({end}). Likely okay, but consider updating the MLO/SMO {gas} record if possible.'
                            .format(time=mod_utils.relativedelta2string(cls._max_safe_extrap_forward), end=last_date,
-                                   gas=cls.gas_name))
+                                   gas=cls._gas_name))
 
         if fit_type == 'exp':
             df_jdates = df.index.to_julian_date().to_numpy()
             if fit(df_jdates[0]) > fit(df_jdates[-1]):
-                raise GasRecordExtrapolationError('{} exponential fit is not increasing'.format(cls.gas_name))
+                raise GasRecordExtrapolationError('{} exponential fit is not increasing'.format(cls._gas_name))
 
     @staticmethod
     def _make_lagged_df(df, lag):
@@ -1257,10 +1278,54 @@ class MloSmoTraceGasRecord(TraceGasRecord):
         return df.dmf_mean[ts], info_dict
 
 
+class MidlatTraceGasRecord(TraceGasRecord):
+    _std_vmr_file = ''
+
+    @property
+    def gas_name(self):
+        return self._this_gas_name
+
+    @property
+    def gas_unit(self):
+        return self._this_gas_unit
+
+    @property
+    def gas_seas_cyc_coeff(self):
+        return self._this_gas_seas_cyc_coeff
+
+    @property
+    def gas_sec_trend(self):
+        return self._this_gas_sec_trend
+
+    @property
+    def gas_lat_grad(self):
+        return self._this_gas_lat_grad
+
+    @property
+    def gas_base_prof(self):
+        return self._base_profile
+
+    def __init__(self, gas, vmr_file=None):
+        gas = gas.lower()
+        if vmr_file is None:
+            vmr_file = self._std_vmr_file
+
+        vmr_info = mod_utils.read_vmr_file(vmr_file, as_dataframs=True, style='old')
+        if gas not in vmr_info['profile'].columns:
+            raise ValueError('Gas "{}" not found in the .vmr file {}'.format(gas, vmr_file))
+
+        self._this_gas_name = gas
+        self._this_gas_unit = 'mol/mol'
+        self._this_gas_seas_cyc_coeff = vmr_info['prior_info'].loc['Seasonal Cycle', gas]
+        self._this_gas_sec_trend = vmr_info['prior_info'].loc['Secular Trends', gas]
+        self._this_gas_lat_grad = vmr_info['prior_info'].loc['Latitude Gradient', gas]
+        self._base_profile = vmr_info['profile'][['altitude', gas]]
+
+
 class HFTropicsRecord(MloSmoTraceGasRecord):
-    gas_name = 'hf'
-    gas_unit = 'ppb'
-    gas_seas_cyc_coeff = 0.0
+    _gas_name = 'hf'
+    _gas_unit = 'ppb'
+    _gas_seas_cyc_coeff = 0.0
 
     ch4_hf_slopes_file = os.path.join(_data_dir, 'ch4_hf_slopes.nc')
 
@@ -1420,9 +1485,9 @@ class HFTropicsRecord(MloSmoTraceGasRecord):
 
 
 class CO2TropicsRecord(MloSmoTraceGasRecord):
-    gas_name = 'co2'
-    gas_unit = 'ppm'
-    gas_seas_cyc_coeff = 0.007
+    _gas_name = 'co2'
+    _gas_unit = 'ppm'
+    _gas_seas_cyc_coeff = 0.007
     # the default of infinity is kept for GGG2019 as the priors code was delivered to JPL before the necessity of this
     # correction was realized.
     # gas_trop_lifetime_yrs = 200.0 # estimated from Box 6.1 of Ch 6 of the IPCC AR5 (p. 473).
@@ -1430,9 +1495,9 @@ class CO2TropicsRecord(MloSmoTraceGasRecord):
 
 
 class N2OTropicsRecord(MloSmoTraceGasRecord):
-    gas_name = 'n2o'
-    gas_unit = 'ppb'
-    gas_seas_cyc_coeff = 0.0
+    _gas_name = 'n2o'
+    _gas_unit = 'ppb'
+    _gas_seas_cyc_coeff = 0.0
     gas_trop_lifetime_yrs = 121.0  # from table 8.A.1 of IPCC AR5, Ch 8, p. 731
 
     _ace_fn2o_file = os.path.join(_data_dir, 'ace_fn2o_lut.nc')
@@ -1474,9 +1539,9 @@ class N2OTropicsRecord(MloSmoTraceGasRecord):
 
     
 class CH4TropicsRecord(MloSmoTraceGasRecord):
-    gas_name = 'ch4'
-    gas_unit = 'ppb'
-    gas_seas_cyc_coeff = 0.012
+    _gas_name = 'ch4'
+    _gas_unit = 'ppb'
+    _gas_seas_cyc_coeff = 0.012
     gas_trop_lifetime_yrs = 12.4  # from Table 8.A.1 of IPCC AR5, Ch 8, p. 731
     # Values determined from the binned boundary layer (p > 800 hPa) differences between priors and ATom/HIPPO quantum
     # cascade laser CH4, filtering out over-land data. The bias increased from ~0 at the equator to ~60 ppb at 80 deg N.
@@ -1540,9 +1605,9 @@ class CH4TropicsRecord(MloSmoTraceGasRecord):
 
 
 class COTropicsRecord(TraceGasRecord):
-    gas_name = 'co'
-    gas_unit = 'ppb'
-    gas_seas_cyc_coeff = 0.2
+    _gas_name = 'co'
+    _gas_unit = 'ppb'
+    _gas_seas_cyc_coeff = 0.2
 
     def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
         """
@@ -1643,9 +1708,9 @@ class COTropicsRecord(TraceGasRecord):
 
 
 class O3TropicsRecord(TraceGasRecord):
-    gas_name = 'o3'
-    gas_unit = 'ppb'
-    gas_seas_cyc_coeff = None
+    _gas_name = 'o3'
+    _gas_unit = 'ppb'
+    _gas_seas_cyc_coeff = None
 
     def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
         o3 = mod_data['profile']['O3']
