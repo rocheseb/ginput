@@ -14,9 +14,11 @@ import argparse
 import datetime as dt
 import h5py
 from itertools import repeat, product
+import logging
 from multiprocessing import Pool
 import numpy as np
 import os
+import traceback
 
 from ..common_utils import mod_utils, mod_constants
 from ..common_utils.sat_utils import time_weight, datetime2datenum
@@ -34,8 +36,80 @@ _fill_val = -999999
 _string_fill = b'N/A'
 
 
+class ErrorHandler(object):
+    _err_codes = {'bad_time_str': 1,
+                  'eqlat_failure': 2,
+                  'prior_failure': 3}
+
+    _err_descriptions = {'bad_time_str': 'The OCO/ACOS time string could not be parsed',
+                         'eqlat_failure': 'A problem occurred while calculating equivalent latitude',
+                         'prior_failure': 'A problem occurred while calculating the prior itself'}
+
+    def __init__(self, suppress_error):
+        self.suppress_error = suppress_error
+
+    def handle_err(self, err, err_code_name, flags, inds):
+        """
+        Handle an error
+
+        If this class has ``suppress_error == False``, then the error will be raised as normal. Otherwise, the error
+        will be printed via the logger but will not halt execution. A full traceback will only be printed if the
+        logger's level is set to DEBUG or higher.
+
+        :param err: the exception object (caught by the try block) that represents the error.
+        :type err: :class:`Exception`
+
+        :param err_code_name: must be one of the keys in the class attribute ``_err_codes``. This will be used to
+         determine the numerical error code stored in the flags array.
+        :type err_code_name: str
+
+        :param flags: an integer array into which the error code will be stored. If None, then the error will always be
+         raised as normal, regardless of the value of ``self.suppress_error``.
+        :type flags: :class:`numpy.ndarray`
+
+        :param inds: any form of indexing that will assign the error code to the correct place in the flags array, i.e.
+         that is valid for ``flags[inds] = code``.
+
+        :return: None
+        """
+        if not self.suppress_error or flags is None:
+            raise err
+
+        try:
+            ecode = self._err_codes[err_code_name]
+        except KeyError:
+            raise ValueError('"{}" is not a valid error type'.format(err_code_name))
+
+        flags[inds] = ecode
+        if logger.level >= logging.DEBUG:
+            logger.exception(err)
+        else:
+            msg = ''.join(traceback.format_tb(err.__traceback__))
+            msg = msg.replace('\n', ': ')
+            logger.critical(
+                'Error at indices = {}. Error was: "{}". (Use -vvvv at the command line for full traceback.)'
+                .format(inds, msg))
+
+    def get_error_descriptions(self):
+        descriptions = []
+        for k in self._err_codes:
+            descriptions.append(self._err_codes[k], self._err_descriptions[k])
+
+        # Ensure descriptions are ascending by the error code
+        descriptions.sort(key=lambda el: el[0])
+
+        descript_strs = []
+        for code, meaning in descriptions:
+            descript_strs.append('{}: {}'.format(code, meaning))
+
+        return 'Value meanings:  ' + '; '.join(descript_strs)
+
+
+_def_errh = ErrorHandler(suppress_error=False)
+
+
 def acos_interface_main(instrument, met_resampled_file, geos_files, output_file, mlo_co2_file=None, smo_co2_file=None,
-                        cache_strat_lut=False, nprocs=0):
+                        cache_strat_lut=False, nprocs=0, error_handler=_def_errh):
     """
     The primary interface to create CO2 priors for the ACOS algorithm
 
@@ -66,15 +140,17 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
 
     :return: None, writes results to the HDF5 ``output_file``.
     """
+
     if instrument == 'oco':
-        met_data = read_oco_resampled_met(met_resampled_file)
+        met_data, prior_flags = read_oco_resampled_met(met_resampled_file, error_handler=error_handler)
     elif instrument == 'gosat':
-        met_data = read_gosat_resampled_met(met_resampled_file)
+        met_data, prior_flags = read_gosat_resampled_met(met_resampled_file, error_handler=error_handler)
     else:
         raise ValueError('instrument must be "oco" or "gosat"')
 
     # Reshape the met data from (soundings, footprints, levels) to (profiles, level)
     orig_shape = met_data['pv'].shape
+
     nlevels = orig_shape[-1]
     pv_array = met_data['pv'].reshape(-1, nlevels)
     theta_array = met_data['theta'].reshape(-1, nlevels)
@@ -82,11 +158,15 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
     datenum_array = met_data['datenums'].reshape(-1)
     qflag_array = met_data['quality_flags'].reshape(-1)
 
+    prior_flags = prior_flags.reshape(-1)
+
     eqlat_array = compute_sounding_equivalent_latitudes(sounding_pv=pv_array, sounding_theta=theta_array,
                                                         sounding_datenums=datenum_array, sounding_qflags=qflag_array,
-                                                        geos_files=geos_files, nprocs=nprocs)
+                                                        geos_files=geos_files, nprocs=nprocs, prior_flags=prior_flags,
+                                                        error_handler=error_handler)
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
+    prior_flags = prior_flags.reshape(orig_shape)
 
     # Create the CO2 priors
     if cache_strat_lut:
@@ -118,11 +198,13 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
         profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
                                           met_data=met_data, co2_record=co2_record, nprocs=nprocs)
 
-    # Add latitude and longitude to the priors file
+    # Add latitude, longitude, and flags to the priors file
     profiles['sounding_longitude'] = met_data['longitude']
     units['sounding_longitude'] = 'degrees_east'
     profiles['sounding_latitude'] = met_data['latitude']
     units['sounding_latitude'] = 'degrees_north'
+    profiles['prior_failure_flags'] = prior_flags
+    units['prior_failure_flags'] = error_handler.get_error_descriptions()
 
     # Convert the CO2 from ppm to dry mole fraction
     profiles['co2_prior'] *= 1e-6
@@ -149,7 +231,8 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
     write_prior_h5(output_file, profiles, units, geos_files, met_resampled_file)
 
 
-def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var_mapping, var_type_info):
+def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var_mapping, var_type_info,
+                  prior_flags=None, error_handler=_def_errh):
     """
     Underlying function that generates individual prior profiles in serial and parallel mode
 
@@ -215,7 +298,8 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
             mod_data, obs_date, dt.timedelta(hours=0), co2_record,
         )
     except Exception as err:
-        raise err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
+        new_err = err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
+        error_handler.handle_err(new_err, err_code_name='prior_failure', flags=prior_flags, inds=(i_sounding, i_foot))
 
     for h5_var, tccon_var in var_mapping.items():
         # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
@@ -271,7 +355,8 @@ def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
     return prof_dict
 
 
-def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
+def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record, prior_flags=None,
+                  error_handler=_def_errh):
     """
     Generate the priors, running in serial mode.
 
@@ -296,7 +381,8 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
             qflag = met_data['quality_flags'][i_sounding, i_foot]
 
             this_profiles, this_units = _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record,
-                                                      var_mapping, var_type_info)
+                                                      var_mapping, var_type_info, prior_flags=prior_flags,
+                                                      error_handler=error_handler)
             for h5_var, h5_array in profiles.items():
                 h5_array[i_sounding, i_foot, :] = this_profiles[h5_var]
             if this_units is not None:
@@ -305,7 +391,8 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record):
     return profiles, units
 
 
-def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record, nprocs):
+def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record, nprocs, prior_flags=None,
+                    error_handler=_def_errh):
     """
     Generate the priors, running in parallel mode.
 
@@ -334,7 +421,8 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
 
     with Pool(processes=nprocs) as pool:
         result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, qflags, mod_dicts, obs_dates,
-                                                 repeat(co2_record), repeat(var_mapping), repeat(var_type_info)))
+                                                 repeat(co2_record), repeat(var_mapping), repeat(var_type_info),
+                                                 repeat(prior_flags), repeat(error_handler)))
 
     # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
     # the units dict or None if the prior calculation did not run. We need to combine the profiles into one array per
@@ -351,7 +439,7 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
 
 
 def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_files,
-                                          nprocs=0):
+                                          nprocs=0, prior_flags=None, error_handler=_def_errh):
     """
     Compute equivalent latitudes for a collection of OCO soundings
 
@@ -371,6 +459,18 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     :param geos_files: a list of the GEOS 3D met files that bracket the times of all the soundings. Need not be absolute
      paths, but must be paths that resolve correctly from the current working directory.
     :type geos_files: list(str)
+
+    :param nprocs: number of processors to use to compute the equivalent latitudes. 0 will run in serial mode, anything
+     greater will use parallel mode.
+    :type nprocs: int
+
+    :param prior_flags: an integer array used to store numeric codes indicating why a particular prior failed to
+     generate.
+    :type prior_flags: :class:`numpy.ndarray`
+
+    :param error_handler: an ErrorHandler instance that determines how errors during the eq. lat. computation are caught
+     and handled.
+    :type error_handler: :class:`ErrorHandler`
 
     :return: an array of equivalent latitudes with dimensions (profiles, levels)
     :rtype: :class:`numpy.ndarray`
@@ -396,12 +496,14 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
     # the actual sounding time.
 
     if nprocs == 0:
-        return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns)
+        return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns,
+                             prior_flags=prior_flags, error_handler=error_handler)
     else:
         return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, nprocs=nprocs)
 
 
-def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geos_datenums):
+def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geos_datenums, prior_flags=None,
+                  error_handler=_def_errh):
     """
     Internal function that carries out the equivalent latitude calculation while running in either serial or parallel
 
@@ -447,8 +549,14 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geo
         logger.important('Sounding {}: could not find GEOS file by time. Assuming fill value for time'.format(idx))
         return default_return
 
-    last_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_last_geos])
-    next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
+    try:
+        last_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_last_geos])
+        next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
+    except Exception as err:
+        error_handler.handle_err(err, err_code_name='eqlat_failure', flags=prior_flags, inds=idx)
+        # If we're allowing the error to be suppressed, we need default eq. lat. profiles
+        last_el_profile = np.full_like(pv_vec, np.nan)
+        next_el_profile = np.full_like(pv_vec, np.nan)
 
     # Interpolate between the two times by calculating a weighted average of the two profiles based on the sounding
     # time. This avoids another for loop over all levels.
@@ -487,7 +595,8 @@ def _eqlat_clip(el):
                        .format(n_outside, max(max_below, max_above))) 
 
 
-def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns):
+def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns,
+                  prior_flags=None, error_handler=_def_errh):
     """
     Calculate equivalent latitude running in serial mode.
 
@@ -520,13 +629,15 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflag
     # the actual sounding time.
     logger.info('Running eq. lat. calculation in serial')
     for idx, (pv_vec, theta_vec, datenum, qflag) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags)):
-        sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, qflag, eqlat_fxns, geos_datenums)
+        sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, qflag, eqlat_fxns, geos_datenums,
+                                            prior_flags=prior_flags, error_handler=error_handler)
 
     _eqlat_clip(sounding_eqlat)
     return sounding_eqlat
 
 
-def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, nprocs):
+def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, nprocs,
+                    prior_flags=None, error_handler=_def_errh):
     """
     Calculate equivalent latitude running in parallel mode.
 
@@ -539,14 +650,15 @@ def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qfl
     with Pool(processes=nprocs) as pool:
         result = pool.starmap(_eqlat_helper, zip(range(sounding_pv.shape[0]), sounding_pv, sounding_theta,
                                                  sounding_datenums, sounding_qflags,
-                                                 repeat(eqlat_fxns), repeat(geos_datenums)))
+                                                 repeat(eqlat_fxns), repeat(geos_datenums), repeat(prior_flags),
+                                                 repeat(error_handler)))
 
     sounding_eqlat = np.array(result)
     _eqlat_clip(sounding_eqlat)
     return sounding_eqlat
 
 
-def read_oco_resampled_met(met_file):
+def read_oco_resampled_met(met_file, error_handler=_def_errh):
     met_group = 'Meteorology'
     sounding_group = 'SoundingGeometry'
     var_dict = {'pv': [met_group, 'epv_profile_met'],
@@ -562,10 +674,10 @@ def read_oco_resampled_met(met_file):
                 'quality_flags': [sounding_group, 'sounding_qual_flag']
                 }
 
-    return read_resampled_met(met_file, var_dict)
+    return read_resampled_met(met_file, var_dict, error_handler=error_handler)
 
 
-def read_gosat_resampled_met(met_file):
+def read_gosat_resampled_met(met_file, error_handler=_def_errh):
     met_group = 'Meteorology'
     sounding_group = 'SoundingGeometry'
     sounding_header = 'SoundingHeader'
@@ -586,7 +698,7 @@ def read_gosat_resampled_met(met_file):
     # level. GOSAT arrays have exposure, band, polarization, and level. To ensure compatibility, make them have
     # [exposure, 1, level] or [exposure, 1] if they should be 2D.
 
-    data = read_resampled_met(met_file, var_dict)
+    data = read_resampled_met(met_file, var_dict, error_handler=error_handler)
     for name, arr in data.items():
         data[name] = _gosat_normalize_shape(arr, name)
     return data
@@ -632,7 +744,7 @@ def _gosat_normalize_shape(arr, name):
         raise NotImplementedError('Do not know how to handle a {}D GOSAT array'.format(arr.ndim))
 
 
-def read_resampled_met(met_file, var_dict):
+def read_resampled_met(met_file, var_dict, error_handler=_def_errh):
     """
     Read the required data from the HDF5 file containing the resampled met data.
 
@@ -676,10 +788,13 @@ def read_resampled_met(met_file, var_dict):
     # needs scaled to units of PVU
 
     # pressure in the met file is in Pa, need hPa for the potential temperature calculation
+    flags = np.zeros(data_dict['pressure'].shape, dtype=np.int16)
     data_dict['pressure'] *= 0.01  # convert from Pa to hPa
     data_dict['theta'] = mod_utils.calculate_potential_temperature(data_dict['pressure'], data_dict['temperature'])
-    data_dict['dates'] = _convert_acos_time_strings(data_dict['date_strings'], format='datetime')
-    data_dict['datenums'] = _convert_acos_time_strings(data_dict['date_strings'], format='datenum')
+    data_dict['dates'] = _convert_acos_time_strings(data_dict['date_strings'], format='datetime', flag_array=flags,
+                                                    error_handler=error_handler)
+    data_dict['datenums'] = _convert_acos_time_strings(data_dict['date_strings'], format='datenum', flag_array=flags,
+                                                       error_handler=error_handler)
     data_dict['pv'] *= 1e6
 
     data_dict['altitude'] *= 1e-3  # in meters, need kilometers
@@ -689,7 +804,7 @@ def read_resampled_met(met_file, var_dict):
     # 21 May 2019. We can use this as the surface altitude, just need to convert from meters to kilometers.
     data_dict['surf_alt'] = 1e-3 * data_dict.pop('surf_gph')
 
-    return data_dict
+    return data_dict, flags
 
 
 def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_file):
@@ -730,7 +845,7 @@ def write_prior_h5(output_file, profile_variables, units, geos_files, resampler_
             dset.attrs['units'] = var_unit
 
 
-def _convert_acos_time_strings(time_string_array, format='datetime'):
+def _convert_acos_time_strings(time_string_array, format='datetime', flag_array=None, error_handler=_def_errh):
     """
     Convert an array of time strings in format yyyy-mm-ddTHH:MM:SS.dddZ into an array of python datetimes
 
@@ -759,14 +874,18 @@ def _convert_acos_time_strings(time_string_array, format='datetime'):
 
     output_array = np.full([time_string_array.size], init_val)
     for idx, time_str in enumerate(time_string_array.flat):
-        time_str = time_str.decode('utf8')
-        datetime_obj = dt.datetime.strptime(time_str, _acos_tstring_fmt)
-        if format == 'datetime':
-            output_array[idx] = datetime_obj
-        elif format == 'datenum':
-            output_array[idx] = datetime2datenum(datetime_obj)
-        else:
-            raise NotImplementedError('No conversion method defined for format == "{}"'.format(format))
+        try:
+            time_str = time_str.decode('utf8')
+            datetime_obj = dt.datetime.strptime(time_str, _acos_tstring_fmt)
+            if format == 'datetime':
+                output_array[idx] = datetime_obj
+            elif format == 'datenum':
+                output_array[idx] = datetime2datenum(datetime_obj)
+            else:
+                raise NotImplementedError('No conversion method defined for format == "{}"'.format(format))
+        except Exception as err:
+            # Must use ravel to get a flat view into the same memory; flatten returns a copy
+            error_handler.handle_err(err, err_code_name='bad_time_str', flags=flag_array.ravel(), inds=idx)
 
     return np.reshape(output_array, time_string_array.shape)
 
@@ -944,6 +1063,14 @@ def parse_args(parser=None, oco_or_gosat=None):
                         help='Silence all logging except warnings and critical messages. Note: some messages that do '
                              'not use the standard logger will also not be silenced.')
     parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use in parallelization')
+    parser.add_argument('--raise-errors', action='store_true', help='Raise errors normally rather than suppressing and '
+                                                                    'logging them.')
+
+    parser.epilog = 'A note on error handling: by default, most errors will be caught and, rather than halt the ' \
+                    'execution of this program, will result in a non-zero flag value being stored. A short version ' \
+                    'of the error message will also be printed via the logger. A full traceback can be printed to ' \
+                    'the logger by increasing the verbosity to full (-vvvv). Alternately, normal error behavior can ' \
+                    'be restored with the --raise-errors flag'
 
     if i_am_main:
         parser.set_defaults(instrument='oco')
@@ -957,6 +1084,9 @@ def parse_args(parser=None, oco_or_gosat=None):
 def cl_driver(**args):
     log_level = args.pop('log_level')
     setup_logger(level=log_level)
+
+    raise_errors = args.pop('raise_errors')
+    handler = ErrorHandler(suppress_error=not raise_errors)
 
     acos_interface_main(**args)
 
