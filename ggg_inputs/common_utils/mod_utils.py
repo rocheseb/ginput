@@ -8,14 +8,13 @@ Compatibility notes:
 from __future__ import print_function, division
 
 import datetime as dt
-
+from collections import OrderedDict
 import numpy
 from dateutil.relativedelta import relativedelta
 import netCDF4 as ncdf
 import numpy as np
 from numpy import ma
 import os
-from packaging import version
 import pandas as pd
 import re
 
@@ -536,34 +535,55 @@ def vmr_file_name(obs_date, lon, lat, keep_latlon_prec=False):
     prec = 2 if keep_latlon_prec else 0
     lat = format_lat(lat, prec=prec)
     lon = format_lon(lon, prec=prec, zero_pad=True)
-    major_version = version.parse(const.priors_version).release[0]
+    major_version = const.priors_version.split('.')[0]
     return 'JL{ver}_{date}_{lat}_{lon}.vmr'.format(ver=major_version, date=obs_date.strftime('%Y%m%d%H'),
                                                    lat=lat, lon=lon)
 
 
-def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_alt, profile_gases, isotope_opts=None):
+def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_alt, profile_gases, gas_name_order=None):
     """
-    Write a .vmr file
-    :param vmr_file:
-    :param tropopause_alt:
-    :param profile_date:
-    :param profile_lat:
-    :param profile_alt:
-    :param profile_gases:
-    :return:
+    Write a new-style .vmr file (without seasonal cycle, secular trends, and latitudinal gradients
+
+    :param vmr_file: the path to write the .vmr file ar
+    :type vmr_file: str
+
+    :param tropopause_alt: the altitude of the tropopause, in kilometers
+    :type tropopause_alt: float
+
+    :param profile_date: the date of the profile
+    :type profile_date: datetime-like
+
+    :param profile_lat: the latitude of the profile (south is negative)
+    :type profile_lat: float
+
+    :param profile_alt: the altitude levels that the profiles are defined on, in kilometers
+    :type profile_alt: array-like
+
+    :param profile_gases: a dictionary of the prior profiles to write to the .vmr file.
+    :type profile_gases: dict(array)
+
+    :param gas_name_order: optional, a list/tuple specifying what order the gases are to be written in. If not given,
+     they will be written in whatever order the iteration through ``profile_gases`` defaults to. If given, then an
+     error is raised if any of the gas names listed here are not present in ``profile_gases`` (comparison is case-
+     insensitive). Any gases not listed here that are in ``profile_gases`` are skipped.
+    :type gas_name_order: list(str)
+
+    :return: none, writes the .vmr file.
     """
-    isotope_opts = dict() if isotope_opts is None else isotope_opts
-    gas_name_order = read_isotopes(get_isotopes_file(**isotope_opts), gases_only=True)
-    gas_name_order_lower = [name.lower() for name in gas_name_order]
-    gas_name_mapping = {k: None for k in gas_name_order}
 
     if np.ndim(profile_alt) != 1:
         raise ValueError('profile_alt must be 1D')
 
+    if gas_name_order is None:
+        gas_name_order = [k for k in profile_gases.keys()]
+
+    gas_name_order_lower = [name.lower() for name in gas_name_order]
+    gas_name_mapping = {k: None for k in gas_name_order}
+
     # Check that all the gases in the profile_gases dict are expected to be written.
     for gas_name, gas_data in profile_gases.items():
         if gas_name.lower() not in gas_name_order_lower:
-            logger.warning('Gas "{}" was not listed in the isotopologs.dat file and will not be written to the .vmr '
+            logger.warning('Gas "{}" was not listed in the gas name order and will not be written to the .vmr '
                            'file'.format(gas_name))
         elif np.shape(gas_data) != np.shape(profile_alt):
             raise ValueError('Gas "{}" has a different shape ({}) than the altitude data ({})'.format(
@@ -599,7 +619,7 @@ def write_vmr_file(vmr_file, tropopause_alt, profile_date, profile_lat, profile_
             fobj.write('\n')
 
 
-def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True, style='new'):
+def read_vmr_file(vmr_file, as_dataframes=False, lowercase_names=True, style='new'):
     nheader = get_num_header_lines(vmr_file)
 
     if style == 'new':
@@ -637,7 +657,7 @@ def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True, style='new
     if lowercase_names:
         data_table.columns = [v.lower() for v in data_table]
 
-    if as_dataframs:
+    if as_dataframes:
         header_data = pd.DataFrame(header_data, index=[0])
         # Rearrange the prior info dict so that the data frame has the categories as the index and the species as the
         # columns.
@@ -647,7 +667,9 @@ def read_vmr_file(vmr_file, as_dataframs=False, lowercase_names=True, style='new
             tmp_prior_info[k] = np.array([prior_info[cat][i] for cat in categories])
         prior_info = pd.DataFrame(tmp_prior_info, index=categories)
     else:
-        data_table = {k: v.to_numpy() for k, v in data_table.items()}
+        # use an ordered dict to ensure we keep the order of the gases. This is important if we use this .vmr file as
+        # a template to write another .vmr file that gsetup.f can read.
+        data_table = OrderedDict([(k, v.to_numpy()) for k, v in data_table.items()])
 
     return {'scalar': header_data, 'profile': data_table, 'prior_info': prior_info}
 

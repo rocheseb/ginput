@@ -132,6 +132,10 @@ class GasRecordDateError(GasRecordError):
     pass
 
 
+class GGGPathError(Exception):
+    pass
+
+
 def _init_prof(profs, n_lev, n_profs=0, fill_val=np.nan):
     """
     Initialize arrays for various profiles.
@@ -1280,6 +1284,15 @@ class MloSmoTraceGasRecord(TraceGasRecord):
 
 class MidlatTraceGasRecord(TraceGasRecord):
     _std_vmr_file = ''
+    # Latitudes and widths of ITCZ in July and January (every 15 deg from 0 to 360)
+    # First and last points (O and 360 deg) are repeated to simplify interpolation.
+    # from wiki https://en.wikipedia.org/wiki/Intertropical_Convergence_Zone#/media/File:ITCZ_january-july.png
+    # Assume peak Northward excursion of ITCZ is mid-July (idoy=198)
+    # Assume peak Southward excursion of ITCZ is mid-Jan (idoy=15)
+    # Copied from gsetup/calc_itcz.f in changeset 20597c7420c2
+    _vlat_jul = np.array([16, 20, 24, 27, 29, 30, 30, 30, 29, 26, 21, 20, 19, 19, 19, 19, 18, 16, 11, 5, 1, 4, 8, 12, 16], dtype=np.float)
+    _vlat_jan = np.array([3, 5, -8, -14, -12, -8, -5, -4, -5, -7, -10, -13, -14, -14, -10, -4, 0, 1, 0, -2, -6, -8, -6, -2, 3], dtype=np.float)
+    _vwidth = np.array([11, 10, 9, 8, 8, 9, 10, 11, 12, 12, 11, 10, 9, 8, 7, 6, 7, 8, 11, 13, 14, 14, 13, 12, 11], dtype=np.float)
 
     @property
     def gas_name(self):
@@ -1306,20 +1319,150 @@ class MidlatTraceGasRecord(TraceGasRecord):
         return self._base_profile
 
     def __init__(self, gas, vmr_file=None):
-        gas = gas.lower()
         if vmr_file is None:
             vmr_file = self._std_vmr_file
 
-        vmr_info = mod_utils.read_vmr_file(vmr_file, as_dataframs=True, style='old')
-        if gas not in vmr_info['profile'].columns:
+        vmr_info = mod_utils.read_vmr_file(vmr_file, as_dataframes=True, style='old')
+        if gas.lower() not in vmr_info['profile'].columns:
             raise ValueError('Gas "{}" not found in the .vmr file {}'.format(gas, vmr_file))
 
         self._this_gas_name = gas
+        gas = gas.lower()
         self._this_gas_unit = 'mol/mol'
         self._this_gas_seas_cyc_coeff = vmr_info['prior_info'].loc['Seasonal Cycle', gas]
         self._this_gas_sec_trend = vmr_info['prior_info'].loc['Secular Trends', gas]
         self._this_gas_lat_grad = vmr_info['prior_info'].loc['Latitude Gradient', gas]
         self._base_profile = vmr_info['profile'][['altitude', gas]]
+        self._base_tropopause = vmr_info['scalar']['ztrop_vmr'].item()
+        self._ref_lat = vmr_info['scalar']['lat_vmr'].item()
+        self._ref_decimal_date = vmr_info['scalar']['date_vmr'].item()
+
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, use_theta_eqlat=True, **kwargs):
+        obs_doy = mod_utils.day_of_year(obs_date)
+        itcz_lat, itcz_width = self.calc_itcz(lon_obs=mod_data['file']['lon'], doy_obs=obs_doy)
+
+        z = mod_data['profile']['Height']
+        p = mod_data['profile']['Pressure']
+        ptrop = mod_data['scalar']['TROPPB']
+        ztrop = mod_utils.interp_tropopause_height_from_pressure(p_trop_met=ptrop, p_met=p, z_met=z)
+
+        prof_gas[:] = self.resample_vmrs_at_effective_altitudes(z=z, itcz_lat=itcz_lat, itcz_width=itcz_width,
+                                                                ztrop_mod=ztrop, obslat_mod=obs_lat)
+
+        xx_trop = z < ztrop
+        if use_theta_eqlat:
+            trop_eqlat = get_trop_eq_lat(prof_theta=mod_data['profile']['PT'], p_levels=p, obs_lat=obs_lat, obs_date=obs_date)
+        else:
+            trop_eqlat = obs_lat
+
+        trop_aoa = mod_utils.age_of_air(lat=trop_eqlat, z=z[xx_trop], ztrop=ztrop, ref_lat=self._ref_lat)
+
+        prof_gas[xx_trop] = self.apply_lat_grad(prof_gas[xx_trop], trop_eqlat, z=z[xx_trop], ztrop_mod=ztrop)
+        prof_gas[xx_trop] = self.apply_secular_trends(prof_gas[xx_trop], date_obs=obs_date, age_of_air=trop_aoa)
+        prof_gas[xx_trop] *= mod_utils.seasonal_cycle_factor(lat=trop_eqlat, z=z[xx_trop], ztrop=ztrop,
+                                                             fyr=mod_utils.date_to_frac_year(obs_date), species=self,
+                                                             ref_lat=self._ref_lat)
+
+        # TODO: add what ancillary data is available.
+        return prof_gas, dict()
+
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        z = mod_data['profile']['Height']
+        p = mod_data['profile']['Pressure']
+        ptrop = mod_data['scalar']['TROPPB']
+        ztrop = mod_utils.interp_tropopause_height_from_pressure(p_trop_met=ptrop, p_met=p, z_met=z)
+
+        prof_theta = mod_data['profile']['PT']
+        prof_eqlat = mod_data['profile']['EqL']
+        retrieval_doy = int(mod_utils.clams_day_of_year(retrieval_date))
+
+        xx_strat = z >= ztrop
+        xx_middleworld = np.zeros(prof_theta.shape, dtype=np.bool_)
+        age_of_air_years = get_clams_age(prof_theta, prof_eqlat, retrieval_doy, as_timedelta=False)
+        xx_middleworld[xx_strat & np.isnan(age_of_air_years)] = True
+        age_of_air_years = age_of_air_years[xx_strat]
+        # Because the legacy approach to dealing with the gases may identify a level below 380 K as "stratosphere
+        #first_age = np.flatnonzero(~np.isnan(age_of_air_years))[0]
+        #xx_nans = slice(first_age)
+        #age_of_air_years[xx_nans] = age_of_air_years[first_age]
+
+        prof_gas[xx_strat] = self.apply_lat_grad(prof_gas[xx_strat], lat_obs=prof_eqlat[xx_strat], z=z[xx_strat],
+                                                 ztrop_mod=ztrop)
+        prof_gas[xx_strat] = self.apply_secular_trends(prof_gas[xx_strat], date_obs=retrieval_date,
+                                                       age_of_air=age_of_air_years)
+        prof_gas[xx_strat] *= mod_utils.seasonal_cycle_factor(lat=prof_eqlat[xx_strat], z=z[xx_strat], ztrop=ztrop,
+                                                              fyr=mod_utils.date_to_frac_year(retrieval_date),
+                                                              species=self, ref_lat=self._ref_lat)
+
+        prof_gas[xx_middleworld] = np.interp(prof_theta[xx_middleworld], prof_theta[~xx_middleworld], prof_gas[~xx_middleworld])
+
+        return prof_gas, dict()
+
+    def add_extra_column(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        return prof_gas, dict()
+
+    @classmethod
+    def calc_itcz(cls, lon_obs, doy_obs):
+        if lon_obs < 0:
+            lon_obs += 360.0
+
+        nlon = cls._vwidth.size - 1
+        xlon = nlon/360.0 * lon_obs
+        ilon = int(xlon)
+        fr = xlon - ilon
+        ilon = ilon % nlon  # don't have to change from 1-based in fortran to 0-based here b/c the fortran arrays were
+                            # zero-indexed
+
+        itcz_width = (1 - fr) * cls._vwidth[ilon] + fr * cls._vwidth[ilon + 1]
+
+        janlat = (1 - fr) * cls._vlat_jan[ilon] + fr * cls._vlat_jan[ilon + 1]
+        jullat = (1 - fr) * cls._vlat_jul[ilon] + fr * cls._vlat_jul[ilon + 1]
+        itcz_lat = 0.5 * (jullat + janlat - (jullat-janlat) * np.cos(2*np.pi*(doy_obs-15)/mod_utils.days_per_year))
+
+        return itcz_lat, itcz_width
+
+    def resample_vmrs_at_effective_altitudes(self, z, itcz_lat, itcz_width, ztrop_mod, obslat_mod):
+        ztrop_vmr = self._base_tropopause
+        zeff = np.full_like(z, np.nan)
+        # troposphere - just scale to tropopause
+        xx_trop = z < ztrop_mod
+        zeff[xx_trop] = z[xx_trop] * ztrop_vmr/ztrop_mod
+
+        # stratosphere - stretch/compress only the bottom levels, also account for the location of the ITCZ
+        zs = z[~xx_trop]
+        zeff[~xx_trop] = zs + np.exp(-(zs - ztrop_mod)/10.0) * (ztrop_vmr - ztrop_mod -
+                                                                3.5*ztrop_mod*(zs/ztrop_mod - 1)**2.0 *
+                                                                np.exp(-((obslat_mod - itcz_lat)/(itcz_width+10))**4.0))
+
+        zeff[zeff > z[-1]] = z[-1]
+
+        # Basically what we're doing here is interpolating the gas in the .vmr file to the levels that the .mod file is
+        # defined on, *but* instead of interpolating to them directly, we're calculating effective altitudes that
+        # account for the difference in tropopause height between the .vmr file and the .mod file.
+        return np.interp(zeff, self._base_profile['altitude'].to_numpy(), self._base_profile[self.gas_name.lower()].to_numpy())
+
+    def apply_lat_grad(self, vmrin, lat_obs, z, ztrop_mod):
+        xref = self.gas_lat_grad * (self._ref_lat/15.0)/np.sqrt(1+(self._ref_lat/15)**2)
+        xobs = self.gas_lat_grad * (lat_obs/15.0)/np.sqrt(1+(lat_obs/15)**2)
+        fr = 1.0 / (1.0 + (z / ztrop_mod)**2)
+        return vmrin * (1 + fr*xobs)/(1 + fr*xref)
+
+    def apply_secular_trends(self, vmrin, date_obs, age_of_air):
+        tdiff = mod_utils.date_to_decimal_year(date_obs) - self._ref_decimal_date
+        tdmaoa = tdiff - age_of_air
+        vmrout = vmrin * (1 + self.gas_sec_trend * tdmaoa)
+
+        name = self.gas_name.lower()
+        if name == 'co2':
+            vmrout *= (1.0 + (tdmaoa/155.0)**2)
+        elif name == 'ch4':
+            vmrout *= (1.004 - 0.024 * (tdmaoa + 2.5)/np.sqrt(25.0 + (tdmaoa+2.5)**2))
+        elif name == 'hf':
+            vmrout *= (1.0 + np.exp((-tdmaoa-16.0)/5.0))
+        elif name == 'f113':
+            vmrout *= (1.0 + np.exp((-tdmaoa-4.0)/9.0))
+
+        return vmrout
 
 
 class HFTropicsRecord(MloSmoTraceGasRecord):
@@ -1604,7 +1747,7 @@ class CH4TropicsRecord(MloSmoTraceGasRecord):
         return fch4_lut_final
 
 
-class COTropicsRecord(TraceGasRecord):
+class CORecord(TraceGasRecord):
     _gas_name = 'co'
     _gas_unit = 'ppb'
     _gas_seas_cyc_coeff = 0.2
@@ -1707,7 +1850,23 @@ class COTropicsRecord(TraceGasRecord):
         return extra_co_dmf, level_ind_to_add
 
 
-class O3TropicsRecord(TraceGasRecord):
+class H2ORecord(TraceGasRecord):
+    _gas_name = 'h2o'
+    _gas_unit = 'mol/mol'
+    _gas_seas_cyc_coeff = None
+
+    def add_trop_prior(self, prof_gas, obs_date, obs_lat, mod_data, **kwargs):
+        prof_gas[:] = mod_data['profile']['H2O']
+        return prof_gas, dict()
+
+    def add_strat_prior(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        return prof_gas, dict()
+
+    def add_extra_column(self, prof_gas, retrieval_date, mod_data, **kwargs):
+        return prof_gas, dict()
+
+
+class O3Record(TraceGasRecord):
     _gas_name = 'o3'
     _gas_unit = 'ppb'
     _gas_seas_cyc_coeff = None
@@ -1719,8 +1878,8 @@ class O3TropicsRecord(TraceGasRecord):
 
         # ratio molar masses. O3 = 3*O (16e-3 kg/mol)
         rmm = (3 * 16.0e-3) / const.mass_dry_air
-        # convert to mol/mol
-        o3 /= rmm
+        # convert to mol/mol. don't use /= because that changes the array in mod_data too.
+        o3 = o3 / rmm
         # convert to ppb
         prof_gas[:] = o3 * 1e9
         return prof_gas, dict()
@@ -1733,8 +1892,8 @@ class O3TropicsRecord(TraceGasRecord):
 
 
 # Make the list of available gases' records
-gas_records = {r.gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord]}
-                                       #COTropicsRecord]}
+gas_records = {r._gas_name: r for r in [CO2TropicsRecord, N2OTropicsRecord, CH4TropicsRecord, HFTropicsRecord,
+                                       CORecord, O3Record, H2ORecord]}
 
 
 def regenerate_gas_strat_lut_files():
@@ -2339,7 +2498,7 @@ def _setup_zgrid(zgrid):
     if isinstance(zgrid, str):
         int_info = mod_utils.read_integral_file(zgrid)
         return int_info['Height']
-    elif not isinstance(zgrid, (None, np.ndarray, xr.DataArray)):
+    elif not isinstance(zgrid, (type(None), np.ndarray, xr.DataArray)):
         raise TypeError('zgrid must be a string, None, numpy array, or xarray DataArray')
     else:
         return zgrid
@@ -2442,7 +2601,6 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
      units of the values in each profile.
     :rtype: dict, dict
     """
-
     if isinstance(mod_file_data, str):
         mod_file_data = mod_utils.read_mod_file(mod_file_data)
     elif not isinstance(mod_file_data, dict):
@@ -2553,13 +2711,93 @@ def generate_single_tccon_prior(mod_file_data, utc_offset, concentration_record,
     return map_dict, units_dict, map_constants
 
 
+def _get_std_vmr_file(std_vmr_file):
+    """
+    Get the path to the standard .vmr file
+
+    Looks for ``$GGGPATH/vmrs/gnd/summer_35N.vmr``, unless a path to a .vmr file is given explicitly or a false-y value
+    is given to skip that.
+
+    :param std_vmr_file: the input given for the .vmr file
+    :type std_vmr_file: None, str, or bool
+
+    :return: the path to the .vmr file or the other input
+    :raises GGGPathError: if ``$GGGPATH`` is not defined and it needs to find the standard file or it cannot find the
+     standard file in the expected place.
+    """
+    if std_vmr_file is None:
+        gggpath = os.getenv('GGGPATH')
+        if gggpath is None:
+            raise GGGPathError('GGGPATH environmental variable is not defined. Either define it, explicitly pass a '
+                               'path to a .vmr file with northern midlat profiles for all gases, or pass False to '
+                               'only write the primary gases to the .vmr file')
+        std_vmr_file = os.path.join(gggpath, 'vmrs', 'gnd', 'summer_35N.vmr')
+        if not os.path.isfile(std_vmr_file):
+            raise GGGPathError('The standard .vmr file is not present in the expected location ({}). Your GGGPATH '
+                               'environmental variable may be incorrect, or the structure of the GGG directory has '
+                               'changed. Either correct your GGGPATH value, explicitly pass a path to a .vmr file with '
+                               'northern midlat profiles for all gases, or pass False to only write the primary gases '
+                               'to the .vmr file')
+        return std_vmr_file
+    else:
+        return std_vmr_file
+
+
+def generate_full_tccon_vmr_file(mod_data, utc_offsets, save_dir, std_vmr_file=None, site_abbrevs='xx',
+                                 keep_latlon_prec=False):
+    """
+    Generate a .vmr file with all the gases required by TCCON (both retrieved and secondary).
+
+    ``mod_data``, ``utc_offsets`` and ``site_abbrevs`` may be single values or collections. See
+    :func:`generate_tccon_priors_driver` in this module for details.
+
+    :param mod_data: a dictionary mimicking that from reading a .mod file or the path to a .mod file
+    :type mod_data: dict or str
+
+    :param utc_offsets: difference(s) between local time and UTC time for each site
+    :type utc_offsets: :class:`datetime.timedelta` or list(:class:`datetime.timedelta`)
+
+    :param save_dir: where to save the .vmr files
+    :type save_dir: str
+
+    :param std_vmr_file: a standard .vmr file that has profiles for all the gases needed by TCCON, as well as their
+     seasonal cycles, latitudinal gradients, and secular trends. These profiles are assumed to be base profiles
+     representative of one latitude/time that can be modified for other locations/times. If this is not given, then the
+     code will try to look for ``$GGGPATH/vmrs/gnd/summer_35N.vmr``. If you do not have ``GGGPATH`` defined as an
+     environmental variable, it will error. You may pass an explicit path to a .vmr file to override that, or ``False``
+     to only write the primary gases to the .vmr file.
+    :type std_vmr_file: None, str, or bool
+
+    :param site_abbrevs: abbreviation or list of abbreviations for the sites the .vmr files are being written for.
+    :type site_abbrevs: str or list(str)
+
+    :param keep_latlon_prec: by default, latitude/longitude in the .vmr filenames is rounded to the nearest integer.
+     Set this to ``True`` to keep 2 decimal places of precision.
+    :type keep_latlon_prec: bool
+
+    :return: none, writes .vmr files
+    :raises GGGPathError: if ``$GGGPATH`` is not defined and it needs to find the standard file or it cannot find the
+     standard file in the expected place.
+    """
+    std_vmr_file = _get_std_vmr_file(std_vmr_file)
+    if std_vmr_file:
+        std_vmr_gases = mod_utils.read_vmr_file(std_vmr_file, lowercase_names=False, style='old')
+        std_vmr_gases = list(std_vmr_gases['profile'].keys())
+        std_vmr_gases.remove('Altitude')
+    else:
+        std_vmr_gases = list(gas_records.keys())
+    species = [gas_records[gas.lower()]() if gas.lower() in gas_records else MidlatTraceGasRecord(gas, vmr_file=std_vmr_file) for gas in std_vmr_gases]
+    generate_tccon_priors_driver(mod_data=mod_data, utc_offsets=utc_offsets, species=species, site_abbrevs=site_abbrevs,
+                                 write_vmrs=save_dir, keep_latlon_prec=keep_latlon_prec, gas_name_order=std_vmr_gases)
+
+
 def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='xx', write_maps=False,
-                                 write_vmrs=False, isotope_file_opts=None, keep_latlon_prec=False, **prior_kwargs):
+                                 write_vmrs=False, gas_name_order=None, keep_latlon_prec=False, **prior_kwargs):
     """
     Generate multiple TCCON priors or a file containing multiple gas concentrations
 
     This function wraps :func:`generate_single_tccon_prior`  in order to generate priors for one or more gases for one
-    or more sites. The inputs ``mod_data``, ``obs_dates``, ``utc_offsets``, and ``site_abbrevs`` determine the number of
+    or more sites. The inputs ``mod_data``, ``utc_offsets``, and ``site_abbrevs`` determine the number of
     sites. Each of these must be either a single instance of the correct type or a collection of those types. Any of
     them given as collections must have the same number of elements; those given as single instances will be used for
     all profiles.
@@ -2573,8 +2811,6 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
 
     :param mod_data: input to :func:`generate_single_tccon_prior`, see that function.
 
-    :param obs_dates:  input to :func:`generate_single_tccon_prior`, see that function.
-
     :param utc_offsets:  input to :func:`generate_single_tccon_prior`, see that function.
 
     :param species: either gas names as strings or instances of :class:`TraceGasTropicsRecord` that set up which gases'
@@ -2586,8 +2822,12 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
     :param write_maps: if ``False``, then .map files are not written. If truthy, then it must be a path to the directory
      where the .map files are to be written.
 
-    :param write_vmrs: if ``False``, then .map files are not written. If truthy, then it must be a path to the directory
+    :param write_vmrs: if ``False``, then .vmr files are not written. If truthy, then it must be a path to the directory
      where the .map files are to be written.
+
+    :param gas_name_order: the order that the gases are to be written in in the output files. Currently only affects the
+     .vmr files. See :func:`mod_utils.write_vmr_file` for more information.
+    :type gas_name_order: list(str)
 
     :param keep_latlon_prec: if ``False``, then .vmr files written are named with lat/lon rounded to integers. If
      ``True``, then 2 decimal places are retained.
@@ -2629,6 +2869,8 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
             return 1e-6
         elif unit == 'ppb':
             return 1e-9
+        elif unit == 'mol/mol':
+            return 1.0
         else:
             raise ValueError('No conversion factor defined for "{}"'.format(unit))
 
@@ -2663,7 +2905,7 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
                                             specie_record, site_abbrev=site_abbrevs[iprofile], write_map=False,
                                             **prior_kwargs)
 
-            if ispecie == 0:
+            if ispecie == 0 or np.isnan(map_constants['tropopause_alt']):
                 profile_dict = specie_profile
                 units_dict = specie_units
                 map_constants = specie_constants
@@ -2680,9 +2922,9 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
             vmr_gases[gas_name] = specie_profile[gas_name] * get_scale_factor(specie_units[gas_name])
 
         # Write the combined .map file for all the requested species
-        site_lat = specie_constants['site_lat']
-        site_lon = specie_constants['site_lon']
-        site_date = specie_constants['datetime']
+        site_lat = map_constants['site_lat']
+        site_lon = map_constants['site_lon']
+        site_date = map_constants['datetime']
         if write_maps:
             map_name = os.path.join(maps_dir, mod_utils.map_file_name(site_abbrevs[iprofile], site_lat, site_date))
             mod_utils.write_map_file(map_name, variables=profile_dict, units=units_dict, var_order=var_order,
@@ -2691,10 +2933,10 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
             vmr_name = mod_utils.vmr_file_name(obs_date=site_date, lon=site_lon, lat=site_lat,
                                                keep_latlon_prec=keep_latlon_prec)
             vmr_name = os.path.join(vmrs_dir, vmr_name)
-            mod_utils.write_vmr_file(vmr_name, tropopause_alt=specie_constants['tropopause_alt'],
+            mod_utils.write_vmr_file(vmr_name, tropopause_alt=map_constants['tropopause_alt'],
                                      profile_date=site_date, profile_lat=site_lat,
-                                     profile_alt=specie_profile['Height'], profile_gases=vmr_gases,
-                                     isotope_opts=isotope_file_opts)
+                                     profile_alt=profile_dict['Height'], profile_gases=vmr_gases,
+                                     gas_name_order=gas_name_order)
 
 ###########################################
 # FUNCTIONS FOR GENERATING GRIDDED PRIORS #

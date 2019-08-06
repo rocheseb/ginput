@@ -228,7 +228,7 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
     elif gas_name.lower() == 'hf':
         gas_rec = tccon_priors.HFTropicsRecord()
     elif gas_name.lower() == 'co':
-        gas_rec = tccon_priors.COTropicsRecord()
+        gas_rec = tccon_priors.CORecord()
     else:
         raise RuntimeError('No record defined for gas_name = "{}"'.format(gas_name))
 
