@@ -93,7 +93,7 @@ class ErrorHandler(object):
     def get_error_descriptions(self):
         descriptions = []
         for k in self._err_codes:
-            descriptions.append(self._err_codes[k], self._err_descriptions[k])
+            descriptions.append((self._err_codes[k], self._err_descriptions[k]))
 
         # Ensure descriptions are ascending by the error code
         descriptions.sort(key=lambda el: el[0])
@@ -150,6 +150,7 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
 
     # Reshape the met data from (soundings, footprints, levels) to (profiles, level)
     orig_shape = met_data['pv'].shape
+    flags_orig_shape = prior_flags.shape
 
     nlevels = orig_shape[-1]
     pv_array = met_data['pv'].reshape(-1, nlevels)
@@ -166,7 +167,7 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
                                                         error_handler=error_handler)
 
     met_data['el'] = eqlat_array.reshape(orig_shape)
-    prior_flags = prior_flags.reshape(orig_shape)
+    prior_flags = prior_flags.reshape(flags_orig_shape)
 
     # Create the CO2 priors
     if cache_strat_lut:
@@ -279,6 +280,10 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record, var
 
     if qflag != 0:
         logger.info('Quality flag != 0 for sounding group/footprint {}/{}. Skipping prior calculation'
+                    .format(i_sounding + 1, i_foot + 1))
+        return profiles, None
+    elif prior_flags is not None and prior_flags[i_sounding, i_foot] != 0:
+        logger.info('Prior flag != 0 for sounding group/footprint {}/{}. Skipping prior calculation'
                     .format(i_sounding + 1, i_foot + 1))
         return profiles, None
     elif obs_date < dt.datetime(1993, 1, 1):
@@ -540,6 +545,9 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geo
     if quality_flag != 0:
         logger.info('Sounding {}: quality flag != 0. Skipping eq. lat. calculation.'.format(idx))
         return default_return
+    elif prior_flags is not None and prior_flags[idx] != 0:
+        logger.info('Sounding {}: prior flag != 0. Skipping eq. lat. calculation.'.format(idx))
+        return default_return
 
     logger.debug('Calculating eq. lat. {}'.format(idx))
     try:
@@ -697,11 +705,11 @@ def read_gosat_resampled_met(met_file, error_handler=_def_errh):
     # To be compatible with the OCO code, the arrays need to have at most 3 dimensions: sounding group, footprint,
     # level. GOSAT arrays have exposure, band, polarization, and level. To ensure compatibility, make them have
     # [exposure, 1, level] or [exposure, 1] if they should be 2D.
-
-    data = read_resampled_met(met_file, var_dict, error_handler=error_handler)
+    data, flags = read_resampled_met(met_file, var_dict, error_handler=error_handler)
     for name, arr in data.items():
         data[name] = _gosat_normalize_shape(arr, name)
-    return data
+    flags = _gosat_normalize_shape(flags, 'prior_flags')
+    return data, flags
 
 
 def _gosat_normalize_shape(arr, name):
@@ -788,7 +796,7 @@ def read_resampled_met(met_file, var_dict, error_handler=_def_errh):
     # needs scaled to units of PVU
 
     # pressure in the met file is in Pa, need hPa for the potential temperature calculation
-    flags = np.zeros(data_dict['pressure'].shape, dtype=np.int16)
+    flags = np.zeros(data_dict['quality_flags'].shape, dtype=np.int16)
     data_dict['pressure'] *= 0.01  # convert from Pa to hPa
     data_dict['theta'] = mod_utils.calculate_potential_temperature(data_dict['pressure'], data_dict['temperature'])
     data_dict['dates'] = _convert_acos_time_strings(data_dict['date_strings'], format='datetime', flag_array=flags,
