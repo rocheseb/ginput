@@ -188,6 +188,7 @@ class TraceGasRecord(object):
     @property
     def gas_unit(self):
         return self._gas_unit
+
     @property
     def gas_seas_cyc_coeff(self):
         return self._gas_seas_cyc_coeff

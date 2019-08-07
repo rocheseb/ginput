@@ -1392,7 +1392,7 @@ def load_chem_variables(geos_file, geos_vars, target_site_dicts, pres_levels=Non
                 var_log = np.log(interp_geos_data[var][:, i])
                 # Other parts of modmaker use scipy's interp1d without issue; but I'm more comfortable with the
                 # straightforward linear interpolation np.interp does. Sometime scipy's interpolators behave strangely.
-                var_log = np.interp(std_pres_log, pres_log, var_log, left=np.nan, right=np.nan)
+                var_log = np.interp(std_pres_log, np.flipud(pres_log), np.flipud(var_log), left=np.nan, right=np.nan)
                 site_data[var][:, i] = np.exp(var_log)
     else:
         for var in geos_vars:
