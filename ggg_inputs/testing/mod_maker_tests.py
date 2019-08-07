@@ -21,19 +21,15 @@ class TestModMaker(unittest.TestCase):
 
         # Run mod_maker for the standard test site
         mmdriver([test_utils.test_date, test_utils.test_date+dt.timedelta(days=1)], test_utils.geos_fp_dir,
-                 save_path=test_utils.mod_output_top_dir, keep_latlon_prec=True, save_in_utc=True, site_abbrv=test_utils.test_site)
-
-        # Instantiate the necessary trace gas records
-        cls.all_records = {k: v() for k, v in tccon_priors.gas_records.items()}
-        records_list = list(cls.all_records.values())
+                 save_path=test_utils.mod_output_top_dir, keep_latlon_prec=True, save_in_utc=True,
+                 site_abbrv=test_utils.test_site, include_chm=True, mode='fpit-eta')
 
         # Run the priors using the check mod files - that way even if mod_maker breaks we can still test the priors
         # Eventually we will probably need two testing modes - one that uses the precalculated strat LUTs and one that
         # recalculates them and either verifies them against the saved LUTs or runs the priors with them.
-        mod_files = [f for f in test_utils.iter_mod_file_pairs(test_utils.mod_input_dir, None)]
-        tccon_priors.generate_tccon_priors_driver(mod_files, dt.timedelta(hours=0), records_list,
-                                                  site_abbrevs=test_utils.test_site,
-                                                  write_vmrs=test_utils.vmr_output_dir)
+        mod_files = [f for f in test_utils.iter_mod_file_pairs(test_utils.mod_output_dir, None)]
+        tccon_priors.generate_full_tccon_vmr_file(mod_files, dt.timedelta(hours=0), save_dir=test_utils.vmr_output_dir,
+                                                  std_vmr_file=test_utils.std_vmr_file, site_abbrevs=test_utils.test_site)
 
     def test_mod_files(self):
         self._comparison_helper(test_utils.iter_mod_file_pairs, mod_utils.read_mod_file,
@@ -52,7 +48,6 @@ class TestModMaker(unittest.TestCase):
                 for variable_name, variable_data in category_data.items():
                     this_new_data = new_data[category_name][variable_name]
 
-                    # Restore subtests in Python 3
                     with self.subTest(check_file=check_file, new_file=new_file, category=category_name, variable=variable_name):
                         try:
                             test_result = np.isclose(variable_data, this_new_data).all()

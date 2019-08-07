@@ -16,6 +16,7 @@ geos_fp_dir = os.path.join(input_data_dir, 'geosfp-it')
 geos_sha_file = os.path.join(geos_fp_dir, 'fp_hashes.sha1')
 mod_input_dir = os.path.join(input_data_dir, 'mod_files', 'fpit')
 vmr_input_dir = os.path.join(input_data_dir, 'vmr_files', 'fpit')
+std_vmr_file = os.path.join(input_data_dir, 'summer_35N.vmr')
 
 output_data_dir = os.path.join(_mydir, 'test_output_data')
 mod_output_top_dir = os.path.join(output_data_dir, 'mod_files')
