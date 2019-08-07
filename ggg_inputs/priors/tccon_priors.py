@@ -2331,6 +2331,9 @@ def add_strat_prior_standard(prof_gas, retrieval_date, gas_record, mod_data,
     # Next we find the age of air in the stratosphere for points with theta > 380 K. We'll get all levels now and
     # restrict to >= 380 K later.
     xx_overworld = mod_utils.is_overworld(prof_theta, prof_pres, tropopause_pres)
+    if xx_overworld.sum() == 0:
+        raise NotImplementedError('No overworld levels found')
+    
     prof_world_flag[xx_overworld] = const.overworld_flag
     # Need the +1 because Jan 1 will be frac_year = 0, but CLAMS expects 1 <= doy <= 366
     retrieval_doy = int(mod_utils.clams_day_of_year(retrieval_date))

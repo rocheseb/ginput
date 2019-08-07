@@ -1097,7 +1097,7 @@ def cl_driver(**args):
     raise_errors = args.pop('raise_errors')
     handler = ErrorHandler(suppress_error=not raise_errors)
 
-    acos_interface_main(**args)
+    acos_interface_main(**args, error_handler=handler)
 
 
 def main():
