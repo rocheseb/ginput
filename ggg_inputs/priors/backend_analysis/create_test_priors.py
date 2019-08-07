@@ -16,13 +16,14 @@ from ...common_utils import mod_utils
 from ...download import get_GEOS5
 
 # These should match the arg names in driver()
-_req_info_keys = ('gas_name', 'site_file', 'geos_top_dir', 'mod_top_dir', 'prior_top_dir')
+_req_info_keys = ('gas_name', 'site_file', 'geos_top_dir', 'geos_chm_top_dir', 'mod_top_dir', 'prior_top_dir')
 _req_info_ispath = ('site_file', 'geos_top_dir', 'mod_top_dir', 'prior_top_dir')
 _req_info_help = {'gas_name': 'The name of the gas to generate priors for.',
                   'site_file': 'A CSV file containing the header DATES,LATS,LONS and the date, latitude, and longitude '
                                'of each desired prior (one per line)',
                   'geos_top_dir': 'The directory containing the GEOS FP-IT data in subdirectories Np, Nx, and Nv. '
                                   'This is where it will be downloaded to, if --download is one of the actions.',
+                  'geos_chm_top_dir': 'The directory containing the GEOS FP-IT chemistry data in an Nv subdirectory. ',
                   'mod_top_dir': 'The top directory to save .mod files to or read them from. Must contain '
                                  'subdirectories "fpit/xx/vertical" to read from, these will be automatically created '
                                  'if writing .mod files.',
@@ -98,24 +99,24 @@ def make_full_mod_dir(top_dir, product):
     return os.path.join(top_dir, product.lower(), 'xx', 'vertical')
 
 
-def check_geos_files(acdates, download_to_dir, file_type=get_GEOS5._default_file_type,
+def check_geos_files(acdates, download_to_dir, chem_download_dir=None, file_type=get_GEOS5._default_file_type,
                      levels=get_GEOS5._default_level_type):
     acdates = [dtime.strptime(d.split('-')[0], '%Y%m%d') for d in acdates]
-    is_chem = file_type == 'chm'
-    types_name_args = {'surf': {'file_type': 'Nx', 'chem': is_chem},
-                       'p': {'file_type': 'Np', 'chem': is_chem},
-                       'eta': {'file_type': 'Nv', 'chem': is_chem}}
+    file_type, levels = get_GEOS5.check_types_levels(file_type, levels)
+
     missing_files = dict()
-    name_args = types_name_args[levels]
-    file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', utc_dates=acdates, **name_args)
-    for f, d in zip(file_names, file_dates):
-        d = d.date()
-        ffull = os.path.join(download_to_dir, name_args['file_type'], f)
-        if not os.path.isfile(ffull):
-            if d in missing_files:
-                missing_files[d].append(f)
-            else:
-                missing_files[d] = [f]
+    for ftype, ltype in zip(file_type, levels):
+        target_dir = chem_download_dir if ftype == 'chm' and chem_download_dir is not None else download_to_dir
+        file_names, file_dates = mod_utils.geosfp_file_names_by_day('fpit', ftype, ltype, utc_dates=acdates,
+                                                                    add_subdir=True)
+        for f, d in zip(file_names, file_dates):
+            d = d.date()
+            ffull = os.path.join(target_dir, f)
+            if not os.path.isfile(ffull):
+                if d in missing_files:
+                    missing_files[d].append(f)
+                else:
+                    missing_files[d] = [f]
 
     for d in sorted(missing_files.keys()):
         nmissing = len(missing_files[d])
@@ -125,13 +126,17 @@ def check_geos_files(acdates, download_to_dir, file_type=get_GEOS5._default_file
     print('{} of {} dates missing at least one file'.format(len(missing_files), len(acdates)))
 
 
-def download_geos(acdates, download_to_dir, file_type=get_GEOS5._default_file_type, levels=get_GEOS5._default_level_type):
-    for dates in acdates:
-        date_range = _date_range_str_to_dates(dates)
-        get_GEOS5.driver(date_range, mode='FPIT', path=download_to_dir, filetypes=file_type, levels=levels)
+def download_geos(acdates, download_to_dir, chem_download_dir=None,
+                  file_type=get_GEOS5._default_file_type, levels=get_GEOS5._default_level_type):
+    file_type, levels = get_GEOS5.check_types_levels(file_type, levels)
+    for ftype, ltype in zip(file_type, levels):
+        dl_path = chem_download_dir if ftype == 'chm' and chem_download_dir is not None else download_to_dir
+        for dates in acdates:
+            date_range = _date_range_str_to_dates(dates)
+            get_GEOS5.driver(date_range, mode='FPIT', path=dl_path, filetypes=ftype, levels=ltype)
 
 
-def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
+def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, chem_dir=None, nprocs=0):
 
     print('Will save to', out_dir)
     mod_dir = make_full_mod_dir(out_dir, 'fpit')
@@ -159,7 +164,7 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
         else:
             print('One or more files for {} at {}/{} needs generated'.format(dates, lon, lat))
 
-        these_args = ([start_date, end_date], lon, lat, geos_dir, out_dir, nprocs)
+        these_args = ([start_date, end_date], lon, lat, geos_dir, chem_dir, out_dir, nprocs)
         mm_args.append(these_args)
 
     if nprocs == 0:
@@ -172,13 +177,14 @@ def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, nprocs=0):
             pool.starmap(mm_helper, mm_args)
 
 
-def mm_helper(date_range, mm_lon, mm_lat, geos_dir, out_dir, nprocs):
+def mm_helper(date_range, mm_lon, mm_lat, geos_dir, chem_dir, out_dir, nprocs):
     date_fmt = '%Y-%m-%d'
     print('Generating .mod files at {}/{} for {} to {}'.format(mm_lon, mm_lat,
                                                                date_range[0].strftime(date_fmt),
                                                                date_range[1].strftime(date_fmt)))
-    mod_maker.driver(date_range, geos_dir, out_dir, keep_latlon_prec=True, save_in_utc=True,
-                     lon=mm_lon, lat=mm_lat, alt=0.0, muted=nprocs > 0)
+    mod_maker.driver(date_range=date_range, met_path=geos_dir, chem_path=chem_dir, save_path=out_dir, include_chm=True,
+                     mode='fpit-eta', keep_latlon_prec=True, save_in_utc=True, lon=mm_lon, lat=mm_lat, alt=0.0,
+                     muted=nprocs > 0)
 
 
 def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0):
@@ -255,19 +261,21 @@ def _prior_helper(ph_f, ph_out_dir, gas_rec):
                                              use_eqlat_strat=True)
 
 
-def driver(check_geos, download, makemod, makepriors, site_file, geos_top_dir, mod_top_dir, prior_top_dir, gas_name,
-           nprocs, dl_file_types, dl_levels):
+def driver(check_geos, download, makemod, makepriors, site_file, geos_top_dir, geos_chm_top_dir,
+           mod_top_dir, prior_top_dir, gas_name, nprocs, dl_file_types, dl_levels):
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
     if check_geos:
-        check_geos_files(acdates, geos_top_dir, file_type=dl_file_types, levels=dl_levels)
+        check_geos_files(acdates, geos_top_dir, chem_download_dir=geos_chm_top_dir,
+                         file_type=dl_file_types, levels=dl_levels)
 
     if download:
-        download_geos(acdates, geos_top_dir, file_type=dl_file_types,levels=dl_levels)
+        download_geos(acdates, geos_top_dir, chem_download_dir=geos_chm_top_dir,
+                      file_type=dl_file_types, levels=dl_levels)
     else:
         print('Not downloading GEOS data')
 
     if makemod:
-        make_mod_files(acdates, aclons, aclats, geos_top_dir, mod_top_dir, nprocs=nprocs)
+        make_mod_files(acdates, aclons, aclats, geos_top_dir, mod_top_dir, chem_dir=geos_chm_top_dir, nprocs=nprocs)
     else:
         print('Not making .mod files')
 
