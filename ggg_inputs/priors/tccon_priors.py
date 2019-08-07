@@ -2318,6 +2318,7 @@ def add_strat_prior_standard(prof_gas, retrieval_date, gas_record, mod_data,
     prof_theta = mod_data['profile']['PT']
     prof_eqlat = mod_data['profile']['EqL']
     prof_pres = mod_data['profile']['Pressure']
+    prof_z = mod_data['profile']['Height']
     tropopause_t = mod_data['scalar']['TROPT']  # use the blended tropopause. TODO: reference why this is best?
     tropopause_pres = mod_data['scalar']['TROPPB']
     tropopause_theta = mod_utils.calculate_potential_temperature(tropopause_pres, tropopause_t)
@@ -2356,13 +2357,14 @@ def add_strat_prior_standard(prof_gas, retrieval_date, gas_record, mod_data,
     # space between that and the first > 380 level.
     ow1 = np.argwhere(xx_overworld)[0]
 
-    # For consistency, assume that the entry level concentration that serves as the lower limit for the interpolation
-    # has the same lag as we've been using to calculate the stratospheric concentrations.
-    gas_entry_conc = gas_record.get_gas_for_dates(retrieval_date - gas_record.sbc_lag)
+    # This calculation must be consistent with that in the troposphere function or some levels may be skipped.
+    z_trop = mod_utils.interp_tropopause_height_from_pressure(mod_data['scalar']['TROPPB'], prof_pres, prof_z)
+    xx_trop = prof_z <= z_trop
+    uw1 = np.argwhere(xx_trop)[-1]
 
-    gas_endpoints = np.array([gas_entry_conc.item(), prof_gas[ow1].item()])
-    theta_endpoints = np.array([tropopause_theta, prof_theta[ow1].item()])
-    xx_middleworld = (tropopause_theta < prof_theta) & (prof_theta < 380.0)
+    gas_endpoints = np.array([prof_gas[uw1].item(), prof_gas[ow1].item()])
+    theta_endpoints = np.array([prof_theta[uw1].item(), prof_theta[ow1].item()])
+    xx_middleworld = ~xx_trop & ~xx_overworld
     prof_gas[xx_middleworld] = np.interp(prof_theta[xx_middleworld], theta_endpoints, gas_endpoints)
     prof_world_flag[xx_middleworld] = const.middleworld_flag
 
