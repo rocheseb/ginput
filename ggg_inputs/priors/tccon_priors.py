@@ -2122,7 +2122,15 @@ def get_trop_eq_lat(prof_theta, p_levels, obs_lat, obs_date, theta_wt=1.0, lat_w
 
     # First we need to get the lat vs. theta curve for this particular date
     ntimes, nbins = _theta_v_lat['theta'].shape
-    this_datenum = ncdf.date2num(obs_date.replace(year=_theta_v_lat['year']), _theta_v_lat['times_units'], _theta_v_lat['times_calendar'])
+    if obs_date.month == 2 and obs_date.day == 29:
+        # The lookup table was made for 2018, which has no leap day. Therefore when we try to convert a Feb 29th date
+        # to a date number it fails. Since the difference in the theta table between Feb 28 and 29 should be minor,
+        # the simplest fix is to just set the date to Feb 28th.
+        lut_date = obs_date.replace(year=_theta_v_lat['year'], day=28)
+    else:
+        lut_date = obs_date.replace(year=_theta_v_lat['year'])
+
+    this_datenum = ncdf.date2num(lut_date, _theta_v_lat['times_units'], _theta_v_lat['times_calendar'])
     this_theta_clim = np.full((nbins,), np.nan)
     this_lat_clim = np.full((nbins,), np.nan)
     for i in range(nbins):
