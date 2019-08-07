@@ -194,10 +194,12 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
 
     if nprocs == 0:
         profiles, units = _prior_serial(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
-                                        met_data=met_data, co2_record=co2_record, prior_flags=prior_flags)
+                                        met_data=met_data, co2_record=co2_record, prior_flags=prior_flags,
+                                        error_handler=error_handler)
     else:
         profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
-                                          met_data=met_data, co2_record=co2_record, prior_flags=prior_flags, nprocs=nprocs)
+                                          met_data=met_data, co2_record=co2_record, prior_flags=prior_flags, nprocs=nprocs,
+                                          error_handler=error_handler)
 
     # Add latitude, longitude, and flags to the priors file
     profiles['sounding_longitude'] = met_data['longitude']
@@ -304,6 +306,7 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record, var_mapping, 
     except Exception as err:
         new_err = err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
         error_handler.handle_err(new_err, err_code_name='prior_failure', flags=prior_flags, inds=(i_sounding, i_foot))
+        return profiles, None
 
     for h5_var, tccon_var in var_mapping.items():
         # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
@@ -344,6 +347,7 @@ def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
     :rtype: dict
     """
     prof_dict = dict()
+    unit_dict = dict()
     for k in var_mapping:
         if k not in var_type_info:
             shape = orig_shape
@@ -356,7 +360,8 @@ def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
             shape = [o if n == -1 else n for o, n in zip(orig_shape, new_shape)]
 
         prof_dict[k] = np.full(shape, fill_val)
-    return prof_dict
+        unit_dict[k] = ''
+    return prof_dict, unit_dict
 
 
 def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record, prior_flags=None,
@@ -374,8 +379,8 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record, 
      each array.
     :rtype: dict, dict
     """
-    profiles = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
-    units = None
+    profiles, units = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
+    units_set = False
 
     for i_sounding in range(orig_shape[0]):
         for i_foot in range(orig_shape[1]):
@@ -389,8 +394,9 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record, 
                                                       error_handler=error_handler)
             for h5_var, h5_array in profiles.items():
                 h5_array[i_sounding, i_foot, :] = this_profiles[h5_var]
-            if this_units is not None:
+            if not units_set and this_units is not None:
                 units = this_units
+                units_set = True
 
     return profiles, units
 
@@ -430,11 +436,12 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
     # At this point, result will be a list of tuples of pairs of dicts, the first dict the profiles dict, the second
     # the units dict or None if the prior calculation did not run. We need to combine the profiles into one array per
     # variable and get one valid units dict
-    profiles = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
-    units = None
+    profiles, units = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
+    units_set = False
     for (these_profs, these_units), i_sounding, i_foot in zip(result, sounding_inds, footprint_inds):
-        if these_units is not None:
+        if not units_set and these_units is not None:
             units = these_units
+            units_set = True
         for h5var, h5array in profiles.items():
             h5array[i_sounding, i_foot, :] = these_profs[h5var]
 
@@ -560,9 +567,7 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geo
         next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
     except Exception as err:
         error_handler.handle_err(err, err_code_name='eqlat_failure', flags=prior_flags, inds=idx)
-        # If we're allowing the error to be suppressed, we need default eq. lat. profiles
-        last_el_profile = np.full_like(pv_vec, np.nan)
-        next_el_profile = np.full_like(pv_vec, np.nan)
+        return default_return
 
     # Interpolate between the two times by calculating a weighted average of the two profiles based on the sounding
     # time. This avoids another for loop over all levels.
