@@ -255,7 +255,7 @@ def load_geos_data(geos_path, start_date, end_date, hours=None, product='fpit', 
     # Make the last day exclusive
     end_date -= pd.Timedelta(days=1)
     for hr in hours:
-        geos_names = mod_utils.geosfp_file_names(product, 'Np', pd.date_range(start=start_date, end=end_date), utc_hours=hr)
+        geos_names = mod_utils.geosfp_file_names_by_day(product, 'met', 'p', pd.date_range(start=start_date, end=end_date), utc_hours=hr)
         pbar = ProgressBar(len(geos_names), prefix='  Progress:', add_one=True, style='counter')
         for idx, fname in enumerate(geos_names):
             full_name = os.path.join(geos_path, fname)
