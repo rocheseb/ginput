@@ -182,7 +182,7 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
 
     # The keys here define the variable names that will be used in the HDF file. The values define the corresponding
     # keys in the output dictionaries from tccon_priors.generate_single_tccon_prior.
-    var_mapping = {'co2_prior': co2_record.gas_name, 'co2_record_latency': 'mean_latency', 'equivalent_latitude': 'EL',
+    var_mapping = {'co2_prior': co2_record.gas_name, 'co2_record_latency': 'mean_latency', 'equivalent_latitude': 'EqL',
                    'gas_record_date': 'gas_date', 'atmospheric_stratum': 'atm_stratum', 'age_of_air': 'strat_age_of_air',
                    'altitude': 'Height', 'pressure': 'Pressure'}
     # This dictionary defines extra type information to create the output arrays. _make_output_profiles_dict uses it.
@@ -194,10 +194,10 @@ def acos_interface_main(instrument, met_resampled_file, geos_files, output_file,
 
     if nprocs == 0:
         profiles, units = _prior_serial(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
-                                        met_data=met_data, co2_record=co2_record)
+                                        met_data=met_data, co2_record=co2_record, prior_flags=prior_flags)
     else:
         profiles, units = _prior_parallel(orig_shape=orig_shape, var_mapping=var_mapping, var_type_info=var_type_info,
-                                          met_data=met_data, co2_record=co2_record, nprocs=nprocs)
+                                          met_data=met_data, co2_record=co2_record, prior_flags=prior_flags, nprocs=nprocs)
 
     # Add latitude, longitude, and flags to the priors file
     profiles['sounding_longitude'] = met_data['longitude']
@@ -384,7 +384,7 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record, 
             obs_date = met_data['dates'][i_sounding, i_foot]
             qflag = met_data['quality_flags'][i_sounding, i_foot]
 
-            this_profiles, this_units = _prior_helper(i_sounding, i_foot, qflag, mod_data, obs_date, co2_record,
+            this_profiles, this_units = _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record,
                                                       var_mapping, var_type_info, prior_flags=prior_flags,
                                                       error_handler=error_handler)
             for h5_var, h5_array in profiles.items():
@@ -420,11 +420,10 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
     # met data, because that would probably be slow due to overhead. (Not tested however.)
     sounding_inds, footprint_inds = [x for x in zip(*product(range(orig_shape[0]), range(orig_shape[1])))]
     mod_dicts = map(_construct_mod_dict, repeat(met_data), sounding_inds, footprint_inds)
-    obs_dates = [met_data['dates'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
     qflags = [met_data['quality_flags'][isound, ifoot] for isound, ifoot in zip(sounding_inds, footprint_inds)]
 
     with Pool(processes=nprocs) as pool:
-        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, qflags, mod_dicts, obs_dates,
+        result = pool.starmap(_prior_helper, zip(sounding_inds, footprint_inds, qflags, mod_dicts,
                                                  repeat(co2_record), repeat(var_mapping), repeat(var_type_info),
                                                  repeat(prior_flags), repeat(error_handler)))
 
