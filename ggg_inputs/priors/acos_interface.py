@@ -39,11 +39,19 @@ _string_fill = b'N/A'
 class ErrorHandler(object):
     _err_codes = {'bad_time_str': 1,
                   'eqlat_failure': 2,
-                  'prior_failure': 3}
+                  'prior_failure': 3,
+                  'met_qual_flag': 4,
+                  'out_of_range_date': 5,
+                  'no_data': 6,
+                  'cannot_find_geos': 7}
 
     _err_descriptions = {'bad_time_str': 'The OCO/ACOS time string could not be parsed',
                          'eqlat_failure': 'A problem occurred while calculating equivalent latitude',
-                         'prior_failure': 'A problem occurred while calculating the prior itself'}
+                         'prior_failure': 'A problem occurred while calculating the prior itself',
+                         'met_qual_flag': 'The quality flag in the met data was nonzero',
+                         'out_of_range_date': 'The sounding date was out of the expected range',
+                         'no_data': 'The met data for altitude was all fill values',
+                         'cannot_find_geos': 'Could not find a GEOS FP-IT file bracketing the sounding time. '}
 
     def __init__(self, suppress_error):
         self.suppress_error = suppress_error
@@ -75,20 +83,24 @@ class ErrorHandler(object):
         if not self.suppress_error or flags is None:
             raise err
 
+        self.set_flag(err_code_name, flags, inds)
+
+        if logger.level <= logging.DEBUG:
+            logger.exception(err)
+        else:
+            last_call = traceback.format_stack()[-2].strip()
+            msg = '{}: {}'.format(type(err).__name__, err.args[0].strip())
+            logger.error(
+                'Error at indices = {} in {}. Error was: "{}". (Use -vv at the command line for full traceback.)'
+                .format(inds, last_call, msg))
+
+    def set_flag(self, err_code_name, flags, inds):
         try:
             ecode = self._err_codes[err_code_name]
         except KeyError:
             raise ValueError('"{}" is not a valid error type'.format(err_code_name))
 
         flags[inds] = ecode
-        if logger.level >= logging.DEBUG:
-            logger.exception(err)
-        else:
-            msg = ''.join(traceback.format_tb(err.__traceback__))
-            msg = msg.replace('\n', ': ')
-            logger.critical(
-                'Error at indices = {}. Error was: "{}". (Use -vvvv at the command line for full traceback.)'
-                .format(inds, msg))
 
     def get_error_descriptions(self):
         descriptions = []
@@ -282,22 +294,25 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record, var_mapping, 
     if qflag != 0:
         logger.info('Quality flag != 0 for sounding group/footprint {}/{}. Skipping prior calculation'
                     .format(i_sounding + 1, i_foot + 1))
-        return profiles, None
+        error_handler.set_flag(err_code_name='met_qual_flag', flags=prior_flags, inds=(i_sounding, i_foot))
+        return profiles, None, prior_flags[i_sounding, i_foot]
     elif prior_flags is not None and prior_flags[i_sounding, i_foot] != 0:
         logger.info('Prior flag != 0 for sounding group/footprint {}/{}. Skipping prior calculation'
                     .format(i_sounding + 1, i_foot + 1))
-        return profiles, None
+        return profiles, None, prior_flags[i_sounding, i_foot]
     elif obs_date < dt.datetime(1993, 1, 1):
         # In the test met file I was given, one set of soundings had a date set to 20 Dec 1992, while the rest
         # where on 14 May 2017. Since the 1992 date is close to 999999 seconds before 1 Jan 1993 and the dates
         # are in TAI93 time, I assume these are fill values.
         logger.important('Date before 1993 ({}) found, assuming this is a fill value and skipping '
                          '(sounding group/footprint {}/{})'.format(obs_date, i_sounding + 1, i_foot + 1))
-        return profiles, None
+        error_handler.set_flag(err_code_name='out_of_range_date', flags=prior_flags, inds=(i_sounding, i_foot))
+        return profiles, None, prior_flags[i_sounding, i_foot]
     elif np.all(np.isnan(mod_data['profile']['Height'])):
         logger.important('Profile at sounding group/footprint {}/{} is all fill values, not calculating prior'
                          .format(i_sounding + 1, i_foot + 1))
-        return profiles, None
+        error_handler.set_flag(err_code_name='no_data', flags=prior_flags, inds=(i_sounding, i_foot))
+        return profiles, None, prior_flags[i_sounding, i_foot]
 
     try:
         priors_dict, priors_units, priors_constants = tccon_priors.generate_single_tccon_prior(
@@ -306,7 +321,7 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record, var_mapping, 
     except Exception as err:
         new_err = err.__class__(err.args[0] + ' Occurred at sounding = {}, footprint = {}'.format(i_sounding+1, i_foot+1))
         error_handler.handle_err(new_err, err_code_name='prior_failure', flags=prior_flags, inds=(i_sounding, i_foot))
-        return profiles, None
+        return profiles, None, prior_flags[i_sounding, i_foot]
 
     for h5_var, tccon_var in var_mapping.items():
         # The TCCON code returns profiles ordered surface-to-space. ACOS expects space-to-surface
@@ -314,7 +329,7 @@ def _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record, var_mapping, 
         # Yes this will get set every time but only needs set once. Can optimize later if it's slow.
         units[h5_var] = priors_units[tccon_var]
 
-    return profiles, units
+    return profiles, units, prior_flags[i_sounding, i_foot]
 
 
 def _make_output_profiles_dict(orig_shape, var_mapping, var_type_info):
@@ -389,9 +404,9 @@ def _prior_serial(orig_shape, var_mapping, var_type_info, met_data, co2_record, 
             obs_date = met_data['dates'][i_sounding, i_foot]
             qflag = met_data['quality_flags'][i_sounding, i_foot]
 
-            this_profiles, this_units = _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record,
-                                                      var_mapping, var_type_info, prior_flags=prior_flags,
-                                                      error_handler=error_handler)
+            this_profiles, this_units, _ = _prior_helper(i_sounding, i_foot, qflag, mod_data, co2_record,
+                                                         var_mapping, var_type_info, prior_flags=prior_flags,
+                                                         error_handler=error_handler)
             for h5_var, h5_array in profiles.items():
                 h5_array[i_sounding, i_foot, :] = this_profiles[h5_var]
             if not units_set and this_units is not None:
@@ -438,7 +453,8 @@ def _prior_parallel(orig_shape, var_mapping, var_type_info, met_data, co2_record
     # variable and get one valid units dict
     profiles, units = _make_output_profiles_dict(orig_shape, var_mapping, var_type_info)
     units_set = False
-    for (these_profs, these_units), i_sounding, i_foot in zip(result, sounding_inds, footprint_inds):
+    for (these_profs, these_units, retflag), i_sounding, i_foot in zip(result, sounding_inds, footprint_inds):
+        prior_flags[i_sounding, i_foot] = retflag
         if not units_set and these_units is not None:
             units = these_units
             units_set = True
@@ -509,7 +525,8 @@ def compute_sounding_equivalent_latitudes(sounding_pv, sounding_theta, sounding_
         return _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns,
                              prior_flags=prior_flags, error_handler=error_handler)
     else:
-        return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, nprocs=nprocs)
+        return _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags, geos_datenums, eqlat_fxns, 
+                               prior_flags=prior_flags, error_handler=error_handler, nprocs=nprocs)
 
 
 def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geos_datenums, prior_flags=None,
@@ -549,10 +566,11 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geo
 
     if quality_flag != 0:
         logger.info('Sounding {}: quality flag != 0. Skipping eq. lat. calculation.'.format(idx))
-        return default_return
+        error_handler.set_flag(err_code_name='met_qual_flag', flags=prior_flags, inds=idx)
+        return default_return, prior_flags[idx]
     elif prior_flags is not None and prior_flags[idx] != 0:
         logger.info('Sounding {}: prior flag != 0. Skipping eq. lat. calculation.'.format(idx))
-        return default_return
+        return default_return, prior_flags[idx]
 
     logger.debug('Calculating eq. lat. {}'.format(idx))
     try:
@@ -560,19 +578,21 @@ def _eqlat_helper(idx, pv_vec, theta_vec, datenum, quality_flag, eqlat_fxns, geo
         i_next_geos = _find_helper(geos_datenums > datenum, order='first')
     except IndexError as err:
         logger.important('Sounding {}: could not find GEOS file by time. Assuming fill value for time'.format(idx))
-        return default_return
+        error_handler.set_flag(err_code_name='cannot_find_geos', flags=prior_flags, inds=idx)
+        return default_return, prior_flags[idx]
 
     try:
         last_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_last_geos])
         next_el_profile = _make_el_profile(pv_vec, theta_vec, eqlat_fxns[i_next_geos])
     except Exception as err:
         error_handler.handle_err(err, err_code_name='eqlat_failure', flags=prior_flags, inds=idx)
-        return default_return
+        return default_return, prior_flags[idx]
 
     # Interpolate between the two times by calculating a weighted average of the two profiles based on the sounding
     # time. This avoids another for loop over all levels.
     weight = time_weight(datenum, geos_datenums[i_last_geos], geos_datenums[i_next_geos])
-    return weight * last_el_profile + (1 - weight) * next_el_profile
+    # Need to return the flags for parallel mode
+    return weight * last_el_profile + (1 - weight) * next_el_profile, prior_flags[idx]
 
 
 def _eqlat_clip(el):
@@ -640,8 +660,8 @@ def _eqlat_serial(sounding_pv, sounding_theta, sounding_datenums, sounding_qflag
     # the actual sounding time.
     logger.info('Running eq. lat. calculation in serial')
     for idx, (pv_vec, theta_vec, datenum, qflag) in enumerate(zip(sounding_pv, sounding_theta, sounding_datenums, sounding_qflags)):
-        sounding_eqlat[idx] = _eqlat_helper(idx, pv_vec, theta_vec, datenum, qflag, eqlat_fxns, geos_datenums,
-                                            prior_flags=prior_flags, error_handler=error_handler)
+        sounding_eqlat[idx], _ = _eqlat_helper(idx, pv_vec, theta_vec, datenum, qflag, eqlat_fxns, geos_datenums,
+                                               prior_flags=prior_flags, error_handler=error_handler)
 
     _eqlat_clip(sounding_eqlat)
     return sounding_eqlat
@@ -664,8 +684,12 @@ def _eqlat_parallel(sounding_pv, sounding_theta, sounding_datenums, sounding_qfl
                                                  repeat(eqlat_fxns), repeat(geos_datenums), repeat(prior_flags),
                                                  repeat(error_handler)))
 
-    sounding_eqlat = np.array(result)
+    eqlats, flags = zip(*result)
+    sounding_eqlat = np.array(eqlats)
     _eqlat_clip(sounding_eqlat)
+    # Copy the flag values from each parallel call into the array
+    for i, flag in enumerate(flags):
+        prior_flags[i] = flag
     return sounding_eqlat
 
 
