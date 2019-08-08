@@ -1034,12 +1034,19 @@ def parse_args(parser=None):
                              'in which case the ending date is assumed to be one day later.')
     parser.add_argument('met_path', help='Path to the meteorology FP(-IT) netCDF files. Must be directory with subdirectories '
                                           'Nx and Np or Nv, containing surface and profile paths respectively.')
+    parser.add_argument('--chem-path', default=None, help='Path to the chemistry FP(-IT) files. Must be a directory '
+                                                          'with subdirectory Nv containing the chm netCDF files. If '
+                                                          'not given, it is assumed that these files are stored with '
+                                                          'the regular met data.')
     parser.add_argument('-s', '--save-path', help='Location to save .mod files to. Subdirectories organized by met type, '
                                                   'site, and vertical/slant .mod files will be created. If not given, '
                                                   'will attempt to save files under $GGGPATH/models/gnd')
     parser.add_argument('--keep-latlon-prec', action='store_true', help='Retain lat/lon to 2 decimals in the .mod file names')
     parser.add_argument('--save-in-local', action='store_false', dest='save_in_utc',
                         help='Use local time in .mod file name, instead of UTC')
+    parser.add_argument('-c', '--include-chem', action='store_true', dest='include_chm',
+                        help='Include chemistry variables (CO) in the .mod files. Note that this is necessary if the '
+                             '.mod files are to be used to generate GGG2019+ .vmr files.')
     parser.add_argument('-q', '--quiet', dest='muted', action='store_true', help='Suppress log output to command line.')
     parser.add_argument('--slant', action='store_true', help='Generate slant .mod files, in addition to vertical .mod '
                                                              'files.')
@@ -1070,6 +1077,21 @@ def parse_args(parser=None):
         return arg_dict
     else:
         parser.set_defaults(driver_fxn=driver)
+
+
+def parse_vmr_args(parser):
+    """
+
+    :param parser:
+    :type parser: :class:`argparse.ArgumentParser`
+    :return:
+    """
+    # configure all the options
+    parse_args(parser)
+
+    parser.set_defaults(mode='fpit-eta', include_chm=True)
+    parser.epilog = "Defaults have been set to produce the right format of file for TCCON GGG2019 use " \
+                    "(--mode=fpit-eta, --include-chem)."
 
 
 def mod_file_name(prefix,date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=True):
@@ -2278,6 +2300,7 @@ def driver(date_range, met_path, chem_path=None, save_path=None, keep_latlon_pre
 
     :return: nothing, writes .mod files to the output directory.
     """
+    import pdb; pdb.set_trace()
     start_date, end_date = date_range
 
     if mode in _old_modmaker_modes:

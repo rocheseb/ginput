@@ -21,6 +21,10 @@ def parse_args():
     mm_parser = subparsers.add_parser('mod', help='Generate .mod (model) files for GGG')
     mod_maker.parse_args(mm_parser)
 
+    mm_tccon_parser = subparsers.add_parser('tccon-mod', help='Generate .mod (model) files appropriate for use with '
+                                                              'TCCON GGG2019 retrievals.')
+    mod_maker.parse_vmr_args(mm_tccon_parser)
+
     get_g5_parser = subparsers.add_parser('getg5', help='Download GEOS5 FP or FP-IT data')
     get_GEOS5.parse_args(get_g5_parser)
 
