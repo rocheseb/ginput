@@ -4,6 +4,7 @@ from collections import OrderedDict
 import datetime as dt
 from dateutil.relativedelta import relativedelta
 from itertools import repeat
+from matplotlib import pyplot as plt
 from multiprocessing import Pool
 import netCDF4 as ncdf
 import numpy as np
@@ -21,7 +22,7 @@ from ...mod_maker import mod_maker as mm
 from .backend_utils import read_ace_var, read_ace_date, read_ace_theta, read_ace_latlon
 
 _mydir = os.path.abspath(os.path.dirname(__file__))
-_tccon_top_alt = 65.0
+_tccon_top_alt = 70.0
 
 
 def _bin_centers(bins):
@@ -118,35 +119,30 @@ def make_fch4_fn2o_lookup_table(ace_age_file, ace_n2o_file, ace_ch4_file, lut_sa
                    fn2o_bin_centers, fn2o_bins, theta_bin_centers, theta_bins)
 
 
-def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, lut_save_file, ch4=None):
-    if ch4 is None:
-        logger.info('Instantiating CH4 record')
-        ch4 = tccon_priors.CH4TropicsRecord()
+def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, ace_age_file, washenfelder_supp_table_file, lut_save_file,
+                       clip_values=True):
 
     logger.info('Loading ACE data')
-    with ncdf.Dataset(ace_ch4_file, 'r') as nch_ch4, ncdf.Dataset(ace_hf_file, 'r') as nch_hf:
-        ace_ch4 = nch_ch4.variables['CH4'][:].filled(np.nan)
-        ace_ch4_err = nch_ch4.variables['CH4_error'][:].filled(np.nan)
-        ace_hf = nch_hf.variables['HF'][:].filled(np.nan)
-        ace_hf_err = nch_hf.variables['HF_error'][:].filled(np.nan)
-
+    with ncdf.Dataset(ace_ch4_file, 'r') as nch_ch4, ncdf.Dataset(ace_hf_file, 'r') as nch_hf, ncdf.Dataset(ace_age_file, 'r') as nch_age:
         ace_ch4_qual = nch_ch4.variables['quality_flag'][:].filled(9)
-        ace_hf_qual = nch_ch4.variables['quality_flag'][:].filled(9)
+        ace_hf_qual = nch_hf.variables['quality_flag'][:].filled(9)
 
-        ace_lat = nch_ch4.variables['latitude'][:].filled(np.nan)
+        ace_ch4 = read_ace_var(nch_ch4, 'CH4', ace_ch4_qual)
+        ace_ch4_err = read_ace_var(nch_ch4, 'CH4_error', ace_ch4_qual)
+        ace_hf = read_ace_var(nch_hf, 'HF', ace_hf_qual)
+        ace_hf_err = read_ace_var(nch_hf, 'HF_error', ace_hf_qual)
+        ace_ages = read_ace_var(nch_age, 'age', None)
+
+        ace_lat = read_ace_var(nch_ch4, 'latitude', None)
         ace_lat = np.tile(ace_lat.reshape(-1, 1), [1, ace_ch4.shape[1]])
-        ace_alt = nch_ch4.variables['altitude'][:].filled(np.nan)
+        ace_alt = read_ace_var(nch_ch4, 'altitude', None)
         ace_alt = np.tile(ace_alt, [ace_ch4.shape[0], 1])
+        ace_theta = read_ace_theta(nch_ch4, ace_ch4_qual)
 
         ace_year = nch_ch4.variables['year'][:].filled(np.nan)
         ace_dates = read_ace_date(nch_ch4)
         ace_doy = np.array([mod_utils.day_of_year(d) + 1 for d in ace_dates])
         ace_doy = ace_doy.reshape(-1, 1)
-        ace_dates = np.tile(ace_dates.reshape(-1, 1), [1, 150])
-
-        if 'age' not in nch_ch4.variables:
-            add_clams_age_to_file(ace_ch4_file)
-        ace_ages = nch_ch4.variables['age'][:].filled(np.nan)
 
     logger.info('Calculating CH4 vs. HF slopes')
     # We do the same filtering as for the F(N2O):F(CH4) relationship, plus we require that the CH4 and HF error is < 5%.
@@ -154,10 +150,13 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     # exceed 3 ppb and the ultra high values were all > 200 ppb, so 10 should leave all reasonable data and exclude
     # unreasonable data (this occurred in tropics 2005)
     #
-    # Fill values in v3 are -999 so remove values below -900
-    xx = ~np.isnan(ace_ch4) & ~np.isnan(ace_ch4_err) & (ace_ch4_err / ace_ch4 < 0.05) & ~np.isnan(ace_hf) \
-         & ~np.isnan(ace_hf_err) & (ace_hf_err / ace_hf < 0.05) & (ace_ch4 < -900.0) & (ace_ch4 <= 2e-6) \
-         & (ace_hf < -900.0) & (ace_alt < _tccon_top_alt) & (ace_ch4_qual == 0) & (ace_hf_qual == 0) & (ace_hf < 10e-9)
+    # Quality filtering and fill values were handled upon reading in the data.
+    xx = ~np.isnan(ace_ch4) & ~np.isnan(ace_ch4_err) & ~np.isnan(ace_hf) & ~np.isnan(ace_hf_err) & (ace_alt < _tccon_top_alt)
+
+    #import pdb; pdb.set_trace()
+
+    if clip_values:
+        xx &= (ace_ch4 <= 2e-6) & (ace_hf < 10e-9)
 
     # Read in the early slopes from Washenfelder et al. 2003 (doi: 10.1029/2003GL017969), table S3.
     washenfelder_df = pd.read_csv(washenfelder_supp_table_file, header=2, sep=r'\s+')
@@ -168,8 +167,8 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
     # For each bin, get the slopes from the ACE-FTS data. Fit the data (including the Washenfelder slopes) to an
     # exponential.
     lat_bin_functions = OrderedDict([('tropics', mod_utils.is_tropics),
-                                 ('midlat', mod_utils.is_midlat),
-                                 ('vortex', mod_utils.is_vortex)])
+                                     ('midlat', mod_utils.is_midlat),
+                                     ('vortex', mod_utils.is_vortex)])
     lat_bin_slopes = pd.DataFrame(index=_get_ace_date_range(ace_dates), columns=lat_bin_functions.keys())
     lat_bin_counts = lat_bin_slopes.copy()
 
@@ -180,8 +179,9 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
             year = year_start_date.year
             logger.debug('Generating {} slopes for {}'.format(bin_name, year))
             lat_bin_slopes.loc[year_start_date, bin_name], lat_bin_counts.loc[year_start_date, bin_name] \
-                = _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_ch4, ace_hf, ch4, xx,
-                                         year, bin_fxn)
+                = _bin_and_fit_hf_vs_ch4(ace_lat=ace_lat, ace_year=ace_year, ace_dates=ace_dates, ace_doy=ace_doy,
+                                         ace_ages=ace_ages, ace_theta=ace_theta, ace_ch4=ace_ch4, ace_hf=ace_hf, xx=xx,
+                                         year=year, bin_fxn=bin_fxn)
 
         full_series = pd.concat([washenfelder_slopes, lat_bin_slopes.loc[:, bin_name]])
         full_series = full_series.sort_index()
@@ -196,9 +196,8 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, washenfelder_supp_table_file, 
         fit = curve_fit(mod_utils.hf_ch4_slope_fit, full_series_year, full_series, p0=p0)
         fit_params[ibin, :] = fit[0]
 
-    # for the netCDF file, we'll include both the fits and the actual slopes for the ACE-FTS era. We'll use the fit
-    # to fill in values before the ACE era rather than the Washenfelder values directly because those values are
-    # irregularly spaced in time
+    # for the netCDF file, we'll include both the fits and the actual slopes for the ACE-FTS era. The default is to
+    # use the fits for all years.
     first_year = washenfelder_slopes.index.min().year
     last_year = lat_bin_slopes.index.max().year
     full_dtindex = pd.date_range(start=dt.datetime(first_year, 1, 1), end=dt.datetime(last_year, 1, 1), freq='YS')
@@ -256,14 +255,16 @@ def _bin_z_vs_xy(x, y, z, good_data, x_bins, y_bins):
     return x_means, x_counts, z_overall, y_overall
 
 
-def _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_ch4, ace_hf, ch4, xx, year, bin_fxn):
+def _bin_and_fit_hf_vs_ch4(ace_lat, ace_year, ace_dates, ace_doy, ace_ages, ace_theta, ace_ch4, ace_hf, xx, year,
+                           bin_fxn):
     yy = bin_fxn(ace_lat, ace_doy, ace_ages) & (np.isclose(ace_year, year)).reshape(-1, 1)
 
-    ace_lagged_dates = pd.DatetimeIndex([d - relativedelta(months=2) for d in ace_dates[xx & yy]])
-    profile_ch4_sbc = ch4.get_gas_for_dates(ace_lagged_dates)
+    profile_ch4_sbc = get_bc_from_ace(ace_dates=ace_dates, gas_conc=ace_ch4, theta=ace_theta, latitude=ace_lat[:, 0],
+                                      bc_approach='fit')
 
     x = ace_hf[xx & yy] * 1e9
-    y = ace_ch4[xx & yy] * 1e9 - profile_ch4_sbc
+    y = (ace_ch4 - profile_ch4_sbc.reshape(-1, 1))
+    y = y[xx & yy] * 1e9
 
     # We use the robust fitting method with Tukey's biweighting as in Saad et al. 2014. That paper used `robustfit` from
     # Matlab, RLM from statsmodels is the Python equivalent. We do not include an intercept because we are using the
@@ -355,7 +356,7 @@ def _save_hf_ch4_lut(nc_filename, ace_ch4_file, ace_hf_file, lat_bin_edges, full
         ch4_hf_count = pd.DataFrame(index=full_date_index, columns=ace_counts.columns).fillna(0)
         ch4_hf_source = pd.DataFrame(index=full_date_index, columns=ace_slopes.columns).fillna(1)
         # transpose so that the bins dim is second like the above dataframes
-        bin_names_char_array = ncdf.stringtochar(np.array(lat_bin_edges.keys())).T
+        bin_names_char_array = ncdf.stringtochar(np.array(list(lat_bin_edges.keys()))).T
         slope_fit_params = slope_fit_params.T
 
         # For each latitude bin, make a pandas series for the full date index from the fit first, then replace available
@@ -396,30 +397,57 @@ def _save_hf_ch4_lut(nc_filename, ace_ch4_file, ace_hf_file, lat_bin_edges, full
                                   description='The names used for the latitude bins')
 
 
-def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-profile'):
+def plot_hf_ch4_slopes(lut_file, years=np.arange(1970, 2019), ax=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    else:
+        fig = ax.figure
+    colors = ['r', 'g', 'b']
+    linestyles = ['-', '--', ':']
+    with xr.open_dataset(lut_file) as ds:
+        lat_bins = ds['latitude_bins'][:]
+        params = ds['slope_fit_params'][:]
+        bin_names = ds['bin_names'][:]
+        for i, col, style in zip(lat_bins, colors, linestyles):
+            label = bin_names.sel(latitude_bins=i).data
+            try:
+                label = ''.join(label)
+            except TypeError:
+                label = b''.join(label).decode('utf8')
+
+            slopes = mod_utils.hf_ch4_slope_fit(years, *params.sel(latitude_bins=i).data)
+            ax.plot(years, slopes, color=col, linestyle=style, label=label)
+
+    ax.grid()
+    ax.set_ylabel('CH4:HF slope from fit')
+    ax.legend()
+
+    return fig, ax
+
+
+def get_bc_from_ace(ace_dates, gas_conc, theta, latitude, bc_approach='fit'):
     """
-    Calculate the fraction remaining of a gas in the stratosphere from an ACE-FTS netCDF file
+    Calcaulate the stratospheric boundary condition for each ACE profile from ACE data itself
 
-    :param nc_file: the path to the ACE-FTS netCDF file
-    :type nc_file: str
+    :param ace_dates: a 1D array of datetimes with one entry per ACE profile
+    :type ace_dates: array-like
 
-    :param gas_name: the variable name in the netCDF file that holds the gas concentrations
-    :type gas_name: str
+    :param gas_conc: the array of ACE concentrations for the gas of interest. May be any units, the boundary condition
+     values will be returned in the same units.
+    :type gas_conc: array-like
 
-    :param gas_record: a subclass instance of :class:`TropicsTraceGasRecord` that provides the stratospheric boundary
-     condition for the given gas.
-    :type gas_record: :class:`tccon_priors.TropicsTraceGasRecord`
+    :param theta: the array of ACE potential temperatures.
+    :type theta: array-like
 
-    :param tropopause_approach: how to find the tropopause. Options are:
+    :param latitude: the array of ACE profile latitudes (1D)
+    :type latitude: array-like
 
-        * 'wmo' - uses the WMO definition, looking for lapse rate < 2 K/km
-        * 'theta' - finds the altitude at which potential temperature is 380 K
+    :param bc_approach: how to calculate the boundary condition. "fit" (default) fits all ACE data in the tropics
+     between 360 and 390 K to generate a quadratic fit over time. "per-profile" calculates the boundary condition for
+     each profile using its own data between 360 and 390 K.
+    :type bc_approach: str
 
-    :type tropopause_approach: str
-
-    :return: the vector of altitudes that the ACE-FTS profiles are defined on and the array of fraction of gas
-     remaining. The latter will be set to NaN in the troposphere.
-    :rtype: :class:`numpy.ndarray` x2
+    :return: the array of boundary condition concentrations, one per profile.
     """
     bottom_pt = 360
     top_pt = 390
@@ -448,6 +476,42 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
         fit = np.polynomial.polynomial.Polynomial.fit(bc_datenums[xx], bc_concs[xx], deg=2)
         return fit(datenums[:, 0])
 
+    if bc_approach == 'per-profile':
+        bc_fxn = _get_bc_per_profile
+    elif bc_approach == 'fit':
+        bc_fxn = _get_bc_by_fit
+    else:
+        raise ValueError('bc_approach must be "per-profile" or "fit"')
+
+    return bc_fxn(ace_dates, gas_conc, theta, latitude)
+
+
+def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-profile'):
+    """
+    Calculate the fraction remaining of a gas in the stratosphere from an ACE-FTS netCDF file
+
+    :param nc_file: the path to the ACE-FTS netCDF file
+    :type nc_file: str
+
+    :param gas_name: the variable name in the netCDF file that holds the gas concentrations
+    :type gas_name: str
+
+    :param gas_record: a subclass instance of :class:`TropicsTraceGasRecord` that provides the stratospheric boundary
+     condition for the given gas.
+    :type gas_record: :class:`tccon_priors.TropicsTraceGasRecord`
+
+    :param tropopause_approach: how to find the tropopause. Options are:
+
+        * 'wmo' - uses the WMO definition, looking for lapse rate < 2 K/km
+        * 'theta' - finds the altitude at which potential temperature is 380 K
+
+    :type tropopause_approach: str
+
+    :return: the vector of altitudes that the ACE-FTS profiles are defined on and the array of fraction of gas
+     remaining. The latter will be set to NaN in the troposphere.
+    :rtype: :class:`numpy.ndarray` x2
+    """
+
     with ncdf.Dataset(nc_file, 'r') as nch:
         alt = read_ace_var(nch, 'altitude', qflags=None)
         latitude = read_ace_var(nch, 'latitude', qflags=None)
@@ -460,14 +524,8 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
 
         theta = read_ace_theta(nch, qflags)
 
-    if bc_approach == 'per-profile':
-        bc_fxn = _get_bc_per_profile
-    elif bc_approach == 'fit':
-        bc_fxn = _get_bc_by_fit
-    else:
-        raise ValueError('bc_approach must be "per-profile" or "fit"')
-
-    bc_concentrations = bc_fxn(ace_dates, gas_conc, theta, latitude)
+    import pdb; pdb.set_trace()
+    bc_concentrations = get_bc_from_ace(ace_dates, gas_conc, theta, latitude, bc_approach=bc_approach)
     fgas = gas_conc / bc_concentrations.reshape(-1, 1)
     fgas[theta < 380] = np.nan
 
