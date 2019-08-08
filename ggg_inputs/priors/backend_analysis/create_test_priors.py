@@ -131,26 +131,30 @@ def download_geos(acdates, download_to_dir, chem_download_dir=None,
     file_type, levels = get_GEOS5.check_types_levels(file_type, levels)
     for ftype, ltype in zip(file_type, levels):
         dl_path = chem_download_dir if ftype == 'chm' and chem_download_dir is not None else download_to_dir
-        for dates in acdates:
+        for dates in set(acdates):
             date_range = _date_range_str_to_dates(dates)
             get_GEOS5.driver(date_range, mode='FPIT', path=dl_path, filetypes=ftype, levels=ltype)
 
 
 def make_mod_files(acdates, aclons, aclats, geos_dir, out_dir, chem_dir=None, nprocs=0):
 
+    if chem_dir is None:
+        chem_dir = geos_dir
     print('Will save to', out_dir)
     mod_dir = make_full_mod_dir(out_dir, 'fpit')
     print('  (Listing GEOS files...)')
-    geos_files = sorted(glob(os.path.join(geos_dir, 'Np', 'GEOS*.nc4')))
+    geos_files = sorted(glob(os.path.join(geos_dir, 'Nv', 'GEOS*.nc4')))
     geos_dates = set([dtime.strptime(re.search(r'\d{8}', f).group(), '%Y%m%d') for f in geos_files])
+    geos_chm_files = sorted(glob(os.path.join(chem_dir, 'Nv', 'GEOS*.nc4')))
+    geos_chm_dates = set([dtime.strptime(re.search(r'\d{8}', f).group(), '%Y%m%d') for f in geos_chm_files])
 
     mm_args = []
 
     print('  (Making list of .mod files to generate...)')
     for (dates, lon, lat) in zip(acdates, aclons, aclats):
         start_date, end_date = [dtime.strptime(d, '%Y%m%d') for d in dates.split('-')]
-        if start_date not in geos_dates:
-            print('Cannot run {}, no GEOS data'.format(start_date))
+        if start_date not in geos_dates or start_date not in geos_chm_dates:
+            print('Cannot run {}, missing either met or chem GEOS data'.format(start_date))
             continue
         files_complete = []
         for hr in range(0, 24, 3):
@@ -199,11 +203,11 @@ def make_priors(prior_dir, mod_dir, gas_name, acdates, aclons, aclats, nprocs=0)
 
     for f in mod_files:
         fbase = os.path.basename(f)
-        lonstr = re.search(r'\d{1,3}.\d\d[EW]', fbase).group()
-        latstr = re.search(r'\d{1,2}.\d\d[NS]', fbase).group()
-        datestr = re.search(r'^\d{8}_\d{4}Z', fbase).group()
+        lonstr = mod_utils.find_lon_substring(fbase)
+        latstr = mod_utils.find_lat_substring(fbase)
+        datestr = mod_utils.find_datetime_substring(fbase)
 
-        utc_datetime = dtime.strptime(datestr, '%Y%m%d_%H%MZ')
+        utc_datetime = dtime.strptime(datestr, '%Y%m%d_%H%M')
         utc_date = utc_datetime.date()
         utc_datestr = utc_datetime.date().strftime('%Y%m%d')
         lon = mod_utils.format_lon(lonstr)
@@ -263,6 +267,11 @@ def _prior_helper(ph_f, ph_out_dir, gas_rec):
 
 def driver(check_geos, download, makemod, makepriors, site_file, geos_top_dir, geos_chm_top_dir,
            mod_top_dir, prior_top_dir, gas_name, nprocs, dl_file_types, dl_levels):
+    if dl_file_types is None:
+        dl_file_types = ('met', 'met', 'chm')
+    if dl_levels is None:
+        dl_levels = ('surf', 'eta', 'eta')
+
     aclons, aclats, acdates = read_date_lat_lon_file(site_file)
     if check_geos:
         check_geos_files(acdates, geos_top_dir, chem_download_dir=geos_chm_top_dir,
@@ -296,9 +305,9 @@ def parse_args():
     parser.add_argument('--makepriors', action='store_true', help='Generate the priors as .map files.')
     parser.add_argument('-n', '--nprocs', default=0, type=int, help='Number of processors to use to run in parallel mode '
                                                           '(for --makemod and --makepriors only)')
-    parser.add_argument('--dl-file-types', default=get_GEOS5._default_file_type, choices=get_GEOS5._file_types,
+    parser.add_argument('--dl-file-types', default=None, choices=get_GEOS5._file_types,
                         help='Which GEOS file types to download with --download (no effect if --download not specified).')
-    parser.add_argument('--dl-levels', default=get_GEOS5._default_level_type, choices=get_GEOS5._level_types,
+    parser.add_argument('--dl-levels', default=None, choices=get_GEOS5._level_types,
                         help='Which GEOS levels to download with --download (no effect if --download not specified).')
 
     return vars(parser.parse_args())
