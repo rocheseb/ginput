@@ -1542,10 +1542,10 @@ class HFTropicsRecord(MloSmoTraceGasRecord):
     @classmethod
     def _load_ch4_hf_slopes(cls):
         with xr.open_dataset(cls.ch4_hf_slopes_file) as nch:
-            bin_names = ncdf.chartostring(nch.variables['bin_names'][:].T.data)
+            bin_names = [''.join(row) for row in nch.variables['bin_names'][:].T.data]
             slopes = nch['ch4_hf_slopes']
             fit_params = nch['slope_fit_params']
-        return list(bin_names), slopes, fit_params
+        return bin_names, slopes, fit_params
 
     @classmethod
     def _calc_hf_from_ch4(cls, ch4_concs, ch4_record, year, ch4_hf_slopes, ch4_hf_fit_params, lag, use_ace_specific_slopes=False):
@@ -2759,7 +2759,7 @@ def _get_std_vmr_file(std_vmr_file):
 
 
 def generate_full_tccon_vmr_file(mod_data, utc_offsets, save_dir, std_vmr_file=None, site_abbrevs='xx',
-                                 keep_latlon_prec=False):
+                                 keep_latlon_prec=False, **kwargs):
     """
     Generate a .vmr file with all the gases required by TCCON (both retrieved and secondary).
 
@@ -2794,6 +2794,7 @@ def generate_full_tccon_vmr_file(mod_data, utc_offsets, save_dir, std_vmr_file=N
     :raises GGGPathError: if ``$GGGPATH`` is not defined and it needs to find the standard file or it cannot find the
      standard file in the expected place.
     """
+
     std_vmr_file = _get_std_vmr_file(std_vmr_file)
     if std_vmr_file:
         std_vmr_gases = mod_utils.read_vmr_file(std_vmr_file, lowercase_names=False, style='old')
@@ -2803,7 +2804,8 @@ def generate_full_tccon_vmr_file(mod_data, utc_offsets, save_dir, std_vmr_file=N
         std_vmr_gases = list(gas_records.keys())
     species = [gas_records[gas.lower()]() if gas.lower() in gas_records else MidlatTraceGasRecord(gas, vmr_file=std_vmr_file) for gas in std_vmr_gases]
     generate_tccon_priors_driver(mod_data=mod_data, utc_offsets=utc_offsets, species=species, site_abbrevs=site_abbrevs,
-                                 write_vmrs=save_dir, keep_latlon_prec=keep_latlon_prec, gas_name_order=std_vmr_gases)
+                                 write_vmrs=save_dir, keep_latlon_prec=keep_latlon_prec, gas_name_order=std_vmr_gases,
+                                 **kwargs)
 
 
 def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='xx', write_maps=False,
@@ -2989,13 +2991,17 @@ def parse_args(parser=None):
                                                                    '--lon must be given as well.')
     parser.add_argument('--lon', type=float, dest='site_lon', help='Longitude to generate prior for. If given, '
                                                                    '--lat must be given as well.')
+    parser.add_argument('--keep-latlon-prec', action='store_true', help='Use if the .mod files have 2 decimals of '
+                                                                        'precision in their file names.')
+    parser.add_argument('-i', '--integral-file', dest='zgrid', help='Path to an integral file that defined the '
+                                                                    'altitude grid to place the priors on.')
 
     parser.set_defaults(driver_fxn=cl_driver)
 
 
 def cl_driver(date_range, mod_dir=None, mod_root_dir=None, save_dir=None, product='fpit',
-              site_lat=None, site_lon=None, site_abbrev='xx', **kwargs):
-    import pdb; pdb.set_trace()
+              site_lat=None, site_lon=None, site_abbrev='xx', keep_latlon_prec=False, **kwargs):
+    
     if site_lat is None != site_lon is None:
         raise TypeError('Both or neither of site_lat and site_lon must be given')
 
@@ -3020,7 +3026,8 @@ def cl_driver(date_range, mod_dir=None, mod_root_dir=None, save_dir=None, produc
             lat, lon = site_info['lat'], site_info['lon_180']
         else:
             lat, lon = site_lat, site_lon
-        this_file = os.path.join(mod_dir, mod_utils.mod_file_name_for_priors(d, site_lat=lat, site_lon_180=lon))
+        this_file = os.path.join(mod_dir, mod_utils.mod_file_name_for_priors(d, site_lat=lat, site_lon_180=lon,
+                                                                             round_latlon=not keep_latlon_prec))
         if os.path.isfile(this_file):
             mod_files.append(this_file)
         else:
