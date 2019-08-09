@@ -1341,10 +1341,11 @@ def load_chem_variables(geos_file, geos_vars, target_site_dicts, pres_levels=Non
 
         geos_data = dict()
         for var in geos_vars:
-            # The native files are ordered space-to-surface, so normally we'd flip them to be surface-to-space. However,
-            # the numpy interpolation needs the coordinate to be increasing anyway, so we just leave them
-            # space-to-surface and let the interpolation flip them.
-            geos_data[var] = np.flipud(dataset[var][0])
+            geos_data[var] = dataset[var][0]
+            if geos_data[var].shape[0] == 72:
+                # The vertical dimension should be first if present. Flip native variables
+                # to be surface-to-space.
+                geos_data[var] = np.flipud(geos_data[var])
 
         geos_pres = mod_utils.convert_geos_eta_coord(dataset['DELP'][0].filled(np.nan))
         geos_data['pres'] = np.flipud(geos_pres)
@@ -1670,10 +1671,10 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
                 # Taking dataset[var][0] is equivalent to dataset[var][0,:,:,:], which since there's only one time per
                 # file just cuts the data from 4D to 3D
                 DATA[var] = dataset[var][0]
-                if file_is_native:
+                if file_is_native and DATA[var].shape[0] == 72:
                     # The native 72 eta level files are organized space-to-surface vertically; the 42 fixed pressure
-                    # level files are surface-to-space. We want the latter so we need to flip the vertical (first)
-                    # dimension if it is a native file.
+                    # level files are surface-to-space. We want the latter so we need to flip the vertical dimension
+                    # if it is a native file. The vertical dimension, if present, should be first and have 72 levels.
                     DATA[var] = np.flipud(DATA[var])
 
             if file_is_native:
