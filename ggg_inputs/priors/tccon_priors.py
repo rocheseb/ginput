@@ -2752,7 +2752,7 @@ def _get_std_vmr_file(std_vmr_file):
                                'environmental variable may be incorrect, or the structure of the GGG directory has '
                                'changed. Either correct your GGGPATH value, explicitly pass a path to a .vmr file with '
                                'northern midlat profiles for all gases, or pass False to only write the primary gases '
-                               'to the .vmr file')
+                               'to the .vmr file'.format(std_vmr_file))
         return std_vmr_file
     else:
         return std_vmr_file
@@ -2974,8 +2974,15 @@ def parse_args(parser=None):
                                                      'organized into subdirectories by <product>/<site>/vertical, e.g. '
                                                      'fpit/pa/vertical. If an explicit mod_dir is given, this argument '
                                                      'is not used.')
+    parser.add_argument('-b', '--base-vmr-file', dest='std_vmr_file',
+                        help='The summer 35N .vmr file that has base profiles, seasonal cycles, latitude gradients, '
+                             'and secular trends for all gases. This is used to fill in the secondary gases in the .vmr '
+                             'file.')
+    parser.add_argument('-p', '--primary-gases-only', action='store_false', dest='std_vmr_file',
+                        help='Write the VMRs only for the primary gases (CO2, N2O, CH4, HF, CO, H2O, and O3). The other '
+                             'gases will not be included. This removes the need for a base .vmr file.')
     parser.add_argument('-s', '--save-dir', help='Path to save .vmr files to. If not given, defaults to $GGGPATH/vmrs/gnd')
-    parser.add_argument('--site', default='xx', choices=valid_site_ids,
+    parser.add_argument('--site', default='xx', choices=valid_site_ids, dest='site_abbrev',
                         help='Which site to generate priors for. Used to set the lat/lon looked for in the file name. '
                              'If an explicit lat and lon are given, those override this.')
     parser.add_argument('--lat', type=float, dest='site_lat', help='Latitude to generate prior for. If given, '
@@ -2983,10 +2990,12 @@ def parse_args(parser=None):
     parser.add_argument('--lon', type=float, dest='site_lon', help='Longitude to generate prior for. If given, '
                                                                    '--lat must be given as well.')
 
+    parser.set_defaults(driver_fxn=cl_driver)
+
 
 def cl_driver(date_range, mod_dir=None, mod_root_dir=None, save_dir=None, product='fpit',
               site_lat=None, site_lon=None, site_abbrev='xx', **kwargs):
-
+    import pdb; pdb.set_trace()
     if site_lat is None != site_lon is None:
         raise TypeError('Both or neither of site_lat and site_lon must be given')
 
@@ -2998,7 +3007,11 @@ def cl_driver(date_range, mod_dir=None, mod_root_dir=None, save_dir=None, produc
     if save_dir is None:
         save_dir = mod_utils.get_ggg_path(os.path.join('vmrs', 'gnd'), 'save directory')
 
+    orig_date_range = date_range
     date_range = pd.date_range(date_range[0], date_range[1], freq='3H')
+    if date_range[-1] == orig_date_range[-1]:
+        # Make sure the end date is not included
+        date_range = date_range[:-1]
     mod_files = []
     missing_files = []
     for d in date_range:
