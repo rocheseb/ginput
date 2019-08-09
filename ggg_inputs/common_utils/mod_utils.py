@@ -9,6 +9,8 @@ from __future__ import print_function, division
 
 import datetime as dt
 from collections import OrderedDict
+from datetime import timedelta
+
 import numpy
 from dateutil.relativedelta import relativedelta
 import netCDF4 as ncdf
@@ -51,6 +53,10 @@ class ModelError(Exception):
     """
     Error if a model file is nonsensical.
     """
+    pass
+
+
+class GGGPathError(Exception):
     pass
 
 
@@ -1916,6 +1922,12 @@ def is_overworld(potential_temp, pressure, trop_pres):
     return (potential_temp >= 380) & (pressure <= trop_pres)
 
 
+def npdate_to_datetime(numpy_date):
+    numpy_date = numpy_date.astype('datetime64[s]')
+    ts = (numpy_date - np.datetime64('1970-01-01T00:00:00Z', 's')) / np.timedelta64(1, 's')
+    return dt.datetime.utcfromtimestamp(ts)
+
+
 def date_to_decimal_year(date_in):
     """
     Convert a datetime object to a decimal year.
@@ -2191,3 +2203,64 @@ def from_unix_time(utime, out_type=dt.datetime):
     :return: a datetime object of the type specified by ``out_type``.
     """
     return out_type(1970, 1, 1) + dt.timedelta(seconds=utime)
+
+
+def mod_file_name(prefix,date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=True):
+
+    YYYYMMDD = date.strftime('%Y%m%d')
+    HHMM = date.strftime('%H%M')
+    if in_utc:
+        HHMM += 'Z'
+    if round_latlon:
+        site_lat = round(abs(site_lat))
+        site_lon = round(abs(site_lon_180))
+        latlon_precision = 0
+    else:
+        site_lat = abs(site_lat)
+        site_lon = abs(site_lon_180)
+        latlon_precision = 2
+    if time_step < timedelta(days=1):
+        mod_fmt = '{{prefix}}_{{ymd}}_{{hm}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
+    else:
+        mod_fmt = '{{prefix}}_{{ymd}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
+
+    mod_name = mod_fmt.format(prefix=prefix, ymd=YYYYMMDD, hm=HHMM, lat=site_lat, ns=ns, lon=site_lon, ew=ew)
+    return mod_name
+
+
+def mod_file_name_for_priors(datetime, site_lat, site_lon_180, prefix='FPIT', **kwargs):
+    if site_lon_180 > 180:
+        site_lon_180 -= 360
+    ew = format_lon(site_lon_180)[-1]
+    ns = format_lat(site_lat)[-1]
+    return mod_file_name(prefix=prefix, date=datetime, time_step=dt.timedelta(hours=3), site_lat=site_lat,
+                         site_lon_180=site_lon_180, ew=ew, ns=ns, mod_path='', **kwargs)
+
+
+def parse_date_range(datestr):
+    def parse_date(datestr):
+        try:
+            date_out = dt.datetime.strptime(datestr, '%Y%m%d')
+        except ValueError:
+            date_out = dt.datetime.strptime(datestr, '%Y%m%d_%H')
+        return date_out
+
+    dates = datestr.split('-')
+    start_date = parse_date(dates[0])
+    if len(dates) > 1:
+        end_date = parse_date(dates[1])
+    else:
+        end_date = start_date + timedelta(days=1)
+
+    return start_date, end_date
+
+
+def get_ggg_path(subdir, subdir_name):
+    gggpath = os.getenv('GGGPATH')
+    if gggpath is None:
+        raise GGGPathError('Could not find the GGGPATH environmental variable. Please specify an explicit {}.'.format(subdir_name))
+    full_subdir = os.path.join(gggpath, subdir)
+    if not os.path.isdir(full_subdir):
+        raise GGGPathError('Could not find default {} {}'.format(subdir_name, full_subdir))
+
+    return full_subdir

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import argparse
 
-from ggg_inputs.priors import acos_interface as aci
+from ggg_inputs.priors import acos_interface as aci, tccon_priors
 from ggg_inputs.mod_maker import mod_maker
 from ggg_inputs.download import get_GEOS5
 
@@ -15,15 +15,15 @@ def parse_args():
     gosat_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the GOSAT algorithm')
     aci.parse_args(gosat_parser, oco_or_gosat='gosat')
 
-    # Albert Chang prefers to have a flag for whether reading OCO or GOSAT input files
-    # acos_parser = subparsers.add_parser('acos', help='Generate .h5 file for input into the GOSAT algorithm')
-
     mm_parser = subparsers.add_parser('mod', help='Generate .mod (model) files for GGG')
     mod_maker.parse_args(mm_parser)
 
     mm_tccon_parser = subparsers.add_parser('tccon-mod', help='Generate .mod (model) files appropriate for use with '
                                                               'TCCON GGG2019 retrievals.')
     mod_maker.parse_vmr_args(mm_tccon_parser)
+
+    vmr_parser = subparsers.add_parser('vmr', help='Generate full .vmr files for GGG')
+    tccon_priors.parse_args(vmr_parser)
 
     get_g5_parser = subparsers.add_parser('getg5', help='Download GEOS5 FP or FP-IT data')
     get_GEOS5.parse_args(get_g5_parser)

@@ -153,8 +153,6 @@ def make_hf_ch4_slopes(ace_ch4_file, ace_hf_file, ace_age_file, washenfelder_sup
     # Quality filtering and fill values were handled upon reading in the data.
     xx = ~np.isnan(ace_ch4) & ~np.isnan(ace_ch4_err) & ~np.isnan(ace_hf) & ~np.isnan(ace_hf_err) & (ace_alt < _tccon_top_alt)
 
-    #import pdb; pdb.set_trace()
-
     if clip_values:
         xx &= (ace_ch4 <= 2e-6) & (ace_hf < 10e-9)
 

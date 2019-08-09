@@ -53,7 +53,8 @@ pp. 32295-32314). For gases other than CO2, chemical loss or production in the s
 
 from __future__ import print_function, division
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
+import argparse
 from collections import OrderedDict
 from contextlib import closing
 from copy import deepcopy
@@ -68,10 +69,14 @@ import os
 import pandas as pd
 import re
 from scipy.interpolate import LinearNDInterpolator
+import sys
 import xarray as xr
 
+from ..mod_maker import tccon_sites
 from ..common_utils import mod_utils, ioutils, mod_constants as const
 from ..common_utils.ggg_logging import logger
+
+GGGPathError = mod_utils.GGGPathError
 
 # _code_dep_modules should list any imported modules that you want to check if they've changed when decided whether to
 # recalculate the strat LUTs. This module will be added on its own after. _code_dep_files should always be generated
@@ -129,10 +134,6 @@ class GasRecordDateError(GasRecordError):
     """
     Error to raise for any issues with dates in the gas records
     """
-    pass
-
-
-class GGGPathError(Exception):
     pass
 
 
@@ -2951,6 +2952,76 @@ def generate_tccon_priors_driver(mod_data, utc_offsets, species, site_abbrevs='x
                                      profile_date=site_date, profile_lat=site_lat,
                                      profile_alt=profile_dict['Height'], profile_gases=vmr_gases,
                                      gas_name_order=gas_name_order)
+
+
+def parse_args(parser=None):
+    if parser is None:
+        parser = argparse.ArgumentParser()
+
+    valid_site_ids = list(tccon_sites.tccon_site_info().keys())
+
+    parser.description = 'Generate .vmr files for input into GGG2019 for use with TCCON retrievals.'
+    parser.add_argument('date_range', type=mod_utils.parse_date_range,
+                        help='The range of dates to generate .vmr files for. May be given as YYYYMMDD-YYYYMMDD, or '
+                             'YYYYMMDD_HH-YYYYMMDD_HH, where the ending date is exclusive. A single date may be given, '
+                             'in which case the ending date is assumed to be one day later.')
+    parser.add_argument('mod_dir', nargs='?', default=None,
+                        help='Directory to read .mod files from. Note that the .mod files must be in this directory, '
+                             'not a subdirectory. If you wish to specify a root directory for files organized by '
+                             '<product>/<site>/vertical, use --mod-root-dir. If neither this nor --mod-root-dir are '
+                             'given, it will use $GGGPATH/models/gnd as the root directory.')
+    parser.add_argument('-r', '--mod-root-dir', help='A root directory to look for .mod files. This directory must be '
+                                                     'organized into subdirectories by <product>/<site>/vertical, e.g. '
+                                                     'fpit/pa/vertical. If an explicit mod_dir is given, this argument '
+                                                     'is not used.')
+    parser.add_argument('-s', '--save-dir', help='Path to save .vmr files to. If not given, defaults to $GGGPATH/vmrs/gnd')
+    parser.add_argument('--site', default='xx', choices=valid_site_ids,
+                        help='Which site to generate priors for. Used to set the lat/lon looked for in the file name. '
+                             'If an explicit lat and lon are given, those override this.')
+    parser.add_argument('--lat', type=float, dest='site_lat', help='Latitude to generate prior for. If given, '
+                                                                   '--lon must be given as well.')
+    parser.add_argument('--lon', type=float, dest='site_lon', help='Longitude to generate prior for. If given, '
+                                                                   '--lat must be given as well.')
+
+
+def cl_driver(date_range, mod_dir=None, mod_root_dir=None, save_dir=None, product='fpit',
+              site_lat=None, site_lon=None, site_abbrev='xx', **kwargs):
+
+    if site_lat is None != site_lon is None:
+        raise TypeError('Both or neither of site_lat and site_lon must be given')
+
+    if mod_dir is None and mod_root_dir is None:
+        mod_root_dir = mod_utils.get_ggg_path(os.path.join('models', 'gnd'), 'mod file directory')
+    if mod_dir is None:
+        mod_dir = os.path.join(mod_root_dir, product, site_abbrev, 'vertical')
+
+    if save_dir is None:
+        save_dir = mod_utils.get_ggg_path(os.path.join('vmrs', 'gnd'), 'save directory')
+
+    date_range = pd.date_range(date_range[0], date_range[1], freq='3H')
+    mod_files = []
+    missing_files = []
+    for d in date_range:
+        if site_lat is None:
+            site_info = tccon_sites.tccon_site_info_for_date(d, site_abbrv=site_abbrev)
+            lat, lon = site_info['lat'], site_info['lon_180']
+        else:
+            lat, lon = site_lat, site_lon
+        this_file = os.path.join(mod_dir, mod_utils.mod_file_name_for_priors(d, site_lat=lat, site_lon_180=lon))
+        if os.path.isfile(this_file):
+            mod_files.append(this_file)
+        else:
+            missing_files.append(this_file)
+
+    if len(missing_files) > 0:
+        print('Could not find the following .mod files required:', file=sys.stderr)
+        print('  * ' + '\n  * '.join(missing_files), file=sys.stderr)
+        print('Either correct the mod path or generate these files', file=sys.stderr)
+        sys.exit(1)
+
+    generate_full_tccon_vmr_file(mod_data=mod_files, utc_offsets=dt.timedelta(0), save_dir=save_dir,
+                                 site_abbrevs=site_abbrev, **kwargs)
+
 
 ###########################################
 # FUNCTIONS FOR GENERATING GRIDDED PRIORS #

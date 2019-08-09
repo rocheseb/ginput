@@ -86,7 +86,7 @@ def tccon_site_info(site_dict_in=None):
     return OrderedDict(site_dict_in)
 
 
-def tccon_site_info_for_date(date):
+def tccon_site_info_for_date(date, site_abbrv=None):
     new_site_dict = tccon_site_info()
     for site, info in new_site_dict.items():
         if 'time_spans' in info:
@@ -95,4 +95,7 @@ def tccon_site_info_for_date(date):
                 if date_range[0] <= date < date_range[1]:
                     info.update(values)
                     break
-    return new_site_dict
+    if site_abbrv is None:
+        return new_site_dict
+    else:
+        return new_site_dict[site_abbrv]

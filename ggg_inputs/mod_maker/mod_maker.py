@@ -86,7 +86,6 @@ The slant .mod files are only generated when the SZA is above 90 degrees.
 There is dictionary of sites with their respective lat/lon in tccon_sites.py, so this works for all TCCON sites, lat/lon values were taken from the wiki page of each site.
 """
 import argparse
-from copy import deepcopy
 import glob
 import os, sys
 import numpy.ma as ma
@@ -1000,23 +999,6 @@ def parse_args(parser=None):
     """
     parse commandline arguments (see code header or README.md)
     """
-    def parse_date(datestr):
-        try:
-            date_out = datetime.strptime(datestr, '%Y%m%d')
-        except ValueError:
-            date_out = datetime.strptime(datestr, '%Y%m%d_%H')
-        return date_out
-
-    def parse_date_range(datestr):
-        dates = datestr.split('-')
-        start_date = parse_date(dates[0])
-        if len(dates) > 1:
-            end_date = parse_date(dates[1])
-        else:
-            end_date = start_date + timedelta(days=1)
-
-        return start_date, end_date
-
     # For Py3 compatibility, convert keys iterator into an explicit list.
     valid_site_ids = list(site_dict.keys())
 
@@ -1028,7 +1010,7 @@ def parse_args(parser=None):
         parser.description = description
         am_i_main = False
 
-    parser.add_argument('date_range', type=parse_date_range,
+    parser.add_argument('date_range', type=mod_utils.parse_date_range,
                         help='The range of dates to generate .mod files for. May be given as YYYYMMDD-YYYYMMDD, or '
                              'YYYYMMDD_HH-YYYYMMDD_HH, where the ending date is exclusive. A single date may be given, '
                              'in which case the ending date is assumed to be one day later.')
@@ -1093,28 +1075,6 @@ def parse_vmr_args(parser):
     parser.epilog = "Defaults have been set to produce the right format of file for TCCON GGG2019 use " \
                     "(--mode=fpit-eta, --include-chem)."
 
-
-def mod_file_name(prefix,date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=True,in_utc=True):
-
-    YYYYMMDD = date.strftime('%Y%m%d')
-    HHMM = date.strftime('%H%M')
-    if in_utc:
-        HHMM += 'Z'
-    if round_latlon:
-        site_lat = round(abs(site_lat))
-        site_lon = round(abs(site_lon_180))
-        latlon_precision = 0
-    else:
-        site_lat = abs(site_lat)
-        site_lon = abs(site_lon_180)
-        latlon_precision = 2
-    if time_step < timedelta(days=1):
-        mod_fmt = '{{prefix}}_{{ymd}}_{{hm}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
-    else:
-        mod_fmt = '{{prefix}}_{{ymd}}_{{lat:0>2.{prec}f}}{{ns:>1}}_{{lon:0>3.{prec}f}}{{ew:>1}}.mod'.format(prec=latlon_precision)
-
-    mod_name = mod_fmt.format(prefix=prefix, ymd=YYYYMMDD, hm=HHMM, lat=site_lat, ns=ns, lon=site_lon, ew=ew)
-    return mod_name
 
 def GEOS_files(GEOS_path, start_date, end_date, chm=False):
 
@@ -1963,7 +1923,7 @@ def mod_maker_new(start_date=None, end_date=None, func_dict=None, GEOS_path=None
             else:
                 ew = 'W'
 
-            mod_name = mod_file_name('FPIT', local_date, timedelta(hours=3), site_lat, site_lon_180, ew, ns, mod_path, round_latlon=not keep_latlon_prec, in_utc=save_in_utc)
+            mod_name = mod_utils.mod_file_name('FPIT', local_date, timedelta(hours=3), site_lat, site_lon_180, ew, ns, mod_path, round_latlon=not keep_latlon_prec, in_utc=save_in_utc)
             if not muted:
                 print('\t\t\t{:<20s} : {}'.format(site_dict[site]['name'], mod_name))
 
@@ -2192,7 +2152,7 @@ def mod_maker(site_abbrv=None,start_date=None,end_date=None,mode=None,locations=
             ew = 'W'
 
         # use the local date for the name of the .mod file
-        mod_name = mod_file_name(prefix,local_date,time_step,site_lat,site_lon_180,ew,ns,mod_path,round_latlon=not keep_latlon_prec)
+        mod_name = mod_utils.mod_file_name(prefix, local_date, time_step, site_lat, site_lon_180, ew, ns, mod_path, round_latlon=not keep_latlon_prec)
         mod_file_path = os.path.join(mod_path,mod_name)
         if not muted:
             print('\n',mod_name)
