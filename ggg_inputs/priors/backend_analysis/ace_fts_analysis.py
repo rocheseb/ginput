@@ -522,7 +522,6 @@ def calc_fraction_remaining_from_acefts(nc_file, gas_name, bc_approach='per-prof
 
         theta = read_ace_theta(nch, qflags)
 
-    import pdb; pdb.set_trace()
     bc_concentrations = get_bc_from_ace(ace_dates, gas_conc, theta, latitude, bc_approach=bc_approach)
     fgas = gas_conc / bc_concentrations.reshape(-1, 1)
     fgas[theta < 380] = np.nan

@@ -2260,7 +2260,6 @@ def driver(date_range, met_path, chem_path=None, save_path=None, keep_latlon_pre
 
     :return: nothing, writes .mod files to the output directory.
     """
-    import pdb; pdb.set_trace()
     start_date, end_date = date_range
 
     if mode in _old_modmaker_modes:
