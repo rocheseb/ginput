@@ -1,5 +1,9 @@
-import ggg_inputs.common_utils.sat_utils
+from ggg_inputs.common_utils import sat_utils
+
+from glob import glob
+import h5py
 import numpy as np
+import pandas as pd
 import os
 import re
 
@@ -206,11 +210,11 @@ def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids, is_go
 
 
 def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_datetime, acos_datetimes):
-    last_datenum = ggg_inputs.common_utils.sat_utils.datetime2datenum(last_datetime)
-    next_datenum = ggg_inputs.common_utils.sat_utils.datetime2datenum(next_datetime)
-    acos_datenums = np.array([ggg_inputs.common_utils.sat_utils.datetime2datenum(d) for d in acos_datetimes])
+    last_datenum = sat_utils.datetime2datenum(last_datetime)
+    next_datenum = sat_utils.datetime2datenum(next_datetime)
+    acos_datenums = np.array([sat_utils.datetime2datenum(d) for d in acos_datetimes])
 
-    weights = ggg_inputs.common_utils.sat_utils.time_weight(acos_datenums, last_datenum, next_datenum)
+    weights = sat_utils.time_weight(acos_datenums, last_datenum, next_datenum)
     weights = weights.reshape(-1, 1)
     # allow broadcasting to expand the weights
     weighted_tccon = dict()
@@ -247,3 +251,85 @@ def match_met_and_prior_by_latlon(acos_met, acos_prior, *additional_dicts):
 
     # Returning it this way allows the extra dicts to get expanded into multiple outputs
     return [acos_prior_matched] + add_dicts_matched
+
+
+def make_mod_h5_file(h5file, mod_dir, last_geos_time=pd.Timestamp('2017-05-14 18:00:00'),
+                     next_geos_time=pd.Timestamp('2017-05-14 21:00:00'), mod_files=None):
+    met_group = 'Meteorology'
+    sounding_group = 'SoundingGeometry'
+
+    prof_group = 'profile'
+    surf_group = 'scalar'
+    file_group = 'file'
+
+    var_dict = {(prof_group, 'EPV'): [met_group, 'epv_profile_met'],
+                (prof_group, 'Temperature'): [met_group, 'temperature_profile_met'],
+                (prof_group, 'Pressure'): [met_group, 'vector_pressure_levels_met'],
+                #'date_strings': [sounding_header, 'sounding_time_string'],
+                (prof_group, 'Height'): [met_group, 'height_profile_met'],
+                (file_group, 'lat'): [sounding_group, 'sounding_latitude'],
+                (file_group, 'lon'): [sounding_group, 'sounding_longitude'],
+                (surf_group, 'TROPPB'): [met_group, 'blended_tropopause_pressure_met'],
+                (surf_group, 'TROPT'): [met_group, 'tropopause_temperature_met'],
+                (surf_group, 'Height'): [met_group, 'gph_met'],
+                #'quality_flags': [sounding_header, 'sounding_qual_flag']
+                }
+
+    var_scaling = {(prof_group, 'Pressure'): 100.0,
+                   #(prof_group, 'EPV'): 1e-6,
+                   (prof_group, 'Height'): 1e3,
+                   (surf_group, 'Height'): 1e3,
+                   (surf_group, 'TROPPB'): 100.0}
+
+    data_dict = {k: dict() for k in (met_group, sounding_group)}
+
+    if mod_files is None:
+        mod_files = sorted(glob(os.path.join(mod_dir, '*1800Z*.mod')))
+    n_files = len(mod_files)
+    dates = pd.date_range(last_geos_time, next_geos_time, periods=n_files)
+    datestrs = aci._convert_to_acos_time_strings(np.array(dates.to_list())).reshape(-1, 1)
+    data_dict[sounding_group]['sounding_time_string'] = datestrs
+    data_dict[sounding_group]['sounding_qual_flag'] = np.zeros(datestrs.shape, dtype=np.int)
+
+    file_number = -1
+    for mfile in mod_files:
+        file_number += 1
+        moddat18 = mod_utils.read_mod_file(mfile)
+        mfile21 = mfile.replace('1800Z', '2100Z')
+        moddat21 = mod_utils.read_mod_file(mfile21)
+
+        w = sat_utils.time_weight_from_datetime(dates[file_number], last_geos_time, next_geos_time)
+
+        for tccon_path, oco_path in var_dict.items():
+            # If on the first file, we need to create the arrays that we'll store the profiles in
+            if file_number == 0:
+                if tccon_path[0] == prof_group:
+                    shape = (n_files, 1, moddat18[tccon_path[0]][tccon_path[1]].size)
+                elif tccon_path[0] in (surf_group, file_group):
+                    shape = (n_files, 1)
+                else:
+                    raise NotImplementedError('No shape defined for {} group'.format(tccon_path[0]))
+                data_dict[oco_path[0]][oco_path[1]] = np.full(shape, aci._fill_val, dtype=np.float)
+
+            # Weight the profiles based on the datetime
+            data18 = moddat18[tccon_path[0]][tccon_path[1]]
+            data21 = moddat21[tccon_path[0]][tccon_path[1]]
+            data = w * data18 + (1 - w) * data21
+            if tccon_path[0] == prof_group:
+                data = np.flipud(data)
+            if tccon_path in var_scaling:
+                data = data * var_scaling[tccon_path]
+
+            data_dict[oco_path[0]][oco_path[1]][file_number, 0] = data
+
+    with h5py.File(h5file, 'w') as f:
+        for group_name, group in data_dict.items():
+            g = f.create_group(group_name)
+            for var_name, var in group.items():
+                if np.issubdtype(var.dtype, np.number):
+                    this_fill = aci._fill_val
+                elif np.issubdtype(var.dtype, np.string_):
+                    this_fill = aci._string_fill
+                else:
+                    raise NotImplementedError('datatype {}'.format(var.dtype))
+                dset = g.create_dataset(name=var_name, data=var, fillvalue=this_fill)

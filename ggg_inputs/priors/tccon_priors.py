@@ -3001,7 +3001,7 @@ def parse_args(parser=None):
 
 def cl_driver(date_range, mod_dir=None, mod_root_dir=None, save_dir=None, product='fpit',
               site_lat=None, site_lon=None, site_abbrev='xx', keep_latlon_prec=False, **kwargs):
-    
+
     if site_lat is None != site_lon is None:
         raise TypeError('Both or neither of site_lat and site_lon must be given')
 
