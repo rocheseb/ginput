@@ -2,6 +2,7 @@ from ggg_inputs.common_utils import sat_utils
 
 from glob import glob
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import os
@@ -18,6 +19,7 @@ met_grp = 'Meteorology'
 sounding_grp = 'SoundingGeometry'
 _acos_prof_var_mapping = {'co2': (priors_grp, 'co2_prior'),
                           'eqlat': (priors_grp, 'equivalent_latitude'),
+                          'strat_age': (priors_grp, 'age_of_air'),
                           'z': (priors_grp, 'altitude'),
                           'lat': (priors_grp, 'sounding_latitude'),
                           'lon': (priors_grp, 'sounding_longitude')}
@@ -29,22 +31,30 @@ _acos_met_var_mapping = {'pv': (met_grp, 'epv_profile_met'),
                          'met_lat': (sounding_grp, 'sounding_latitude'),
                          'met_lon': (sounding_grp, 'sounding_longitude'),
                          'tropp': (met_grp, 'blended_tropopause_pressure_met'),
-                         'tropt': (met_grp, 'tropopause_temperature_met')}
+                         'tropt': (met_grp, 'tropopause_temperature_met'),
+                         'surfz': (met_grp, 'gph_met')}
 _acos_var_conversions = {'co2': 1e6,
+                         'met_z': 1e-3,
+                         'pres': 1e-2,
+                         'tropp': 1e-2,
+                         'surfz': 1e-3,
                          'datetime': aci._convert_acos_time_strings}
 
 
 prof_grp = 'profile'
 scalar_grp = 'scalar'
 file_grp = 'file'
-_tccon_prof_var_mapping = {'co2': (prof_grp, 'co2')}
+_tccon_prof_var_mapping = {'co2': (prof_grp, 'co2'),
+                           'strat_age': (prof_grp, 'strat_age_of_air')}
 _tccon_met_var_mapping = {'eqlat': (prof_grp, 'EqL'),
                           'pv': (prof_grp, 'EPV'),
                           'pres': (prof_grp, 'Pressure'),
                           't': (prof_grp, 'Temperature'),
+                          'theta': (prof_grp, 'PT'),
                           'z': (prof_grp, 'Height'),
                           'tropp': (scalar_grp, 'TROPPB'),
                           'tropt': (scalar_grp, 'TROPT'),
+                          'surfz': (scalar_grp, 'Height'),
                           #'datetime': (file_grp, 'datetime'), # couldn't be weighted
                           'lon': (file_grp, 'lon'),
                           'lat': (file_grp, 'lat')}
@@ -75,6 +85,52 @@ def _finalize_conversion_dict(dict_in):
 
 _acos_var_conversions = _finalize_conversion_dict(_acos_var_conversions)
 _tccon_var_conversions = _finalize_conversion_dict(_tccon_var_conversions)
+
+
+def plot_acos_tccon_comparison(tccon_data, acos_data, tccon_var, acos_var=None, tccon_alt_var='z', acos_alt_var='z',
+                               xquantity='', xunit='', reldiff=False, interp='needed'):
+    fig, axs = plt.subplots(1, 3, sharey=True)
+
+    acos_var = tccon_var if acos_var is None else acos_var
+    tdata = tccon_data[tccon_var].T
+    adata = acos_data[acos_var].T
+    tz = tccon_data[tccon_alt_var].T
+    az = acos_data[acos_alt_var].T
+
+    alts_differ = np.any(np.abs(tz - az) > 0.05)
+    if interp == 'always' or (interp == 'needed' and alts_differ):
+        import pdb; pdb.set_trace()
+        adata_i = np.full_like(tz, np.nan)
+        for i in range(adata.shape[1]):
+            adata_i[:, i] = np.interp(tz[:, i], az[:, i], adata[:, i])
+        adata = adata_i
+        az = tz
+    elif alts_differ:
+        raise NotImplementedError('TCCON and ACOS data on different z-coords')
+
+    if reldiff:
+        diff = (adata - tdata) / tdata * 100
+        xstr = r'%$\Delta$ {}'.format(xquantity)
+    else:
+        diff = adata - tdata
+        xstr = r'$\Delta$ {} ({})'.format(xquantity, xunit)
+
+    axs[0].plot(diff, tz, color='gray', linewidth=0.5)
+    axs[0].plot(np.nanmean(adata - tdata, axis=1), np.nanmean(tz, axis=1), color='k', linewidth=2)
+    axs[0].set_ylabel('Altitude (km)')
+    axs[0].set_xlabel(xstr)
+    axs[0].set_title('Difference (ACOS - TCCON)')
+
+    axs[1].plot(tdata, tz)
+    axs[1].set_xlabel(r'{} ({})'.format(xquantity, xunit))
+    axs[1].set_title('TCCON')
+
+    axs[2].plot(adata, az)
+    axs[2].set_xlabel(r'{} ({})'.format(xquantity, xunit))
+    axs[2].set_title('ACOS')
+
+    fig.set_size_inches(18, 6)
+    return fig, axs
 
 
 def match_acos_tccon_profiles(mod_dir, map_dir, acos_met_file, acos_prof_file):
@@ -108,6 +164,7 @@ def match_acos_tccon_profiles(mod_dir, map_dir, acos_met_file, acos_prof_file):
                                      read_fxn=mod_utils.read_mod_file, var_ids=_tccon_met_var_mapping,
                                      var_conversions=_tccon_var_conversions, acos_datetimes=acos_times,
                                      first_geos_time=first_geos_time, last_geos_time=last_geos_time)
+    tccon_met_data['met_weights'] = tccon_met_data.pop('weights')
     tccon_prof_data = read_tccon_data(first_files=first_map_files, last_files=last_map_files,
                                       read_fxn=mod_utils.read_map_file, var_ids=_tccon_prof_var_mapping,
                                       var_conversions=_tccon_var_conversions, acos_datetimes=acos_times,
@@ -116,8 +173,10 @@ def match_acos_tccon_profiles(mod_dir, map_dir, acos_met_file, acos_prof_file):
     # Last bit: combine the met and prof data to return. Also combine the ACOS indices
     tccon_prof_data.update(tccon_met_data)
     acos_prof_data.update(acos_met_data)
-    acos_inds = {'met': acos_met_inds, 'prior': acos_prof_inds}
-    return tccon_prof_data, acos_prof_data, acos_inds
+    extra_info = {'met': acos_met_inds, 'prior': acos_prof_inds,
+                  'mod_files': [pair for pair in zip(first_mod_files, last_mod_files)],
+                  'map_files': [pair for pair in zip(first_map_files, last_map_files)]}
+    return tccon_prof_data, acos_prof_data, extra_info
 
 
 def _getvar(container, varid):
@@ -161,6 +220,7 @@ def read_acos_var(h5obj, varid, inds=slice(None), is_gosat=False):
             data = var[inds]
     else:
         data = var[inds]
+
     if not np.issubdtype(data.dtype, np.number):
         return data
 
@@ -213,7 +273,7 @@ def read_acos_for_lat_lons(h5obj, lons, lats, varids, var_conversions=dict(), is
 
     for k, v in data.items():
         # Should be 1D vectors
-        data[k] = np.vstack(v)
+        data[k] = np.fliplr(np.vstack(v))
 
     return data, acos_inds
 
@@ -232,17 +292,20 @@ def read_tccon_data(first_files, last_files, read_fxn, var_ids, var_conversions,
         return data_out
 
     final_data = _make_data_dict(var_ids)
-    for firstf, lastf, dtime in zip(first_files, last_files, acos_datetimes):
+    weights = np.full([len(first_files), 1], np.nan)
+    for i, firstf, lastf, dtime in zip(range(len(first_files)), first_files, last_files, acos_datetimes):
         firstdat = get_data(firstf)
         lastdat = get_data(lastf)
 
         w = sat_utils.time_weight_from_datetime(dtime.item(), first_geos_time, last_geos_time)
+        weights[i] = w
         for k in var_ids:
             this_combined_dat = firstdat[k] * w + lastdat[k] * (1 - w)
             final_data[k].append(this_combined_dat)
 
     for k, v in final_data.items():
         final_data[k] = np.vstack(v)
+    final_data['weights'] = weights
 
     return final_data
 
@@ -371,7 +434,7 @@ def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_dateti
 
 
 def make_mod_h5_file(h5file, mod_dir, last_geos_time=pd.Timestamp('2017-05-14 18:00:00'),
-                     next_geos_time=pd.Timestamp('2017-05-14 21:00:00'), mod_files=None):
+                     next_geos_time=pd.Timestamp('2017-05-14 21:00:00'), mod_files=None, dates=None):
     met_group = 'Meteorology'
     sounding_group = 'SoundingGeometry'
 
@@ -403,8 +466,13 @@ def make_mod_h5_file(h5file, mod_dir, last_geos_time=pd.Timestamp('2017-05-14 18
     if mod_files is None:
         mod_files = sorted(glob(os.path.join(mod_dir, '*1800Z*.mod')))
     n_files = len(mod_files)
-    dates = pd.date_range(last_geos_time, next_geos_time, periods=n_files)
-    datestrs = aci._convert_to_acos_time_strings(np.array(dates.to_list())).reshape(-1, 1)
+
+    if dates is None:
+        dates = pd.date_range(last_geos_time, next_geos_time - pd.Timedelta(minutes=1), periods=n_files)
+        dates = np.array(dates.to_list())
+    elif len(dates) != len(mod_files):
+        raise ValueError('Length of dates must equal length of mod_files if both are given.')
+    datestrs = aci._convert_to_acos_time_strings(dates).reshape(-1, 1)
     data_dict[sounding_group]['sounding_time_string'] = datestrs
     data_dict[sounding_group]['sounding_qual_flag'] = np.zeros(datestrs.shape, dtype=np.int)
 
