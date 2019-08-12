@@ -1,4 +1,4 @@
-from ggg_inputs.common_utils import sat_utils
+from ginput.common_utils import sat_utils
 
 from glob import glob
 import h5py

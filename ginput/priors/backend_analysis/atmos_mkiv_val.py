@@ -4,8 +4,8 @@ import os
 import pandas as pd
 
 
-from ggg_inputs.common_utils import mod_utils
-from ggg_inputs.priors.backend_analysis import aircraft_aircore_val as aav
+from ginput.common_utils import mod_utils
+from ginput.priors.backend_analysis import aircraft_aircore_val as aav
 
 
 def make_atmos_occultation_list(atmos_file, list_file):

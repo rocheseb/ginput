@@ -8,8 +8,8 @@ import re
 # Extra analysis package
 from sat_utils import mls
 
-from ggg_inputs.common_utils import mod_utils
-from ggg_inputs.priors.backend_analysis import backend_utils as butils
+from ginput.common_utils import mod_utils
+from ginput.priors.backend_analysis import backend_utils as butils
 
 
 class MLSMatchError(Exception):

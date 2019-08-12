@@ -2415,7 +2415,7 @@ def modify_strat_co(base_co_profile, pres_profile, eqlat_profile, pt_profile, tr
 
     :param excess_co_lut: the path to the lookup table with the excess mesospheric CO. If not given, the standard table
      file included in the repo is used. This file is created with
-     :func:`ggg_inputs.priors.backend_analysis.ace_fts_analysis.make_excess_co_lut`.
+     :func:`ginput.priors.backend_analysis.ace_fts_analysis.make_excess_co_lut`.
     :type excess_co_lut: str
 
     :return: the CO profile with the CO from mesospheric descent added.

@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 import argparse
 
-from ggg_inputs.priors import acos_interface as aci, tccon_priors
-from ggg_inputs.mod_maker import mod_maker
-from ggg_inputs.download import get_GEOS5
+from ginput.priors import acos_interface as aci, tccon_priors
+from ginput.mod_maker import mod_maker
+from ginput.download import get_GEOS5
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Call various pieces of ggg_inputs')
-    subparsers = parser.add_subparsers(help='The following subcommands execute different parts of ggg_inputs')
+    parser = argparse.ArgumentParser(description='Call various pieces of ginput')
+    subparsers = parser.add_subparsers(help='The following subcommands execute different parts of ginput')
 
     oco_parser = subparsers.add_parser('oco', help='Generate .h5 file for input into the OCO algorithm')
     aci.parse_args(oco_parser, oco_or_gosat='oco')
