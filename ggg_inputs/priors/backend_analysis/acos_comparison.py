@@ -13,6 +13,112 @@ from ...common_utils import mod_utils
 _lon_re = re.compile(r'-?\d+\.\d+[WE]')
 _lat_re = re.compile(r'-?\d+\.\d+[NS]')
 
+priors_grp = 'priors'
+met_grp = 'Meteorology'
+sounding_grp = 'SoundingGeometry'
+_acos_prof_var_mapping = {'co2': (priors_grp, 'co2_prior'),
+                          'eqlat': (priors_grp, 'equivalent_latitude'),
+                          'z': (priors_grp, 'altitude'),
+                          'lat': (priors_grp, 'sounding_latitude'),
+                          'lon': (priors_grp, 'sounding_longitude')}
+_acos_met_var_mapping = {'pv': (met_grp, 'epv_profile_met'),
+                         't': (met_grp, 'temperature_profile_met'),
+                         'pres': (met_grp, 'vector_pressure_levels_met'),
+                         'datetime': (sounding_grp, 'sounding_time_string'),
+                         'met_z': (met_grp, 'height_profile_met'),
+                         'met_lat': (sounding_grp, 'sounding_latitude'),
+                         'met_lon': (sounding_grp, 'sounding_longitude'),
+                         'tropp': (met_grp, 'blended_tropopause_pressure_met'),
+                         'tropt': (met_grp, 'tropopause_temperature_met')}
+_acos_var_conversions = {'co2': 1e6,
+                         'datetime': aci._convert_acos_time_strings}
+
+
+prof_grp = 'profile'
+scalar_grp = 'scalar'
+file_grp = 'file'
+_tccon_prof_var_mapping = {'co2': (prof_grp, 'co2')}
+_tccon_met_var_mapping = {'eqlat': (prof_grp, 'EqL'),
+                          'pv': (prof_grp, 'EPV'),
+                          'pres': (prof_grp, 'Pressure'),
+                          't': (prof_grp, 'Temperature'),
+                          'z': (prof_grp, 'Height'),
+                          'tropp': (scalar_grp, 'TROPPB'),
+                          'tropt': (scalar_grp, 'TROPT'),
+                          #'datetime': (file_grp, 'datetime'), # couldn't be weighted
+                          'lon': (file_grp, 'lon'),
+                          'lat': (file_grp, 'lat')}
+_tccon_var_conversions = dict()
+
+_acos_out_vars = [k for k in _acos_prof_var_mapping] + [k for k in _acos_met_var_mapping]
+_acos_out_vars_set = set(_acos_out_vars)
+_tccon_out_vars = [k for k in _tccon_prof_var_mapping] + [k for k in _tccon_met_var_mapping]
+_tccon_out_vars_set = set(_tccon_out_vars)
+
+if len(_acos_out_vars) != len(_acos_out_vars_set):
+    raise ValueError('Duplicate variable name in ACOS met and prof variable mapping')
+elif len(_tccon_out_vars) != len(_tccon_out_vars_set):
+    raise ValueError('Duplicate variable name in TCCON met and prof variable mapping')
+# No test that the same variables are defined in ACOS and TCCON, could be a case where we want an extra variable from
+# one of them.
+
+# Modify the conversion dictionaries so that scaling factors are functions
+def _finalize_conversion_dict(dict_in):
+    dict_out = dict()
+    for k, v in dict_in.items():
+        if isinstance(v, (int, float)):
+            dict_out[k] = lambda x, scale=v: x * scale
+        else:
+            dict_out[k] = v
+
+    return dict_out
+
+_acos_var_conversions = _finalize_conversion_dict(_acos_var_conversions)
+_tccon_var_conversions = _finalize_conversion_dict(_tccon_var_conversions)
+
+
+def match_acos_tccon_profiles(mod_dir, map_dir, acos_met_file, acos_prof_file):
+    # Step 1: find the limits of times in the acos file, use this to determine which GEOS times we need
+    # Step 2: list the .mod files for the first GEOS time, find the corresponding .mod files for the second GEOS time
+    #  and the .map files for both times
+    # Step 3: get the ACOS variables for the lat/lons of the .mod files
+    # Step 4: iterate through the mod/map files, loading the profiles, and weighting by time.
+
+    # Step 1
+    first_geos_time, last_geos_time = _find_acos_time_limits(acos_met_file)
+
+    # Step 2
+    first_mod_files = _list_mod_files_for_time(mod_dir, first_geos_time)
+    last_mod_files = _list_mod_files_for_time(mod_dir, last_geos_time, mod_file_order=first_mod_files)
+    first_map_files = _list_map_files_matching_mod_files(map_dir, first_mod_files)
+    last_map_files = _list_map_files_matching_mod_files(map_dir, last_mod_files)
+
+    # Step 3
+    mod_lons, mod_lats = _extract_modfile_lat_lon(first_mod_files)
+    with h5py.File(acos_met_file, 'r') as f:
+        acos_met_data, acos_met_inds = read_acos_for_lat_lons(f, mod_lons, mod_lats, _acos_met_var_mapping,
+                                                              var_conversions=_acos_var_conversions)
+    with h5py.File(acos_prof_file, 'r') as f:
+        acos_prof_data, acos_prof_inds = read_acos_for_lat_lons(f, mod_lons, mod_lats, _acos_prof_var_mapping,
+                                                                var_conversions=_acos_var_conversions)
+
+    # Step 4
+    acos_times = acos_met_data['datetime']
+    tccon_met_data = read_tccon_data(first_files=first_mod_files, last_files=last_mod_files,
+                                     read_fxn=mod_utils.read_mod_file, var_ids=_tccon_met_var_mapping,
+                                     var_conversions=_tccon_var_conversions, acos_datetimes=acos_times,
+                                     first_geos_time=first_geos_time, last_geos_time=last_geos_time)
+    tccon_prof_data = read_tccon_data(first_files=first_map_files, last_files=last_map_files,
+                                      read_fxn=mod_utils.read_map_file, var_ids=_tccon_prof_var_mapping,
+                                      var_conversions=_tccon_var_conversions, acos_datetimes=acos_times,
+                                      first_geos_time=first_geos_time, last_geos_time=last_geos_time)
+
+    # Last bit: combine the met and prof data to return. Also combine the ACOS indices
+    tccon_prof_data.update(tccon_met_data)
+    acos_prof_data.update(acos_met_data)
+    acos_inds = {'met': acos_met_inds, 'prior': acos_prof_inds}
+    return tccon_prof_data, acos_prof_data, acos_inds
+
 
 def _getvar(container, varid):
     if isinstance(varid, str):
@@ -23,17 +129,8 @@ def _getvar(container, varid):
     return container
 
 
-def iter_varids(varids):
-    for vid in varids:
-        if vid == ('scalar', 'Height'):
-            key = 'SurfAlt'
-        else:
-            key = vid if isinstance(vid, str) else vid[-1]
-        yield vid, key
-
-
 def _make_data_dict(varids):
-    return {k: [] for _, k in iter_varids(varids)}
+    return {k: [] for k in varids}
 
 
 def read_acos_var(h5obj, varid, inds=slice(None), is_gosat=False):
@@ -75,7 +172,7 @@ def read_acos_var(h5obj, varid, inds=slice(None), is_gosat=False):
     return data
 
 
-def read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=False):
+def read_acos_for_lat_lons(h5obj, lons, lats, varids, var_conversions=dict(), is_gosat=False):
     """
     Read variables from an ACOS file for specific lat/lons
 
@@ -86,11 +183,10 @@ def read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=False):
 
     :param lats: a vector of latitudes
 
-    :param varids: a collection of var ids for read_acos_var. Must be a collection of strings or collection of
-     collections.
+    :param varids: a collection of var ids for read_acos_var. Must be a dictionary with the output names as keys and the
+     paths to the datasets in the h5 file as tuples/lists of strings.
 
     :return: a dictionary with the different variables requested concatentated into arrays that are nlevels-by-nvars
-     For any varids that are collections, the last element will be used as the key.
     :rtype: dict
     """
     try:
@@ -109,8 +205,11 @@ def read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=False):
         ind = np.nanargmin((acos_lon - this_lon)**2 + (acos_lat - this_lat)**2)
         ind = np.unravel_index(ind, acos_lon.shape)
         acos_inds.append(ind)
-        for vid, key in iter_varids(varids):
-            data[key].append(read_acos_var(h5obj, vid, inds=ind, is_gosat=is_gosat))
+        for key, vid in varids.items():
+            this_data = read_acos_var(h5obj, vid, inds=ind, is_gosat=is_gosat)
+            if key in var_conversions:
+                this_data = var_conversions[key](this_data)
+            data[key].append(this_data)
 
     for k, v in data.items():
         # Should be 1D vectors
@@ -119,97 +218,144 @@ def read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=False):
     return data, acos_inds
 
 
-def read_acos_matching_mod_files(h5obj, mod_files, varids, is_gosat=False):
-    def extract_mod_lon_lat(filename):
-        lonstr = _lon_re.search(filename).group()
-        lon = mod_utils.format_lon(lonstr)
-        latstr = _lat_re.search(filename).group()
-        lat = mod_utils.format_lat(latstr)
-        return lon, lat
+def read_tccon_data(first_files, last_files, read_fxn, var_ids, var_conversions,
+                    acos_datetimes, first_geos_time, last_geos_time):
+    def get_data(f):
+        data_in = read_fxn(f)
+        data_out = dict()
 
-    lons, lats = zip(*[extract_mod_lon_lat(os.path.basename(f)) for f in mod_files])
-    return read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=is_gosat)
+        for k, varid in var_ids.items():
+            this_data = _getvar(data_in, varid)
+            if k in var_conversions:
+                this_data = var_conversions[k](this_data)
+            data_out[k] = this_data
+        return data_out
 
+    final_data = _make_data_dict(var_ids)
+    for firstf, lastf, dtime in zip(first_files, last_files, acos_datetimes):
+        firstdat = get_data(firstf)
+        lastdat = get_data(lastf)
 
-def read_acos_matching_map_files(h5obj, map_files, varids, is_gosat=False):
-    def extract_map_lon_lat(filepath):
-        loc_dir = filepath.split(os.path.sep)[-2]
-        lonstr = _lon_re.search(loc_dir).group()
-        lon = mod_utils.format_lon(lonstr)
-        latstr = _lat_re.search(loc_dir).group()
-        lat = mod_utils.format_lat(latstr)
-        return lon, lat
+        w = sat_utils.time_weight_from_datetime(dtime.item(), first_geos_time, last_geos_time)
+        for k in var_ids:
+            this_combined_dat = firstdat[k] * w + lastdat[k] * (1 - w)
+            final_data[k].append(this_combined_dat)
 
-    lons, lats = zip(*[extract_map_lon_lat(f) for f in map_files])
-    return read_acos_for_lat_lons(h5obj, lons, lats, varids, is_gosat=is_gosat)
+    for k, v in final_data.items():
+        final_data[k] = np.vstack(v)
 
-
-def _read_concat_tccon(tccon_files, reader_fxn, varids):
-    data = _make_data_dict(varids)
-    for filename in tccon_files:
-        this_data = reader_fxn(filename, as_dataframes=False)
-        for vid, key in iter_varids(varids):
-            data[key].append(_getvar(this_data, vid))
-
-    for k, v in data.items():
-        data[k] = np.vstack(v)
-
-    return data
+    return final_data
 
 
-def pair_acos_tccon_vectors(h5obj, tccon_files, tccon_varids, acos_varids, is_gosat=False):
+def _find_acos_time_limits(acos_met_file):
+    """
+    Find the GEOS times (3 hr intervals) that bookend the ACOS file
 
-    if tccon_files[0].endswith('.mod'):
-        acos_read_fxn = read_acos_matching_mod_files
-        tccon_read_fxn = mod_utils.read_mod_file
-        tccon_alt_varid = ('profile', 'Height')
-    elif tccon_files[0].endswith('.map'):
-        acos_read_fxn = read_acos_matching_map_files
-        tccon_read_fxn = mod_utils.read_map_file
-        tccon_alt_varid = ('profile', 'Height')
+    :param acos_met_file: path to the ACOS met resampler file
+    :type acos_met_file: str
+
+    :return: the surrounding GEOS times
+    :rtype: :class:`pandas.Timestamp`
+    """
+    def to_3h(dt):
+        hr = dt.hour // 3 * 3
+        return pd.Timestamp(dt.year, dt.month, dt.day, hr)
+
+    with h5py.File(acos_met_file, 'r') as f:
+        datestrs = read_acos_var(f, ['SoundingGeometry', 'sounding_time_string'])
+
+    acos_datetimes = aci._convert_acos_time_strings(datestrs)
+    # Fill values sometimes sneak through as times before 1993. Eliminate those.
+    acos_datetimes = acos_datetimes[acos_datetimes > pd.Timestamp(1993, 1, 1)]
+    start_date = np.min(acos_datetimes)
+    end_date = np.max(acos_datetimes)
+    start_date = to_3h(start_date)
+    end_date = to_3h(end_date)
+    if start_date != end_date:
+        raise NotImplementedError('Not set up to handle ACOS files that cross a GEOS time')
+    end_date += pd.Timedelta(hours=3)
+    return start_date, end_date
+
+
+def _list_mod_files_for_time(mod_dir, datetime, mod_file_order=None):
+    """
+    List all .mod files for a specific time.
+
+    :param mod_dir: Directory containing the .mod files
+    :type mod_dir: str
+
+    :param datetime: the date/time to find files for
+    :type datetime: datetime-like
+
+    :param mod_file_order: if given, must be a list of mod files for a different datetime that indicates the order that
+     the mod file's lat/lon should follow.
+    :type mod_file_order: list(str)
+
+    :return: list of .mod files
+    :rtype: list(str)
+    """
+    if mod_file_order is None:
+        pattern = datetime.strftime('%Y%m%d_%H%MZ')
+        pattern = '*{}*.mod'.format(pattern)
+        return sorted(glob(os.path.join(mod_dir, pattern)))
+
     else:
-        ext = os.path.splitext(tccon_files[0])[1]
-        raise ValueError('Do not know how to handle tccon files with extension {}'.format(ext))
+        # Given an existing list of .mod files, find .mod files for a different date/time but for the same lat/lons.
+        timestr = datetime.strftime('%Y%m%d_%H%MZ')
+        mod_files = [re.sub(r'\d{8}_\d\d00Z', timestr, f) for f in mod_file_order]
+        missing_files = [f for f in mod_files if not os.path.isfile(f)]
+        if len(missing_files) > 0:
+            raise IOError('Missing {} mod files:\n{}'.format(len(missing_files), '\n'.join(missing_files)))
+        return mod_files
 
-    # We always need altitude for the acos and tccon data.
-    if 'priors' in h5obj.keys():
-        acos_alt_varid = ('priors', 'altitude')
-        acos_alt_scale = 1.0
-    else:
-        acos_alt_varid = ('Meteorology', 'height_profile_met')
-        acos_alt_scale = 1e-3  # m to km
-    tccon_varids = list(tccon_varids)
-    if tccon_alt_varid not in tccon_varids:
-        tccon_varids.append(tccon_alt_varid)
 
-    acos_varids = list(acos_varids)
-    if acos_alt_varid not in acos_varids:
-        acos_varids.append(acos_alt_varid)
+def _extract_modfile_lat_lon(mod_files):
+    lats = []
+    lons = []
+    for modf in mod_files:
+        modf = os.path.basename(modf)
+        lats.append(mod_utils.find_lat_substring(modf, to_float=True))
+        lons.append(mod_utils.find_lon_substring(modf, to_float=True))
 
-    acos_data, acos_inds = acos_read_fxn(h5obj, tccon_files, acos_varids, is_gosat=is_gosat)
-    tccon_data = _read_concat_tccon(tccon_files, tccon_read_fxn, tccon_varids)
+    return np.array(lons), np.array(lats)
 
-    # Now handle interpolating the ACOS data to TCCON altitudes
-    acos_height_key = acos_alt_varid[-1]
-    acos_height = acos_data[acos_height_key] * acos_alt_scale
-    tccon_height_key = tccon_alt_varid[-1]
-    tccon_height = tccon_data[tccon_height_key]
 
-    for acos_key, acos_arr in acos_data.items():
-        if acos_arr.shape[1] == 1:
-            # 2D var (not profile). Do not interpolate
-            continue
+def _list_map_files_matching_mod_files(map_dir, mod_files):
+    """
+    List .map files that correspond to the given .mod files
 
-        new_acos_arr = np.full_like(tccon_height, np.nan)
-        for i in range(tccon_height.shape[0]):
-            new_acos_arr[i, :] = np.interp(tccon_height[i, :], np.flipud(acos_height[i, :]), np.flipud(acos_arr[i, :]))
+    :param map_dir: top directory for the map files, should have subdirectories by date and lat/lon
+    :type map_dir: str
 
-        acos_data[acos_key] = new_acos_arr
+    :param mod_files: list of .mod files to match .map files for
+    :type mod_files: list(str)
 
-    return acos_data, tccon_data, acos_inds
+    :return: list of .map files, in the same order (by time/lat/lon) as the given .mod files
+    :rtype: list(str)
+    """
+    map_files = []
+    missing_files = []
+    for modf in mod_files:
+        modf = os.path.basename(modf)
+        mod_datetime = mod_utils.find_datetime_substring(modf, out_type=pd.Timestamp)
+        mod_lon = mod_utils.find_lon_substring(modf, to_float=False)
+        mod_lat = mod_utils.find_lat_substring(modf, to_float=False)
+
+        map_subdir = '{date}_{lon}_{lat}'.format(date=mod_datetime.strftime('%Y%m%d'), lon=mod_lon, lat=mod_lat)
+        map_fname = mod_utils.map_file_name('xx', mod_utils.format_lat(mod_lat), mod_datetime)
+        map_fullfile = os.path.join(map_dir, map_subdir, map_fname)
+        if not os.path.isfile(map_fullfile):
+            missing_files.append('{} (for {})'.format(map_fullfile, modf))
+        map_files.append(map_fullfile)
+
+    if len(missing_files) > 0:
+        raise IOError('Could not find {} .map files:\n{}'.format(len(missing_files), '\n'.join(missing_files)))
+
+    return map_files
 
 
 def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_datetime, acos_datetimes):
+    ## DEPRECATED ##
     last_datenum = sat_utils.datetime2datenum(last_datetime)
     next_datenum = sat_utils.datetime2datenum(next_datetime)
     acos_datenums = np.array([sat_utils.datetime2datenum(d) for d in acos_datetimes])
@@ -222,35 +368,6 @@ def weight_tccon_vars_by_time(last_tccon, next_tccon, last_datetime, next_dateti
         weighted_tccon[k] = last_tccon[k] * weights + next_tccon[k] * (1 - weights)
 
     return weighted_tccon
-
-
-def match_met_and_prior_by_latlon(acos_met, acos_prior, *additional_dicts):
-    lon_key = 'sounding_longitude'
-    lat_key = 'sounding_latitude'
-    if lon_key not in acos_met or lon_key not in acos_prior:
-        raise ValueError('Both dicts must contain the key "sounding_longitude"')
-    elif lat_key not in acos_met or lat_key not in acos_prior:
-        raise ValueError('Both dicts must contain the key "sounding_latitude"')
-
-    acos_prior_matched = {k: np.full_like(v, np.nan) for k, v in acos_prior.items()}
-    add_dicts_matched = [{k: np.full_like(v, np.nan) for k, v in this_dict.items()} for this_dict in additional_dicts]
-    # Loop over the lat/lon values and find the corresponding index in the prior, then copy that value (or profile)
-    # into the new matched array
-    prior_lon = acos_prior[lon_key]
-    prior_lat = acos_prior[lat_key]
-    met_lon = acos_met[lon_key]
-    met_lat = acos_met[lat_key]
-
-    for new_ind, (lon, lat) in enumerate(zip(met_lon, met_lat)):
-        old_ind = np.nanargmin((prior_lon - lon)**2 + (prior_lat - lat)**2)
-        for key in acos_prior.keys():
-            acos_prior_matched[key][new_ind] = acos_prior[key][old_ind]
-        for new_dict, old_dict in zip(add_dicts_matched, additional_dicts):
-            for key in new_dict.keys():
-                new_dict[key][new_ind] = old_dict[key][old_ind]
-
-    # Returning it this way allows the extra dicts to get expanded into multiple outputs
-    return [acos_prior_matched] + add_dicts_matched
 
 
 def make_mod_h5_file(h5file, mod_dir, last_geos_time=pd.Timestamp('2017-05-14 18:00:00'),
